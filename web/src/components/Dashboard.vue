@@ -1016,6 +1016,12 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
           <div class="state-cell" :title="statePhrase(r.state)">
             <el-tag size="small" disable-transitions :type="tagType(stateTagClass(r.state))"
                     :effect="tagEffect(stateTagClass(r.state))">{{ stateLabel(r.state) }}</el-tag>
+            <!-- 2026-09-22：今日抓鬼已满/不可用（服务端 task_limited 判满）→ 已转野外游荡，
+                 次日次数重置后由中控重新派抓鬼。标记来自 status.ghost_done_today（跨日自动消失）。 -->
+            <el-tag v-if="r.ghost_done_today" size="small" type="warning" effect="dark" disable-transitions
+                    title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
+              🈵 已抓满
+            </el-tag>
             <el-tag v-if="isStuck(r)" size="small" type="danger" effect="dark" disable-transitions :title="r.err_msg || ''">
               {{ r.err_code }}<template v-if="r.err_repeat > 1">×{{ r.err_repeat }}</template>
             </el-tag>

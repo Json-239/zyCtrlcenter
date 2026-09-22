@@ -22,6 +22,10 @@ type Robot struct {
 	TaskIndex int    `json:"task_index"`
 	Done      int    `json:"done"`
 	ChainDone bool   `json:"chain_done"`
+	// GhostDoneToday 今天抓鬼已满/不可用（面板标记；跨日自动 false）。
+	// 由 Snapshot() 从 ghostUnavail 表填入 —— 不存 robot 行：行会被 removeAccount
+	// 删掉、标记会随之丢失（2026-09-22 踩过坑）。
+	GhostDoneToday bool `json:"ghost_done_today,omitempty"`
 	RoleName  string `json:"role_name,omitempty"`
 	Level     int    `json:"level"`
 	// LevelPending / LevelPendingN 等级"大幅回退"待确认（连续 LevelPendingN 次上报同一新值才真切换，
@@ -231,9 +235,13 @@ func (s *State) Remove(account string) {
 func (s *State) Snapshot() []Robot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	today := time.Now().Format("20060102")
 	out := make([]Robot, 0, len(s.robots))
 	for _, r := range s.robots {
-		out = append(out, *r)
+		cp := *r
+		// 面板标记：今天抓鬼已满/不可用（同一把锁内查 ghostUnavail，不二次加锁）
+		cp.GhostDoneToday = s.ghostUnavail[cp.Account] == today
+		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
 	return out
