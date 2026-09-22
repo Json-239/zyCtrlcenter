@@ -1068,8 +1068,15 @@ const headline = computed(() => {
 
 /* 固定列（操作）用 position:sticky + background:inherit，而全局把 --el-table-tr-bg-color
    设成了 transparent → 横向滚动时右侧列会从固定列底下透出来。
-   把表格行底色设成与卡片一致的实色即可（观感不变，斑马纹/悬停仍由 Element 自己的规则覆盖）。 */
-.pool-table { --el-table-tr-bg-color: var(--panel); }
+   把表格行底色设成与卡片一致的实色即可（观感不变，斑马纹/悬停仍由 Element 自己的规则覆盖）。
+   注意：必须写成 `.pool-table.el-table`——全局那条 `html.dark .el-table` 的特异性更高，
+   只写 `.pool-table` 会被压过去，变量改了不生效。 */
+.pool-table.el-table {
+  --el-table-tr-bg-color: var(--panel);
+  /* 悬停底色从 rgba(76,141,255,.08) 换成等效实色 #1c2a46：观感一样，
+     但固定列是 sticky，半透明底会让下面的列从它底下透出来 */
+  --el-table-row-hover-bg-color: #1c2a46;
+}
 /* 表头行本身没有底色，固定表头要单独给（选择器要比 Element 的固定列规则更具体） */
 :deep(.el-table__header-wrapper tr th.el-table-fixed-column--right) { background-color: var(--el-table-header-bg-color); }
 
