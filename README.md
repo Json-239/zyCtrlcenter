@@ -7,28 +7,42 @@
 > 本项目只保留**基础设施与测试框架**，业务模块（账号库/定时编排/游荡/抓鬼资格…）由使用方按需扩展，
 > 对照与扩展方式见 [与参考实现对照](docs/06-参考/与参考实现对照.md)、[扩展指南](docs/02-架构/扩展指南.md)。
 
-## 快速开始
+## 快速开始（clone 后 3 步跑起来）
+
+> 前提：已安装 **Go 1.22+** 与 **Node.js（含 npm，首次构建面板需要）**。
+> 面板由中控直接托管，**不需要**再单独开 `npm run dev`。
 
 ```powershell
-# 1) 启动中控（HTTP API :28082，控制通道 :27200；默认不接管机器人进程）
-run_ctrlcenter.bat
-#    需要中控拉起机器人：run_ctrlcenter.bat --auto-robot [--kill-robots]
+# 1) 取代码
+git clone <仓库地址>; cd zyCtrlcenter
 
-# 2) 启动前端面板（首次 npm install）
-cd web; npm install; npm run dev        # http://localhost:5273
+# 2) 一键启动（构建面板 web/dist → 编译中控 → 启动）
+start.bat                                        # Windows
+./start.sh                                       # macOS / Linux / Git Bash（首次 chmod +x start.sh）
 
-# 3) 机器人端 config.py 的 ctrl_server_ip/port 指向本机 27200，启动机器人即可上线
+# 3) 浏览器打开面板
+#    http://127.0.0.1:28082/
 ```
+
+常用开关：`--skip-web` 跳过面板构建（用已有 `web/dist`）、`--force-web` 强制重建前端、
+`--restart` 先结束已在运行的中控；其余参数原样透传给中控（如 `--auto-robot [--kill-robots]`、
+`--web-port/--ctrl-port/--data-dir/--deploy/--web-dist`）。
+
+- **前端开发模式**（改前端源码用）：`cd web; npm install; npm run dev` → http://localhost:5273
+  （vite proxy 把 `/api`、`/ws` 转到 28082）
+- **机器人端需自备**（`deploy/` 不入库）：机器人 `config.py` 的 `ctrl_server_ip/port` 指向本机 **27200**；
+  或用 `--deploy <已有部署目录>` / 环境变量 `ZYROBOT_DEPLOY` 指定（目录不存在时**不会**传该参数，只提示）
+- 面板未构建时 `GET /` 仍只返回 JSON 提示（并给出一键脚本指引）；`--web-dist <目录>` 可自定义产物目录
 
 ## 端口（与参考项目错开）
 
 | 端口 | 用途 |
 |---|---|
-| **28082** | 中控 HTTP API + WebSocket（`GET /` 只返回 JSON 提示） |
+| **28082** | 中控 HTTP API + WebSocket；`GET /` 在 `web/dist` 存在时**直接返回面板**，否则返回 JSON 提示 |
 | **27200** | 机器人控制通道（TCP JSON-lines，单连接） |
-| **5273** | 前端 dev server（vite proxy `/api`、`/ws` → 28082） |
+| **5273** | 前端 dev server（仅开发模式需要；vite proxy `/api`、`/ws` → 28082） |
 
-可用 `--web-port` / `--ctrl-port` 覆盖；多开隔离见 [部署与启动](docs/05-运维/部署与启动.md) §5。
+可用 `--web-port` / `--ctrl-port` / `--web-dist` 覆盖；多开隔离见 [部署与启动](docs/05-运维/部署与启动.md) §5。
 
 ## 能力范围（骨架层）
 
@@ -52,8 +66,8 @@ cd web; npm install; npm run dev        # http://localhost:5273
 - **进程管理**：单机器人进程按需拉起/停止/重启（默认不动外部进程）。
 - **测试框架**：`test/` 目录约定 + 共享基座 + 真实报文夹具（provenance 强制校验）+ 每模块 README + 一键运行。
 
-**不做**：业务决策（换号/冷却/资格/补位）、数据库、链数据生产、自动复制部署目录、HTML 面板托管
-—— 见 [项目简介](docs/01-总览/项目简介.md) §边界。
+**不做**：业务决策（换号/冷却/资格/补位）、数据库、链数据生产、自动复制部署目录
+—— 见 [项目简介](docs/01-总览/项目简介.md) §边界。（面板静态托管已支持：`web/dist` 存在时由中控直接服务。）
 
 ## 目录结构（简）
 
@@ -66,8 +80,9 @@ zyCtrlcenter/
 ├── docs/                  文档库（唯一入口 docs/README.md）
 ├── data/                  运行时数据（data/chains 为可选资产，随项目入库）
 ├── logs/                  应用日志（不入库）
-├── web/                   前端面板（Vue3 + Vite）
-├── run_ctrlcenter.bat     编译 + 启动
+├── web/                   前端面板（Vue3 + Vite；web/dist 为构建产物，不入库）
+├── start.bat / start.sh   ★ 一键启动（构建面板 → 编译中控 → 运行）
+├── run_ctrlcenter.bat     仅编译 + 启动（不含前端构建；同一套参数口径）
 └── run_tests.bat          一键测试（vet + test + 可选 race）
 ```
 

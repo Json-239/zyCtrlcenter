@@ -2,7 +2,8 @@
 //
 // 路由总表（单一事实源见 docs/03-协议/HTTP-API.md）：
 //
-//	GET  /                    入口提示
+//	GET  /                    入口提示；web/dist 存在时直接返回面板首页（中控托管前端）
+//	GET  /*（非 /api、/ws）    web/dist 静态资源，未命中回落 index.html（SPA 前端路由）
 //	GET  /api/status          机器人/通道/进程状态总览（含多区列表与当前区）
 //	GET  /api/chains          链列表（文件驱动）+ 指定链详情 ?id=<文件名>
 //	GET  /api/modules         模块地图（注册表 + 最近一次测试报告）
@@ -37,9 +38,13 @@
 //	POST /api/autotask/start  启动/改参数某套定时任务（可选鉴权）
 //	POST /api/autotask/stop   停止某套定时任务（可选鉴权）
 //	POST /api/autotask/run    立即跑一轮（可选鉴权）
-//	POST /api/random_walk     下发游荡（目标图 + 链载荷；可选鉴权）
+//	POST /api/random_walk     下发游荡（目标图/随机图 + 白名单 + 档位 + 限时；可选鉴权）
 //	POST /api/random_walk/stop    停止游荡（可选鉴权）
+//	GET  /api/roampool        游荡池 keeper 状态（在游荡/空闲/任务池缺口/最近动作）
+//	POST /api/roampool        设置游荡池参数（enabled/target/interval_sec/max_step/minutes/balance/maps…，可选鉴权）
 //	POST /api/reghost/cancel  取消某个号的卡死自动重登恢复（可选鉴权）
+//	GET  /api/waterline       在线水位保持器状态（当前/目标/差值/来源/待下线；面板少一次请求）
+//	POST /api/waterline       设置水位参数（enabled/target/dead_zone/max_step/interval_sec 等，可选鉴权）
 //	GET  /ws                  实时事件推送（WebSocket）
 package api
 
@@ -59,9 +64,12 @@ import (
 	"zyctrlcenter/internal/services/accounts"
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/event"
+	"zyctrlcenter/internal/services/livecount"
 	"zyctrlcenter/internal/services/process"
 	"zyctrlcenter/internal/services/reghost"
 	"zyctrlcenter/internal/services/restorer"
+	"zyctrlcenter/internal/services/roampool"
+	"zyctrlcenter/internal/services/waterline"
 	"zyctrlcenter/internal/services/zones"
 	"zyctrlcenter/internal/state"
 	"zyctrlcenter/internal/taskname"
@@ -88,6 +96,15 @@ type Deps struct {
 	AutoTask *autotask.Runner
 	// Reghost 卡死自动重登恢复（可为 nil；main 用 ReghostDeps 装配）
 	Reghost *reghost.Runner
+	// Waterline 在线人数水位保持器（可为 nil；main 用 WaterlineDeps 装配 + go Start(ctx)）
+	Waterline *waterline.Keeper
+	// Roampool 游荡池 keeper（可为 nil；main 用 RoampoolDeps 装配 + go Start(ctx)）。
+	// 职责：任务池缺人时回收游荡号、余量号按图均匀派游荡；默认 enabled=false（参数落盘 data/roampool.json）。
+	Roampool *roampool.Keeper
+	// LiveCount 「服务端在线数」直连数据源（可为 nil；main 装配 + go Start(ctx)）。
+	// 启用且读到数时，/api/status.svr_online 与水位保持器优先用它（source=svr_provider），
+	// 失败/过期回落到机器人 @online 回执（source=svr）→ 本地握手数。
+	LiveCount *livecount.Provider
 	// Payloads 链数据载荷提供者（可为 nil：按 Cfg 懒建。与 restorer 共用同一份缓存时显式注入）
 	Payloads *Payloads
 	Events   *event.Handler
@@ -101,10 +118,14 @@ type API struct {
 	payloadOnce sync.Once
 	// hatch 孵化会话记账（到期收工/完成清理；见 internal/api/hatch.go）。
 	hatch *hatchSessions
+	// throttle 注册自适应限速器（进程内一份；见 handlers_create.go）。
+	throttle *CreateThrottle
 }
 
 // New 创建 API。
-func New(d Deps) *API { return &API{Deps: d, hatch: newHatchSessions()} }
+func New(d Deps) *API {
+	return &API{Deps: d, hatch: newHatchSessions(), throttle: NewCreateThrottle(createRateConfigOf(d.Cfg))}
+}
 
 // chainPayloads 取载荷提供者（未显式注入时按 Cfg 懒建，测试/嵌入式用法不必装配）。
 func (a *API) chainPayloads() *Payloads {
@@ -118,8 +139,8 @@ func (a *API) chainPayloads() *Payloads {
 
 // Register 注册全部路由。
 func (a *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /{$}", a.handleIndex) // 仅精确匹配 "/"
-	mux.HandleFunc("/", a.handleNotFound)     // 其余路径统一 404 JSON
+	mux.HandleFunc("GET /{$}", a.handleRoot) // "/"：web/dist 存在 → 面板首页；否则 JSON 入口提示
+	mux.HandleFunc("/", a.handleWebFallback) // 其余路径：非 /api、/ws 的 GET → 静态资源（SPA 回落）；否则 404 JSON
 	mux.HandleFunc("GET /api/status", a.handleStatus)
 	mux.HandleFunc("GET /api/chains", a.handleChains)
 	mux.HandleFunc("GET /api/modules", a.handleModules) // 只读：模块地图（read 接口不鉴权）
@@ -145,9 +166,18 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/autotask/stop", a.requireToken(a.handleAutoTaskStop))
 	mux.HandleFunc("POST /api/autotask/run", a.requireToken(a.handleAutoTaskRun))
 	// 游荡（通用入口：孵化去半月岛 / 其它巡游图）——命令带链载荷，机器人端 random_walk.py 执行
+	// mapid=数字(指定图) 或 "random"(随机图)；maps=白名单；mode=档位；minutes=限时
 	mux.HandleFunc("POST /api/random_walk", a.requireToken(a.handleRandomWalk))
 	mux.HandleFunc("POST /api/random_walk/stop", a.requireToken(a.handleRandomWalkStop))
+	// 游荡池 keeper（任务池缺人→回收游荡号；余量→按图均匀派游荡；默认关）
+	mux.HandleFunc("GET /api/roampool", a.handleRoampoolGet)
+	mux.HandleFunc("POST /api/roampool", a.requireToken(a.handleRoampoolPost))
 	mux.HandleFunc("POST /api/reghost/cancel", a.requireToken(a.handleRegHostCancel))
+	// 在线水位保持器（当前区在线人数维持在目标附近：不足补号/超出压号；默认关）
+	mux.HandleFunc("GET /api/livecount", a.handleLiveCountGet)
+	mux.HandleFunc("POST /api/livecount", a.requireToken(a.handleLiveCountSet))
+	mux.HandleFunc("GET /api/waterline", a.handleWaterlineGet)
+	mux.HandleFunc("POST /api/waterline", a.requireToken(a.handleWaterlinePost))
 	mux.HandleFunc("GET /api/protocols", a.handleProtocols)
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("POST /api/config/switch", a.handleConfigSwitch)

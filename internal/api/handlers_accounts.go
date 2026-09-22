@@ -241,8 +241,7 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 		}
 	}
 	skipped := []string{}
-	skippedNoPwd := []string{} // 库里没密码的号（不拿"统一密码"去试）
-	if len(accounts) == 0 {    // 自动选号
+	if len(accounts) == 0 { // 自动选号
 		accounts = a.Accounts.Pick(gameAddr, limit, onlyUsable, online)
 	} else { // 显式给号：过滤掉已在线
 		kept := make([]string, 0, len(accounts))
@@ -261,36 +260,8 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 		return
 	}
 
-	sent, chunks := 0, 0
-	for start := 0; start < len(accounts); start += chunk {
-		end := start + chunk
-		if end > len(accounts) {
-			end = len(accounts)
-		}
-		batch := accounts[start:end]
-		payload := make([]any, 0, len(batch))
-		for _, n := range batch {
-			// 密码只从账号库按区取（没有统一密码）；取不到就跳过并记下来
-			pwd, ok := a.Accounts.PasswordFor(n, gameAddr)
-			if !ok {
-				skippedNoPwd = append(skippedNoPwd, n)
-				continue
-			}
-			payload = append(payload, []string{n, pwd})
-		}
-		if len(payload) == 0 {
-			continue
-		}
-		ok := a.Events.SendCmd(map[string]any{
-			"cmd": "robot_manage", "action": "add", "accounts": payload}, "batch_add")
-		if ok {
-			sent += len(batch)
-		}
-		chunks++
-		if end < len(accounts) && interval > 0 {
-			time.Sleep(time.Duration(interval) * time.Millisecond)
-		}
-	}
+	sentAccounts, chunks, skippedNoPwd := a.sendOnlineChunks(accounts, gameAddr, chunk, interval, "batch_add")
+	sent := len(sentAccounts)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_batch", "sub": "online",
 		"zone": zoneArg, "requested": len(accounts), "sent": sent, "chunks": chunks,
 		"interval_ms": interval})
@@ -312,6 +283,45 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 	})
 }
 
+// sendOnlineChunks 分批下发 robot_manage add（**批量上线/定时任务/水位保持共用这一条通路**）。
+//
+// 密码只从账号库按区取（没有统一密码）；库里没密码的号跳过并记进 noPwd。
+// 返回：sent = 实际进载荷并成功下发的账号（顺序同入参）、chunks = 下发批数、noPwd = 被跳过的号。
+func (a *API) sendOnlineChunks(accounts []string, gameAddr string, chunk, interval int, tag string) (sent []string, chunks int, noPwd []string) {
+	if chunk <= 0 {
+		chunk = 10
+	}
+	sent = make([]string, 0, len(accounts))
+	for start := 0; start < len(accounts); start += chunk {
+		end := start + chunk
+		if end > len(accounts) {
+			end = len(accounts)
+		}
+		batch := accounts[start:end]
+		payload := make([]any, 0, len(batch))
+		for _, n := range batch {
+			pwd, ok := a.Accounts.PasswordFor(n, gameAddr)
+			if !ok {
+				noPwd = append(noPwd, n)
+				continue
+			}
+			payload = append(payload, []string{n, pwd})
+		}
+		if len(payload) == 0 {
+			continue
+		}
+		if a.Events.SendCmd(map[string]any{
+			"cmd": "robot_manage", "action": "add", "accounts": payload}, tag) {
+			sent = append(sent, batch...)
+		}
+		chunks++
+		if end < len(accounts) && interval > 0 {
+			time.Sleep(time.Duration(interval) * time.Millisecond)
+		}
+	}
+	return sent, chunks, noPwd
+}
+
 // batchOffline 批量下线：robot_manage remove + 本地标记移除（防心跳复活）。
 func (a *API) batchOffline(w http.ResponseWriter, accounts []string, gameAddr string, chunk, interval int) {
 	if len(accounts) == 0 {
@@ -325,27 +335,8 @@ func (a *API) batchOffline(w http.ResponseWriter, accounts []string, gameAddr st
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "没有在线账号可下线"})
 		return
 	}
-	for _, n := range accounts {
-		a.St.MarkRemoved(n)
-		a.St.Remove(n)
-	}
-	sent, chunks := 0, 0
-	for start := 0; start < len(accounts); start += chunk {
-		end := start + chunk
-		if end > len(accounts) {
-			end = len(accounts)
-		}
-		batch := accounts[start:end]
-		ok := a.Events.SendCmd(map[string]any{
-			"cmd": "robot_manage", "action": "remove", "accounts": batch}, "batch_remove")
-		if ok {
-			sent += len(batch)
-		}
-		chunks++
-		if end < len(accounts) && interval > 0 {
-			time.Sleep(time.Duration(interval) * time.Millisecond)
-		}
-	}
+	sentAccounts, chunks := a.sendOfflineChunks(accounts, chunk, interval, "batch_remove")
+	sent := len(sentAccounts)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_batch", "sub": "offline",
 		"zone": gameAddr, "requested": len(accounts), "sent": sent, "chunks": chunks})
 	msg := "已分 " + itoa(chunks) + " 批下发下线（" + itoa(sent) + "/" + itoa(len(accounts)) + " 个）"
@@ -356,6 +347,37 @@ func (a *API) batchOffline(w http.ResponseWriter, accounts []string, gameAddr st
 		"ok": sent > 0, "msg": msg, "requested": len(accounts), "sent": sent,
 		"chunks": chunks, "accounts": accounts,
 	})
+}
+
+// sendOfflineChunks 分批下发 robot_manage remove（**批量下线/水位保持共用这一条通路**）。
+//
+// 先本地标记移除 + 删行（防心跳复活），再分批下发（每批之间留 interval，避免下线风暴）。
+// 返回实际下发成功的账号与批数。
+func (a *API) sendOfflineChunks(accounts []string, chunk, interval int, tag string) (sent []string, chunks int) {
+	if chunk <= 0 {
+		chunk = 10
+	}
+	for _, n := range accounts {
+		a.St.MarkRemoved(n)
+		a.St.Remove(n)
+	}
+	sent = make([]string, 0, len(accounts))
+	for start := 0; start < len(accounts); start += chunk {
+		end := start + chunk
+		if end > len(accounts) {
+			end = len(accounts)
+		}
+		batch := accounts[start:end]
+		if a.Events.SendCmd(map[string]any{
+			"cmd": "robot_manage", "action": "remove", "accounts": batch}, tag) {
+			sent = append(sent, batch...)
+		}
+		chunks++
+		if end < len(accounts) && interval > 0 {
+			time.Sleep(time.Duration(interval) * time.Millisecond)
+		}
+	}
+	return sent, chunks
 }
 
 // gameAddrOf 把区 key（"服/区"）换算成池里用的游戏服地址（"host:port"）。

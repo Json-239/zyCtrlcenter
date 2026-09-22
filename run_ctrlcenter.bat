@@ -32,9 +32,16 @@ REM Restore engine: re-dispatch tasks lost across a controller restart (producti
 if not defined CTRL_AUTO_RESTORE set "CTRL_AUTO_RESTORE=1"
 
 REM Robot deploy copy dedicated to this controller (avoids fighting the py controller over one instance).
-REM Override by passing --deploy <dir> yourself. Copy: deploy\single_robot_zy (account range neutralized,
-REM ctrl_server_port=27200; accounts are pushed by this controller via robot_manage add).
-if not defined ZYROBOT_DEPLOY set "ZYROBOT_DEPLOY=F:\ZyBin\xm\2d-xiyou-server\robot\deploy\single_robot_zy"
+REM 2026-09-22: the hard-coded default path (F:\ZyBin\xm\...\single_robot_zy) is gone - that path does
+REM   not exist on other machines, and passing a missing --deploy made the controller log errors.
+REM   Now: ZYROBOT_DEPLOY=<dir> is passed as --deploy ONLY when the directory really exists;
+REM   otherwise the flag is omitted (built-in default deploy dir is used) and a hint is printed.
+REM   Per-run override still works: run_ctrlcenter.bat --deploy <dir>
+REM   Recommended deploy copy (with robot: deploy\single_robot_zy - account range neutralized,
+REM   ctrl_server_port=27200, accounts pushed by this controller via robot_manage add).
+REM   Portable fallback (relative, keeps this machine's production copy in use without a
+REM   hard-coded absolute path): the sibling reference project's dedicated copy single_robot_zy.
+if not defined ZYROBOT_DEPLOY if exist "%~dp0..\xm\2d-xiyou-server\robot\deploy\single_robot_zy" set "ZYROBOT_DEPLOY=%~dp0..\xm\2d-xiyou-server\robot\deploy\single_robot_zy"
 set "ARGS=%*"
 set "DEPLOY_ARG="
 set "HASDEPLOY="
@@ -45,7 +52,21 @@ if defined ARGS (
         if /i "!TOK:~0,9!"=="--deploy=" set "HASDEPLOY=1"
     )
 )
-if not defined HASDEPLOY set DEPLOY_ARG=--deploy "!ZYROBOT_DEPLOY!"
+if defined HASDEPLOY goto deploy_done
+if not defined ZYROBOT_DEPLOY goto deploy_none
+if "!ZYROBOT_DEPLOY:~-1!"=="\" set "ZYROBOT_DEPLOY=!ZYROBOT_DEPLOY:~0,-1!"
+if not exist "!ZYROBOT_DEPLOY!" goto deploy_missing
+set "DEPLOY_ARG=--deploy "%ZYROBOT_DEPLOY%""
+echo [INFO] robot deploy dir: %ZYROBOT_DEPLOY%
+goto deploy_done
+:deploy_missing
+echo [WARN] ZYROBOT_DEPLOY=%ZYROBOT_DEPLOY% not found - starting WITHOUT --deploy.
+echo        panel still works; robot process is external (set ZYROBOT_DEPLOY to a real deploy dir).
+goto deploy_done
+:deploy_none
+echo [INFO] ZYROBOT_DEPLOY not set - starting WITHOUT --deploy (built-in default deploy dir).
+goto deploy_done
+:deploy_done
 if /i "%~1"=="--restart" (
     echo [RESTART] killing old zyctrlcenter.exe ...
     taskkill /IM zyctrlcenter.exe /F >nul 2>nul

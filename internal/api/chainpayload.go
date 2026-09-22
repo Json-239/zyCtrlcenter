@@ -149,28 +149,75 @@ func (p *Payloads) For(kind, chainID string) (any, error) {
 //   - 目标图在 map_grids 里（否则到图后只能直线走 = 穿墙/到不了怪区）；
 //   - dijkstra 非空（否则从当前图根本过不去）。
 func (p *Payloads) Walk(mapid int) (*chainlib.Chain, error) {
-	baseID := p.GhostBaseChainID()
-	base, _, err := p.byIDVersioned(baseID)
+	base, err := p.walkBase()
 	if err != nil {
-		return nil, fmt.Errorf("游荡导航的基座链不可用（%s）：%w", baseID, err)
+		return nil, err
 	}
 	if mapid <= 0 {
 		return nil, fmt.Errorf("目标图 mapid 不合法：%d", mapid)
 	}
 	if _, ok := base.MapGrids[strconv.Itoa(mapid)]; !ok {
-		avail := make([]string, 0, len(base.MapGrids))
-		for k := range base.MapGrids {
-			avail = append(avail, k)
-		}
-		sort.Strings(avail)
 		return nil, fmt.Errorf("链数据 %s 的 map_grids 里没有图 %d 的寻路网格（现有 %d 张图：%s）："+
 			"换一张有网格的图，或先把该图的网格补进链数据",
-			baseID, mapid, len(avail), strings.Join(avail, ","))
+			p.GhostBaseChainID(), mapid, len(base.MapGrids), gridKeysText(base))
 	}
 	if len(base.Dijkstra) == 0 {
-		return nil, fmt.Errorf("链数据 %s 缺 dijkstra（跨图路由）：游荡号从当前图走不到目标图", baseID)
+		return nil, fmt.Errorf("链数据 %s 缺 dijkstra（跨图路由）：游荡号从当前图走不到目标图", p.GhostBaseChainID())
 	}
 	// 浅拷贝：调用方（handler）不该拿到缓存里的同一份指针（沿用基座链的原始字段，不做裁剪）
+	return cloneWalkChain(base), nil
+}
+
+// WalkRandom 随机图（mapid="random"）的导航载荷：**目标图由机器人端挑**（每号不同，见
+// random_walk.py:resolve_roam_target），所以这里不做"具体某图"的校验，只保证"能挑出图"：
+//
+//   - maps 白名单给了：白名单里至少有一张图在 map_grids 里（否则机器人端挑不出；
+//     这属于"配置/口径错"，宁可在这里明确报错，也不要发下去让每个号各自失败）；
+//   - maps 没给：随机池 = 全部有网格的图，map_grids 非空即可；
+//   - dijkstra 非空（跨图路由；随机图同样要跨图）。
+//
+// 注意：**这里不替机器人端抽签**——每号独立随机（避免全号扎堆同一张图）由机器人端做。
+func (p *Payloads) WalkRandom(maps []int) (*chainlib.Chain, error) {
+	base, err := p.walkBase()
+	if err != nil {
+		return nil, err
+	}
+	if len(base.Dijkstra) == 0 {
+		return nil, fmt.Errorf("链数据 %s 缺 dijkstra（跨图路由）：游荡号从当前图走不到目标图", p.GhostBaseChainID())
+	}
+	if len(maps) == 0 {
+		if len(base.MapGrids) == 0 {
+			return nil, fmt.Errorf("链数据 %s 的 map_grids 为空：随机图没有可挑的目标图", p.GhostBaseChainID())
+		}
+		return cloneWalkChain(base), nil
+	}
+	usable := make([]string, 0, len(maps))
+	for _, m := range maps {
+		if _, ok := base.MapGrids[strconv.Itoa(m)]; ok {
+			usable = append(usable, strconv.Itoa(m))
+		}
+	}
+	if len(usable) == 0 {
+		return nil, fmt.Errorf("maps 白名单 %v 里没有任何一张图有寻路网格（链数据 %s 现有网格图：%s）："+
+			"机器人端挑不出目标图，要么改白名单、要么先把这些图的网格补进链数据",
+			maps, p.GhostBaseChainID(), gridKeysText(base))
+	}
+	return cloneWalkChain(base), nil
+}
+
+// walkBase 取"游荡导航"的基座链（GhostBaseChainID，默认 newbie_full）。
+// 目标图相关的校验交给调用方（Walk 校具体图 / WalkRandom 校白名单交集）。
+func (p *Payloads) walkBase() (*chainlib.Chain, error) {
+	baseID := p.GhostBaseChainID()
+	base, _, err := p.byIDVersioned(baseID)
+	if err != nil {
+		return nil, fmt.Errorf("游荡导航的基座链不可用（%s）：%w", baseID, err)
+	}
+	return base, nil
+}
+
+// cloneWalkChain 浅拷贝基座链（只带游荡要用的字段，不做任何裁剪）。
+func cloneWalkChain(base *chainlib.Chain) *chainlib.Chain {
 	return &chainlib.Chain{
 		ChainID:  base.ChainID,
 		GridCell: base.GridCell,
@@ -179,7 +226,17 @@ func (p *Payloads) Walk(mapid int) (*chainlib.Chain, error) {
 		Dijkstra: base.Dijkstra,
 		Maps:     base.Maps,
 		Extra:    base.Extra,
-	}, nil
+	}
+}
+
+// gridKeysText 现有网格图号（升序、逗号分隔；报错文案用）。
+func gridKeysText(base *chainlib.Chain) string {
+	avail := make([]string, 0, len(base.MapGrids))
+	for k := range base.MapGrids {
+		avail = append(avail, k)
+	}
+	sort.Strings(avail)
+	return strings.Join(avail, ",")
 }
 
 // NavOnly 该链文件是不是"导航数据"（没有任务节点 = task_order 为空）。

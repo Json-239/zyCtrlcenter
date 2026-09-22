@@ -145,11 +145,42 @@ func TestLocalConfigTokenTemplateIgnored(t *testing.T) {
 }
 
 func TestAddrHelpers(t *testing.T) {
-	cfg := config.Default()
-	if cfg.CtrlAddr() != "127.0.0.1:27200" {
-		t.Fatalf("CtrlAddr 不符: %s", cfg.CtrlAddr())
-	}
-	if cfg.WebAddr() != "127.0.0.1:28082" {
-		t.Fatalf("WebAddr 不符: %s", cfg.WebAddr())
-	}
+        cfg := config.Default()
+        if cfg.CtrlAddr() != "127.0.0.1:27200" {
+                t.Fatalf("CtrlAddr 不符: %s", cfg.CtrlAddr())
+        }
+        if cfg.WebAddr() != "127.0.0.1:28082" {
+                t.Fatalf("WebAddr 不符: %s", cfg.WebAddr())
+        }
+}
+
+func TestLiveCountDefaultsAndEnv(t *testing.T) {
+        // 默认关闭且不配端点：不会自己动生产（启用需同时给 URL）
+        cfg := config.Default()
+        if cfg.LiveCountEnabled || cfg.LiveCountURL != "" {
+                t.Fatalf("LiveCount 默认应为关闭且无端点，实际 enabled=%v url=%q",
+                        cfg.LiveCountEnabled, cfg.LiveCountURL)
+        }
+        if cfg.LiveCountServerID != "1000" || cfg.LiveCountIntervalSec != 60 || cfg.LiveCountTimeoutSec != 3 {
+                t.Fatalf("LiveCount 默认参数不符：server=%q interval=%d timeout=%d",
+                        cfg.LiveCountServerID, cfg.LiveCountIntervalSec, cfg.LiveCountTimeoutSec)
+        }
+        if cfg.LiveCountToken != "" {
+                t.Fatalf("LiveCount 默认不应带 token，实际 %q", cfg.LiveCountToken)
+        }
+        // 环境变量整套可覆盖（参考实现所在测试服口径）
+        t.Setenv("CTRL_LIVECOUNT_ENABLED", "1")
+        t.Setenv("CTRL_LIVECOUNT_URL", "http://192.168.0.201:8080")
+        t.Setenv("CTRL_LIVECOUNT_SERVER_ID", "1001")
+        t.Setenv("CTRL_LIVECOUNT_INTERVAL_SEC", "30")
+        t.Setenv("CTRL_LIVECOUNT_TIMEOUT_SEC", "5")
+        t.Setenv("CTRL_LIVECOUNT_TOKEN", "tok-abc")
+        got := config.Load([]string{})
+        if !got.LiveCountEnabled || got.LiveCountURL != "http://192.168.0.201:8080" ||
+                got.LiveCountServerID != "1001" || got.LiveCountIntervalSec != 30 ||
+                got.LiveCountTimeoutSec != 5 || got.LiveCountToken != "tok-abc" {
+                t.Fatalf("环境变量应覆盖 LiveCount 配置，实际 enabled=%v url=%q server=%q interval=%d timeout=%d token=%q",
+                        got.LiveCountEnabled, got.LiveCountURL, got.LiveCountServerID,
+                        got.LiveCountIntervalSec, got.LiveCountTimeoutSec, got.LiveCountToken)
+        }
 }

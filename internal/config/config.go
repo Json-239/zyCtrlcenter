@@ -1,11 +1,15 @@
 // Package config 集中配置（骨架层：只放基础设施配置，业务参数由使用方自行扩展）。
 //
 // 配置来源优先级（从高到低）：
-//  1. CLI 参数（--web-port/--ctrl-port/--deploy/--data-dir/--base-dir/--auto-robot/--kill-robots/--api-token）
+//  1. CLI 参数（--web-port/--ctrl-port/--deploy/--data-dir/--base-dir/--auto-robot/--kill-robots/--api-token/--web-dist）
 //  2. 环境变量（CTRL_WEB_PORT / CTRL_CTRL_PORT / CTRL_WEB_HOST / CTRL_CTRL_HOST /
 //     CTRL_DEPLOY_DIR / CTRL_DATA_DIR / CTRL_RUNS_KEEP_DAYS / CTRL_RUNS_MAX_MB /
 //     CTRL_LOG_KEEP_DAYS / CTRL_GHOST_NAV_CHAIN / CTRL_GHOST_BASE_CHAIN / CTRL_GHOST_DAILY_LIMIT /
-//     CTRL_GAME_VERSION / CTRL_NEWBIE_MAX_LEVEL / CTRL_AUTO_RESTORE / API_TOKEN）
+//     CTRL_GAME_VERSION / CTRL_NEWBIE_MAX_LEVEL / CTRL_AUTO_RESTORE / API_TOKEN /
+//     CTRL_LIVECOUNT_ENABLED / CTRL_LIVECOUNT_URL / CTRL_LIVECOUNT_SERVER_ID /
+//     CTRL_LIVECOUNT_INTERVAL_SEC / CTRL_LIVECOUNT_TIMEOUT_SEC / CTRL_LIVECOUNT_TOKEN /
+//     CTRL_CREATE_ADAPTIVE / CTRL_CREATE_MAX_CONCURRENCY / CTRL_CREATE_MIN_CONCURRENCY /
+//     CTRL_CREATE_BATCH_INTERVAL_SEC / CTRL_CREATE_JITTER_SEC / CTRL_WEB_DIST）
 //  3. config.local.json（本地覆盖，不入库：api_token）
 //  4. 本文件内置默认值
 //
@@ -53,6 +57,10 @@ type Config struct {
 	GridCell        int    // 客户端坐标换算：1 格 = 多少像素（默认 16，客户端显示 = 像素/16）
 	LogsDir         string
 	LocalConfigFile string
+	// WebDistDir 前端面板构建产物目录（Vue3 + Vite 的 dist，含 index.html）。
+	// 目录存在时中控直接托管面板（GET / 与其余非 /api、/ws 的 GET 请求），不存在则 / 仍返回 JSON 提示。
+	// 默认 <项目根>/web/dist，可用 --web-dist 或环境变量 CTRL_WEB_DIST 覆盖。
+	WebDistDir string
 
 	// DefaultChainID 未显式指定链 ID 时的默认值（仅透传给机器人，不内置链数据）。
 	DefaultChainID string
@@ -95,6 +103,36 @@ type Config struct {
 
 	// APIToken 高危写接口鉴权 token（空=关闭）。
 	APIToken string
+
+	// LiveCount* 「服务端在线数」直连数据源（internal/services/livecount，默认关闭）。
+	// 背景：机器人端 `@online` 管理命令需要服务端 admin_license 的 DEPLOY 授权，生产服未授权时
+	// 拿不到数；参考 game_admin_web(origin/hqm) 的做法改为**中控直接 HTTP 拉游戏服** /gm/online
+	// （服务端自带接口，实测不需要 GM 授权，返回 {online_count}；含真实玩家，机器人数另有字段）。
+	// 读到的数写进 /api/status.svr_online（source=svr_provider）并供在线水位保持器取用；
+	// 拉取失败自动回落到 @online 回执 → 本地握手数，不影响主链路。
+	// 环境变量：CTRL_LIVECOUNT_ENABLED / _URL / _SERVER_ID / _INTERVAL_SEC / _TIMEOUT_SEC / _TOKEN
+	LiveCountEnabled     bool   // 总开关（默认 false）
+	LiveCountURL         string // 游戏服 HTTP 基地址，如 http://192.168.0.201:8080（空=禁用）
+	LiveCountServerID    string // 区号（默认 "1000"）
+	LiveCountIntervalSec int    // 轮询间隔（秒，默认 60）
+	LiveCountTimeoutSec  int    // 单次 HTTP 超时（秒，默认 3）
+	LiveCountToken       string // 可选鉴权头 X-GM-Token（当前接口无鉴权，留空即可）
+
+	// RoamWorldMaps 游荡世界图白名单（2026-09-22）：随机图游荡只从这些图里抽，排掉"大图里的小图"（房间/店铺/洞穴，如回春药铺 616）。来源：服务端 config/worldmap/worldmap.csv
+	// （44 张，缺省内置）。环境变量 CTRL_ROAM_WORLD_MAPS="1,2,3" 可覆盖；空/全非法 = 不过滤。
+	RoamWorldMaps []int
+
+	// Create* 建号（注册协议 106→104→700）的**节奏限制**：同 IP 过频会触发风控码 112
+	// （服务端 C++ login_server 的规则，改不动），所以除了"并发 ≤8、批量 ≤20"的硬上限，
+	// 再加一层进程内**自适应限速**（internal/api/handlers_create.go 的 CreateThrottle）：
+	// 撞 112 降速（并发减半/批间隔加倍）、连续成功回升；批间隔带抖动避免整齐节拍。
+	// **不动协议字段**（106/104/700 与 8 个字段不变），只改节奏。
+	// 环境变量：CTRL_CREATE_ADAPTIVE / _MAX_CONCURRENCY / _MIN_CONCURRENCY / _BATCH_INTERVAL_SEC / _JITTER_SEC
+	CreateAdaptive         bool // 自适应限速总开关（默认 true）
+	CreateMaxConcurrency   int  // 并发上限（默认 8：再高更容易触发同 IP 频控）
+	CreateMinConcurrency   int  // 并发下限（降速降到这里为止，默认 2）
+	CreateBatchIntervalSec int  // 批间隔基准（秒，默认 5；请求里的 batch_interval_ms 只能更保守）
+	CreateJitterSec        int  // 批间隔抖动（±秒，默认 2：避免整齐节拍被风控盯上）
 
 	// AutoStartRobot=true 时启动中控会拉起 robot_single_robot.exe（默认关闭，
 	// 避免与其它中控/生产实例互相抢账号；用 --auto-robot 显式开启）。
@@ -174,6 +212,7 @@ func Load(args []string) *Config {
 	killRobots := fs.Bool("kill-robots", false, "重启机器人前先清理同名残留进程")
 	apiToken := fs.String("api-token", "", "高危写接口鉴权 token（空=关闭）")
 	gameConfig := fs.String("game-config", env("CTRL_GAME_CONFIG_DIR", ""), "游戏配置目录（含 map.csv 与 map_file/blockfile，用于地图可视化）")
+	webDist := fs.String("web-dist", env("CTRL_WEB_DIST", ""), "前端面板构建产物目录（默认 <项目根>/web/dist；存在才由中控直接托管面板）")
 	_ = fs.Parse(args) // 忽略未知参数（go test 等场景传入的参数不影响）
 
 	if *baseDir != "" {
@@ -185,6 +224,7 @@ func Load(args []string) *Config {
 		deploy:     deploy,
 		dataDir:    dataDir,
 		gameConfig: gameConfig,
+		webDist:    webDist,
 		autoRobot:  autoRobot,
 		killRobots: killRobots,
 		apiToken:   apiToken,
@@ -192,9 +232,9 @@ func Load(args []string) *Config {
 }
 
 type cliOpts struct {
-	webPort, ctrlPort                     *int
-	deploy, dataDir, apiToken, gameConfig *string
-	autoRobot, killRobots                 *bool
+	webPort, ctrlPort                              *int
+	deploy, dataDir, apiToken, gameConfig, webDist *string
+	autoRobot, killRobots                          *bool
 }
 
 func absPath(p string) string {
@@ -206,27 +246,41 @@ func absPath(p string) string {
 
 func build(base string, opts *cliOpts) *Config {
 	c := &Config{
-		WebHost:          env("CTRL_WEB_HOST", "127.0.0.1"),
-		WebPort:          envInt("CTRL_WEB_PORT", DefaultWebPort),
-		CtrlHost:         env("CTRL_CTRL_HOST", "127.0.0.1"),
-		CtrlPort:         envInt("CTRL_CTRL_PORT", DefaultCtrlPort),
-		BaseDir:          base,
-		DefaultChainID:   "newbie_full",
-		GhostNavChainID:  env("CTRL_GHOST_NAV_CHAIN", "zhongkui_nav"),
-		GhostBaseChainID: env("CTRL_GHOST_BASE_CHAIN", "newbie_full"),
-		GhostDailyLimit:  envInt("CTRL_GHOST_DAILY_LIMIT", 50),
-		AutoRegisterPrefix:     env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
-		AutoRegisterSuffix:     env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
-		AutoRegisterPad:        envInt("CTRL_AUTO_REGISTER_PAD", 7),
-		GameVersion:      env("CTRL_GAME_VERSION", "58740022"),
-		AutoRemoveOnDone: true,
-		NewbieMaxLevel:   envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
-		AutoRestore:      envBool("CTRL_AUTO_RESTORE", false),
-		RunsKeepDays:     envInt("CTRL_RUNS_KEEP_DAYS", 30),
-		RunsMaxMB:        envInt("CTRL_RUNS_MAX_MB", 500),
-		LogKeepDays:      envInt("CTRL_LOG_KEEP_DAYS", 30),
-		GridCell:         envInt("CTRL_GRID_CELL", 16),
-		RobotImageName:   "robot_single_robot.exe",
+		WebHost:            env("CTRL_WEB_HOST", "127.0.0.1"),
+		WebPort:            envInt("CTRL_WEB_PORT", DefaultWebPort),
+		CtrlHost:           env("CTRL_CTRL_HOST", "127.0.0.1"),
+		CtrlPort:           envInt("CTRL_CTRL_PORT", DefaultCtrlPort),
+		BaseDir:            base,
+		DefaultChainID:     "newbie_full",
+		GhostNavChainID:    env("CTRL_GHOST_NAV_CHAIN", "zhongkui_nav"),
+		GhostBaseChainID:   env("CTRL_GHOST_BASE_CHAIN", "newbie_full"),
+		GhostDailyLimit:    envInt("CTRL_GHOST_DAILY_LIMIT", 50),
+		AutoRegisterPrefix: env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
+		AutoRegisterSuffix: env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
+		AutoRegisterPad:    envInt("CTRL_AUTO_REGISTER_PAD", 7),
+		GameVersion:        env("CTRL_GAME_VERSION", "58740022"),
+		AutoRemoveOnDone:   true,
+		NewbieMaxLevel:     envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
+		AutoRestore:        envBool("CTRL_AUTO_RESTORE", false),
+		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
+		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),
+		LiveCountURL:         env("CTRL_LIVECOUNT_URL", ""),
+		LiveCountServerID:    env("CTRL_LIVECOUNT_SERVER_ID", "1000"),
+		LiveCountIntervalSec: envInt("CTRL_LIVECOUNT_INTERVAL_SEC", 60),
+		LiveCountTimeoutSec:  envInt("CTRL_LIVECOUNT_TIMEOUT_SEC", 3),
+		LiveCountToken:       env("CTRL_LIVECOUNT_TOKEN", ""),
+		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
+		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
+		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
+		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),
+		CreateMinConcurrency:   envInt("CTRL_CREATE_MIN_CONCURRENCY", 2),
+		CreateBatchIntervalSec: envInt("CTRL_CREATE_BATCH_INTERVAL_SEC", 5),
+		CreateJitterSec:        envInt("CTRL_CREATE_JITTER_SEC", 2),
+		RunsKeepDays:           envInt("CTRL_RUNS_KEEP_DAYS", 30),
+		RunsMaxMB:              envInt("CTRL_RUNS_MAX_MB", 500),
+		LogKeepDays:            envInt("CTRL_LOG_KEEP_DAYS", 30),
+		GridCell:               envInt("CTRL_GRID_CELL", 16),
+		RobotImageName:         "robot_single_robot.exe",
 	}
 
 	if opts != nil {
@@ -244,6 +298,9 @@ func build(base string, opts *cliOpts) *Config {
 		}
 		if opts.gameConfig != nil && *opts.gameConfig != "" {
 			c.GameConfigDir = absPath(*opts.gameConfig)
+		}
+		if opts.webDist != nil && *opts.webDist != "" {
+			c.WebDistDir = absPath(*opts.webDist)
 		}
 		if opts.apiToken != nil {
 			c.APIToken = *opts.apiToken
@@ -273,6 +330,13 @@ func build(base string, opts *cliOpts) *Config {
 	}
 	c.LogsDir = filepath.Join(base, "logs")
 	c.LocalConfigFile = filepath.Join(base, "config.local.json")
+	if c.WebDistDir == "" {
+		c.WebDistDir = filepath.Join(base, "web", "dist")
+	}
+	// 环境变量兜底（优先级低于 CLI；CLI 未给时 flag 默认值已取到）
+	if v := env("CTRL_WEB_DIST", ""); v != "" && (opts == nil || opts.webDist == nil || *opts.webDist == "") {
+		c.WebDistDir = absPath(v)
+	}
 	c.RobotExe = filepath.Join(c.DeployDir, "robot_single_robot.exe")
 	c.RobotConfigPy = filepath.Join(c.DeployDir, "script", "config.py")
 
@@ -349,4 +413,22 @@ func localToken(path string) string {
 		return ""
 	}
 	return tok
+}
+
+// envIntList 解析 "1,2,3" 形式的整数列表环境变量（空/非法项忽略；全空则用默认）。
+func envIntList(key string, def []int) []int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	out := make([]int, 0, 16)
+	for _, seg := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+		if n, err := strconv.Atoi(strings.TrimSpace(seg)); err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
 }

@@ -6,7 +6,12 @@
 //   - 自动任务：每轮在"基础间隔 + 随机抖动"后随机挑 N 个"该做但没在做"的号，上线并下发任务；
 //     没号可拉且开了自动注册 → 注册新号；同时在线上限到了就等空槽；
 //   - 「链数据（高级）」折叠里保留原来的链文件/模块视图（排障用，平时不用看）。
+//
+// 2026-09-22 UI 改 Element Plus：两块参数改成 el-form + el-input-number/el-switch；
+// 同时补一个"编辑态"闸门——轮询（4s）回显参数时跳过用户正在改的那一块，
+// 否则每 4 秒会把刚填的数字顶回服务端旧值（原来的 <input> 也有这个毛病）。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiGet } from '../api'
 import { post, state } from '../store'
 import ChainView from './ChainView.vue'
@@ -17,7 +22,8 @@ const cands = ref({})       // 候选数
 const reghost = ref([])     // 待恢复（卡死自动重登）
 const pools = ref({})       // 号池分区：新手池 / 抓鬼池（可用数 + 在跑数 + 目标/缺口）
 const busy = ref('')
-const editing = reactive({}) // kind -> 参数编辑区（只在展开时用）
+const dirty = reactive({})  // kind -> 用户改过参数还没"启动/应用"（轮询不回显它）
+const srv = reactive({})    // kind -> 服务端最近一次参数快照（供"还原"）
 
 // 每套策略的面板参数（分钟制，和参考实现一致）；启动时换算成秒
 // 默认按需求给一份"保持数"：新手保持有号在跑（默认 3）、抓鬼保持 50 个
@@ -36,6 +42,22 @@ const chainReady = computed(() => {
   return r || 0
 })
 
+// 服务端参数 → 表单，并留一份快照（"还原"按钮用）
+function syncForm(t) {
+  const f = form[t.kind]
+  if (!f) return
+  const c = t.config || {}
+  f.intervalMin = Math.max(1, Math.round((c.interval_sec || 300) / 60))
+  f.jitterMin = Math.round((c.jitter_sec || 0) / 60)
+  f.batchMin = c.batch_min || 1
+  f.batchMax = c.batch_max || 3
+  f.targetOnline = c.target_online || 0
+  f.maxOnline = c.max_online || 0
+  f.registerEnabled = !!c.register_enabled
+  f.registerCount = c.register_count || 10
+  srv[t.kind] = { ...f }
+}
+
 async function load() {
   try {
     const res = await apiGet('/api/autotask')
@@ -44,19 +66,10 @@ async function load() {
     reghost.value = res.reghost || []
     pools.value = res.pools || {}
     err.value = ''
-    // 回显已启动策略的参数（改完再点启动会覆盖）
+    // 回显已启动策略的参数（改完再点启动会覆盖）；用户正在编辑的那块跳过，避免被轮询顶掉
     for (const t of tasks.value) {
-      const f = form[t.kind]
-      if (!f) continue
-      const c = t.config || {}
-      f.intervalMin = Math.max(1, Math.round((c.interval_sec || 300) / 60))
-      f.jitterMin = Math.round((c.jitter_sec || 0) / 60)
-      f.batchMin = c.batch_min || 1
-      f.batchMax = c.batch_max || 3
-      f.targetOnline = c.target_online || 0
-      f.maxOnline = c.max_online || 0
-      f.registerEnabled = !!c.register_enabled
-      f.registerCount = c.register_count || 10
+      if (dirty[t.kind]) continue
+      syncForm(t)
     }
   } catch (e) {
     err.value = e.message
@@ -68,6 +81,13 @@ onMounted(() => {
 })
 let timer = 0
 onUnmounted(() => clearInterval(timer))
+
+function markDirty(kind) { dirty[kind] = true }
+// 还原成服务端最近一次参数（放弃未应用的改动）
+function resetKind(kind) {
+  if (srv[kind]) Object.assign(form[kind], srv[kind])
+  dirty[kind] = false
+}
 
 function stateOf(kind) {
   return tasks.value.find((t) => t.kind === kind) || null
@@ -95,24 +115,46 @@ function poolText(kind) {
   const tg = p.target > 0 ? ` / 目标 ${p.target}` : ''
   return `可用 ${p.usable} · 在跑 ${p.running}${tg}`
 }
+function fmtClock(ts) {
+  return ts ? new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) : '--'
+}
+function phaseTag(p) {
+  if (p === 'failed') return 'danger'
+  if (p === 'done') return 'success'
+  return 'warning'
+}
 
 async function startKind(kind) {
   const f = form[kind]
+  if (f.batchMin > f.batchMax) {
+    ElMessage.warning('「每轮个数」的下限不能大于上限')
+    return
+  }
   busy.value = kind
   try {
-    await post('/api/autotask/start', {
+    const res = await post('/api/autotask/start', {
       kind,
       interval_sec: Math.max(1, Math.round(f.intervalMin * 60)),
       jitter_sec: Math.max(0, Math.round(f.jitterMin * 60)),
       batch_min: f.batchMin, batch_max: f.batchMax, target_online: f.targetOnline, max_online: f.maxOnline,
       register_enabled: f.registerEnabled, register_count: f.registerCount,
     })
+    if (res.ok !== false) dirty[kind] = false // 下发成功：表单与服务端一致了
     await load()
   } finally {
     busy.value = ''
   }
 }
 async function stopKind(kind) {
+  try {
+    await ElMessageBox.confirm(
+      `停止「${KIND_LABEL[kind]}」的定时任务？停止后不再自动拉号补位；已经在跑的号不受影响。`,
+      '停止定时任务',
+      { type: 'warning', confirmButtonText: '停止', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch (e) {
+    return // 用户取消
+  }
   busy.value = kind
   try {
     await post('/api/autotask/stop', { kind })
@@ -152,7 +194,7 @@ async function cancelRegHost(acc) {
 </script>
 
 <template>
-  <div v-if="err" class="card"><span class="tag danger">{{ err }}</span></div>
+  <el-alert v-if="err" class="mb" type="error" :closable="false" show-icon :title="err" />
 
   <!-- 定时自动任务：两套独立策略 -->
   <div class="card">
@@ -160,55 +202,94 @@ async function cancelRegHost(acc) {
       <h3 style="margin: 0">定时自动任务</h3>
       <span class="muted">按<b>保持在线数</b>往对应号池里拉号：每轮在「间隔 + 随机」后只补差额（<b>新手池 → 新手链，抓鬼池 → 抓鬼，互相独立</b>）</span>
       <span class="spacer" />
-      <span class="tag" :class="chainReady ? 'ok' : 'warn'" :title="'链目录里可用的链数据文件数（自动任务用到 newbie_full / zhongkui_nav）'">
-        链数据 {{ chainReady }} 个
-      </span>
-      <button class="btn sm" @click="load">刷新</button>
+      <el-tooltip content="链目录里可用的链数据文件数（自动任务用到 newbie_full / zhongkui_nav）" placement="top">
+        <el-tag size="small" :type="chainReady ? 'success' : 'warning'" effect="plain">链数据 {{ chainReady }} 个</el-tag>
+      </el-tooltip>
+      <el-button size="small" @click="load">
+        <el-icon><Refresh /></el-icon>
+        <span>刷新</span>
+      </el-button>
     </div>
 
     <div v-for="kind in ['newbie', 'ghost']" :key="kind" class="ob-block">
       <div class="row">
         <b>{{ KIND_LABEL[kind] }}</b>
-        <span class="tag" :class="running(kind) ? 'ok' : 'dim'">{{ running(kind) ? '运行中' : '已停止' }}</span>
+        <el-tag size="small" :type="running(kind) ? 'success' : 'info'" :effect="running(kind) ? 'dark' : 'plain'">
+          {{ running(kind) ? '运行中' : '已停止' }}
+        </el-tag>
         <span class="muted">{{ lastMsg(kind) }}</span>
         <span v-if="running(kind)" class="mono muted">下一个 {{ nextIn(kind) }}</span>
         <span class="spacer" />
-        <button class="btn sm primary" :disabled="busy === kind" @click="startKind(kind)">{{ running(kind) ? '应用参数并重启' : '启动' }}</button>
-        <button class="btn sm" :disabled="busy === kind || !running(kind)" @click="runKind(kind)">立即跑一轮</button>
-        <button class="btn sm danger" :disabled="busy === kind || !running(kind)" @click="stopKind(kind)">停止</button>
+        <el-tag v-if="dirty[kind]" size="small" type="warning" effect="plain">参数已改，未应用</el-tag>
+        <el-button v-if="dirty[kind]" size="small" type="primary" link @click="resetKind(kind)">还原</el-button>
+        <el-button size="small" type="primary" :disabled="busy === kind" @click="startKind(kind)">
+          {{ running(kind) ? '应用参数并重启' : '启动' }}
+        </el-button>
+        <el-button size="small" :disabled="busy === kind || !running(kind)" @click="runKind(kind)">立即跑一轮</el-button>
+        <el-button size="small" type="danger" plain :disabled="busy === kind || !running(kind)" @click="stopKind(kind)">停止</el-button>
       </div>
       <div class="row muted" style="font-size: 12.5px; margin-top: 4px">{{ KIND_HINT[kind] }}</div>
       <div class="row" style="margin-top: 6px">
-        <span class="tag" :class="kind === 'newbie' ? 'info' : 'warn'">{{ kind === 'newbie' ? '新手号池' : '抓鬼号池' }}</span>
+        <el-tag size="small" :type="kind === 'newbie' ? 'primary' : 'warning'" effect="plain">
+          {{ kind === 'newbie' ? '新手号池' : '抓鬼号池' }}
+        </el-tag>
         <span class="muted">{{ poolText(kind) }}</span>
         <span class="muted">（每轮只补差额，不重复拉起；没有可拉的号才会走自动注册）</span>
       </div>
 
-      <div class="row" style="margin-top: 8px; gap: 10px; flex-wrap: wrap">
-        <label class="muted">间隔(分钟)<input v-model.number="form[kind].intervalMin" type="number" min="1" max="120" style="width: 74px" /></label>
-        <label class="muted">随机(分钟)<input v-model.number="form[kind].jitterMin" type="number" min="0" max="120" style="width: 74px" /></label>
-        <label class="muted">每轮
-          <input v-model.number="form[kind].batchMin" type="number" min="1" max="50" style="width: 56px" /> ~
-          <input v-model.number="form[kind].batchMax" type="number" min="1" max="50" style="width: 56px" /> 个
-        </label>
-        <label class="muted"><b>保持在线</b><input v-model.number="form[kind].targetOnline" type="number" min="0" max="2000" style="width: 74px" /> 个(0=不限)</label>
-        <label class="muted">硬上限<input v-model.number="form[kind].maxOnline" type="number" min="0" max="2000" style="width: 74px" /> 个(0=不限)</label>
-        <template v-if="kind === 'newbie'">
-          <label class="muted">
-            <input v-model="form[kind].registerEnabled" type="checkbox" /> 没号时自动注册
-          </label>
-          <label v-if="form[kind].registerEnabled" class="muted">
-            每次 <input v-model.number="form[kind].registerCount" type="number" min="1" max="20" style="width: 56px" /> 个
-          </label>
-        </template>
-      </div>
+      <el-form class="cfg-grid" :model="form[kind]" size="small" label-width="86px" @submit.prevent>
+        <el-form-item label="间隔(分钟)">
+          <el-input-number v-model="form[kind].intervalMin" :min="1" :max="120" :step="1"
+                           style="width: 132px" @change="markDirty(kind)" />
+        </el-form-item>
+        <el-form-item label="随机(分钟)">
+          <el-input-number v-model="form[kind].jitterMin" :min="0" :max="120" :step="1"
+                           style="width: 132px" @change="markDirty(kind)" />
+        </el-form-item>
+        <el-form-item label="每轮个数">
+          <div class="row" style="gap: 6px; flex-wrap: nowrap">
+            <el-input-number v-model="form[kind].batchMin" :min="1" :max="50" style="width: 100px" @change="markDirty(kind)" />
+            <span class="muted">~</span>
+            <el-input-number v-model="form[kind].batchMax" :min="1" :max="50" style="width: 100px" @change="markDirty(kind)" />
+            <span class="muted">个</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="保持在线">
+          <div class="row" style="gap: 6px; flex-wrap: nowrap">
+            <el-input-number v-model="form[kind].targetOnline" :min="0" :max="2000" style="width: 132px" @change="markDirty(kind)" />
+            <span class="muted">个(0=不限)</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="硬上限">
+          <div class="row" style="gap: 6px; flex-wrap: nowrap">
+            <el-input-number v-model="form[kind].maxOnline" :min="0" :max="2000" style="width: 132px" @change="markDirty(kind)" />
+            <span class="muted">个(0=不限)</span>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="kind === 'newbie'" label="自动注册">
+          <div class="row" style="gap: 8px; flex-wrap: nowrap">
+            <el-switch v-model="form[kind].registerEnabled" @change="markDirty(kind)" />
+            <template v-if="form[kind].registerEnabled">
+              <el-input-number v-model="form[kind].registerCount" :min="1" :max="20" style="width: 96px" @change="markDirty(kind)" />
+              <span class="muted">个/次</span>
+            </template>
+            <span v-else class="muted">没号可拉时注册新号</span>
+          </div>
+        </el-form-item>
+      </el-form>
 
-      <details v-if="stateOf(kind)?.rounds?.length" style="margin-top: 8px">
-        <summary class="muted" style="cursor: pointer">最近 {{ Math.min(5, stateOf(kind).rounds.length) }} 轮</summary>
-        <div v-for="(rd, i) in stateOf(kind).rounds.slice(0, 5)" :key="i" class="muted" style="font-size: 12.5px; margin-top: 4px">
-          <span class="mono">{{ new Date(rd.at).toLocaleTimeString('zh-CN', { hour12: false }) }}</span> · {{ rd.msg }}
-        </div>
-      </details>
+      <el-collapse v-if="stateOf(kind)?.rounds?.length" class="rounds">
+        <el-collapse-item :title="`最近 ${Math.min(5, stateOf(kind).rounds.length)} 轮`" :name="kind">
+          <el-timeline>
+            <el-timeline-item
+              v-for="(rd, i) in stateOf(kind).rounds.slice(0, 5)" :key="i"
+              :timestamp="fmtClock(rd.at)" placement="top"
+            >
+              <span class="muted">{{ rd.msg }}</span>
+            </el-timeline-item>
+          </el-timeline>
+        </el-collapse-item>
+      </el-collapse>
     </div>
   </div>
 
@@ -216,25 +297,34 @@ async function cancelRegHost(acc) {
   <div class="card">
     <div class="row">
       <h3 style="margin: 0">手动启动（固定任务）</h3>
-      <input v-model="manualAccounts" placeholder="账号（留空 = 全部：按每个号的意图自动分配）" style="min-width: 320px" />
-      <button class="btn primary" :disabled="busy === 'fixed'" @click="startFixed('newbie')">按意图启动</button>
+      <el-input v-model="manualAccounts" size="small" clearable style="min-width: 320px; max-width: 520px"
+                placeholder="账号（留空 = 全部：按每个号的意图自动分配）" />
+      <el-button size="small" type="primary" :disabled="busy === 'fixed'" @click="startFixed('newbie')">按意图启动</el-button>
       <span class="muted">「按意图启动」= 新手链号发 start_chain、抓鬼号发 ghost_start（带导航数据）；低于抓鬼门槛的号会被跳过并给出原因</span>
     </div>
 
     <div v-if="reghost.length" style="margin-top: 10px">
-      <div class="row"><b>待恢复（钟馗对话卡死 → 自动重登后重新下发）</b><span class="muted">{{ reghost.length }} 个</span></div>
-      <table>
-        <thead><tr><th>账号</th><th style="width:110px">阶段</th><th style="width:70px">次数</th><th>说明</th><th style="width:90px">动作</th></tr></thead>
-        <tbody>
-          <tr v-for="r in reghost" :key="r.account">
-            <td class="mono">{{ r.account }}</td>
-            <td><span class="tag" :class="r.phase === 'failed' ? 'danger' : r.phase === 'done' ? 'ok' : 'warn'">{{ r.phase }}</span></td>
-            <td>{{ r.attempts }}</td>
-            <td class="muted">{{ r.last_msg }}</td>
-            <td><button class="btn sm" @click="cancelRegHost(r.account)">取消恢复</button></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="row" style="margin-bottom: 6px">
+        <b>待恢复（钟馗对话卡死 → 自动重登后重新下发）</b>
+        <el-tag size="small" type="warning" effect="plain">{{ reghost.length }} 个</el-tag>
+      </div>
+      <el-table :data="reghost" size="small" style="width: 100%">
+        <el-table-column label="账号" width="190">
+          <template #default="{ row }"><span class="mono">{{ row.account }}</span></template>
+        </el-table-column>
+        <el-table-column label="阶段" width="110">
+          <template #default="{ row }"><el-tag size="small" :type="phaseTag(row.phase)" effect="plain">{{ row.phase }}</el-tag></template>
+        </el-table-column>
+        <el-table-column prop="attempts" label="次数" width="70" />
+        <el-table-column label="说明" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }"><span class="muted">{{ row.last_msg }}</span></template>
+        </el-table-column>
+        <el-table-column label="动作" width="110" align="right">
+          <template #default="{ row }">
+            <el-button link type="danger" size="small" @click="cancelRegHost(row.account)">取消恢复</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
   </div>
 
@@ -250,8 +340,12 @@ async function cancelRegHost(acc) {
 </template>
 
 <style scoped>
-.ob-block { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+/* 原有类名保留；变量名对齐 styles.css 的真实定义（--panel2/--line 是不存在的旧名，等于没生效） */
+.ob-block { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .ob-block:first-of-type { margin-top: 0; }
-label.muted { font-size: 12.5px; }
-input[type='number'] { margin-left: 4px; }
+/* 参数区：固定 label 宽度的两列以上网格（窄屏自动折行），比一行 flex 更好对齐 */
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(262px, 1fr)); gap: 0 12px; margin-top: 8px; }
+.cfg-grid :deep(.el-form-item) { margin-bottom: 6px; }
+.cfg-grid :deep(.el-form-item__label) { padding-right: 8px; }
+.mb { margin-bottom: 12px; }
 </style>

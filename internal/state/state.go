@@ -16,27 +16,27 @@ type Robot struct {
 	// Zone 中控侧归属区（"<服key>/<区key>"，由控制通道在事件入队时打标）——命令路由依据。
 	Zone string `json:"zone,omitempty"`
 	// Server 机器人上报的游戏服地址（如 "47.96.8.240:2400"）。
-	Server      string         `json:"server,omitempty"`
-	Online      bool           `json:"online"`
-	State       string         `json:"state"`
-	TaskIndex   int            `json:"task_index"`
-	Done        int            `json:"done"`
-	ChainDone   bool           `json:"chain_done"`
-	RoleName    string         `json:"role_name,omitempty"`
-	Level       int            `json:"level"`
+	Server    string `json:"server,omitempty"`
+	Online    bool   `json:"online"`
+	State     string `json:"state"`
+	TaskIndex int    `json:"task_index"`
+	Done      int    `json:"done"`
+	ChainDone bool   `json:"chain_done"`
+	RoleName  string `json:"role_name,omitempty"`
+	Level     int    `json:"level"`
 	// LevelPending / LevelPendingN 等级"大幅回退"待确认（连续 LevelPendingN 次上报同一新值才真切换，
 	// 见 event.applyLevel）：单次错值不覆盖已确认等级、不触发意图切换。
 	// json:"-"：纯内部防抖状态，不进 status 接口/面板。
-	LevelPending  int `json:"-"`
-	LevelPendingN int `json:"-"`
-	MapID         int `json:"mapid"`
-	Fight       bool           `json:"fight"`
-	Pos         []int          `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
-	PosGrid     []int          `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
-	Fpp         int            `json:"fpp,omitempty"`
-	RoleID      int            `json:"role_id,omitempty"`
-	Ghost       map[string]any `json:"ghost,omitempty"`
-	GhostTarget []int          `json:"ghost_target,omitempty"`
+	LevelPending  int            `json:"-"`
+	LevelPendingN int            `json:"-"`
+	MapID         int            `json:"mapid"`
+	Fight         bool           `json:"fight"`
+	Pos           []int          `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
+	PosGrid       []int          `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
+	Fpp           int            `json:"fpp,omitempty"`
+	RoleID        int            `json:"role_id,omitempty"`
+	Ghost         map[string]any `json:"ghost,omitempty"`
+	GhostTarget   []int          `json:"ghost_target,omitempty"`
 	// Hatch 孵化会话（机器人上报原样透传）：{active,kind,egg_item,mapid,battles,hatched,reason,since_ms}。
 	// 与 ghost 同口径：字段存在但 active=false 不算在孵化。
 	Hatch map[string]any `json:"hatch,omitempty"`
@@ -48,21 +48,29 @@ type Robot struct {
 	// 反复卡死又被重登拉起的号会 churn，达阈值当天不再派（跨日自动归零）。
 	StuckCount int    `json:"stuck_count,omitempty"`
 	StuckDay   string `json:"stuck_day,omitempty"`
-	HP          []int          `json:"hp,omitempty"` // [当前, 上限]（机器人上报就是二元数组）
-	MP          []int          `json:"mp,omitempty"` // [当前, 上限]
-	Bag         any            `json:"bag,omitempty"`
-	Equip       any            `json:"equip,omitempty"`
-	Summons     any            `json:"summons,omitempty"`
-	Booth       any            `json:"booth,omitempty"`
-	Walk        any            `json:"walk,omitempty"`
-	Route       any            `json:"route,omitempty"`
-	HS          bool           `json:"hs"` // 游戏服握手完成（≠登录成功）
-	ErrCode     string         `json:"err_code,omitempty"`
-	ErrTS       float64        `json:"err_ts,omitempty"`
-	ErrRepeat   int            `json:"err_repeat,omitempty"`
-	ErrMsg      string         `json:"err_msg,omitempty"`
-	LastTask    int            `json:"last_task,omitempty"`
-	LastSeen    float64        `json:"last_seen"`
+	HP         []int  `json:"hp,omitempty"` // [当前, 上限]（机器人上报就是二元数组）
+	MP         []int  `json:"mp,omitempty"` // [当前, 上限]
+	Bag        any    `json:"bag,omitempty"`
+	Equip      any    `json:"equip,omitempty"`
+	Summons    any    `json:"summons,omitempty"`
+	Booth      any    `json:"booth,omitempty"`
+	// Walk 游荡状态（机器人上报原样透传）：{enabled,mapid,state}。
+	// 2026-09-22 试跑实测：号刚被派去半月岛，恢复引擎就把它当"没任务"补发 ghost_start
+	// （游荡内部会互相排斥地停掉抓鬼），游荡被打断 → 加这个字段让恢复/自动任务让路。
+	Walk any `json:"walk,omitempty"`
+	// SvrOnline 全服在线（含真实玩家）：机器人 `@online` 回执解析后上报，{count,ts}。
+	// 只有"查到过"的那个号会带这个字段（整进程 2 分钟查一次），中控取最新一条展示。
+	SvrOnline map[string]any `json:"svr_online,omitempty"`
+	Route     any            `json:"route,omitempty"`
+	HS        bool           `json:"hs"` // 游戏服握手完成（≠登录成功）
+	// HasEgg 是否有坐骑蛋（装备栏五行珠槽在孵 or 背包里有）—— 孵化池过滤用；机器人上报。
+	HasEgg    bool    `json:"has_egg,omitempty"`
+	ErrCode   string  `json:"err_code,omitempty"`
+	ErrTS     float64 `json:"err_ts,omitempty"`
+	ErrRepeat int     `json:"err_repeat,omitempty"`
+	ErrMsg    string  `json:"err_msg,omitempty"`
+	LastTask  int     `json:"last_task,omitempty"`
+	LastSeen  float64 `json:"last_seen"`
 }
 
 // GhostActive 是否有**活跃**抓鬼会话（机器人上报的 ghost.enabled=true；字段存在但已停
@@ -114,6 +122,10 @@ func (r Robot) Walking() bool {
 
 // State 全局状态（并发安全）。
 type State struct {
+	// ghostUnavail 账号 → "今天抓鬼不可用/已满"的日期串（跨日自动失效）。
+	//   独立于 robots 行：行会被 removeAccount 删掉，标记必须留着（否则会被反复拉起）。
+	ghostUnavail map[string]string
+
 	mu sync.RWMutex
 
 	robots  map[string]*Robot
@@ -136,6 +148,45 @@ func New() *State {
 // ---------------------------------------------------------------- robots
 
 // Update 对指定账号执行更新（不存在则创建）；fn 在锁内执行。
+// MarkGhostDoneToday 记下"该号今天抓鬼不可用/已满额"。
+//
+// ⚠️ 必须存在**独立的表**里（不能写 robot 行）—— 调用方紧接着就 `removeAccount`
+// 把行删掉了，写在行上的标记会随之丢失（2026-09-22 踩过：标记数一直是 0）。
+func (s *State) MarkGhostDoneToday(account string) {
+	if account == "" {
+		return
+	}
+	day := time.Now().Format("20060102")
+	s.mu.Lock()
+	if s.ghostUnavail == nil {
+		s.ghostUnavail = map[string]string{}
+	}
+	s.ghostUnavail[account] = day
+	s.mu.Unlock()
+}
+
+// GhostDoneToday 该号今天是否已抓满/不可用（跨日自动 false）。
+func (s *State) GhostDoneToday(account string) bool {
+	s.mu.RLock()
+	day, ok := s.ghostUnavail[account]
+	s.mu.RUnlock()
+	return ok && day == time.Now().Format("20060102")
+}
+
+// GhostUnavailableTodayCount 今天已标"抓鬼不可用"的号数（面板展示/排查用）。
+func (s *State) GhostUnavailableTodayCount() int {
+	today := time.Now().Format("20060102")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, d := range s.ghostUnavail {
+		if d == today {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *State) Update(account string, fn func(r *Robot)) *Robot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,6 +265,63 @@ func (s *State) Counts() (online, handshake, total int) {
 		}
 	}
 	return
+}
+
+// SvrOnlineLatest 返回最近一次"全服在线(含真人)"读数与时间戳(ms)。
+//
+// 数据来源：机器人定时发 `@online`（服务端 DEPLOY 权限即可）→ 回执里带在线角色数
+// （role_manager 全部在线角色 = 真人 + 我们的号）→ 机器人上报 svr_online{count,ts}。
+// 多个号里取 ts 最新的一条（只有查到过的那一个号带该字段）。ok=false 表示还没有读数。
+func (s *State) SvrOnlineLatest() (count int, tsMS float64, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.robots {
+		if r.SvrOnline == nil {
+			continue
+		}
+		c := numToInt(r.SvrOnline["count"])
+		t := numToFloat(r.SvrOnline["ts"])
+		if c <= 0 || t <= 0 {
+			continue
+		}
+		if t > tsMS {
+			count, tsMS, ok = c, t, true
+		}
+	}
+	return
+}
+
+// numToInt / numToFloat：JSON 解出来的数字是 float64，这里做宽松转换（失败返回 0）。
+func numToInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case float32:
+		return int(x)
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case uint64:
+		return int(x)
+	}
+	return 0
+}
+
+func numToFloat(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case uint64:
+		return float64(x)
+	}
+	return 0
 }
 
 // StaleAccounts 返回超过 ttl 秒未心跳的账号（清理陈旧行用）。

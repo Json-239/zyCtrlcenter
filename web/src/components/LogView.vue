@@ -1,7 +1,12 @@
 <script setup>
+// 运行日志：实时滚动 + 等级筛选 + 暂停/清空。
+// 2026-09-22 改 Element Plus 工具栏（筛选/跟随/暂停/清空）；日志列表**保持原生滚动容器**：
+// 自动跟随逻辑依赖 scrollTop/scrollHeight/clientHeight，换成 el-scrollbar 会多一层包装，
+// 收益（几乎相同的细滚动条，styles.css 已全局覆盖）不值这个风险。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { apiGet } from '../api'
-import { state, post, mapLabel, posLabel, taskLabel, logEvents, logVersion } from '../store'
+import { post, mapLabel, posLabel, taskLabel, logEvents, logVersion } from '../store'
 
 const MAX_DOM = 300      // 最多渲染多少行（渲染成本与滚动流畅度的平衡）
 const NEAR_BOTTOM = 40   // 距底部多少像素算"贴底"
@@ -12,6 +17,7 @@ const paused = ref(false)
 const autoScroll = ref(true)
 const listEl = ref(null)
 const err = ref('')
+const frozen = ref([])   // 暂停时的快照（先声明：rows 计算属性会读它）
 
 onMounted(async () => {
   try {
@@ -51,10 +57,15 @@ const rows = computed(() => {
   return all.filter(match).slice(-MAX_DOM)
 })
 
-const frozen = ref([])
+// 暂停时拍一张当前视图的快照（切换筛选也要重拍，否则列表像"点不动"）
+function snapshot() {
+  frozen.value = logEvents.slice(-MAX_DOM).filter(match)
+}
+watch(filter, () => { if (paused.value) snapshot() })
+
 function togglePause() {
   if (!paused.value) {
-    frozen.value = logEvents.slice(-MAX_DOM).filter(match)
+    snapshot()
     paused.value = true
   } else {
     paused.value = false
@@ -118,6 +129,11 @@ function onScroll() {
   if (atBottom !== autoScroll.value) autoScroll.value = atBottom
 }
 
+// 手动打开"跟随最新"时立刻贴底（开关从关到开要有即时反馈）
+function onFollowChange(v) {
+  if (v) scrollToBottomSoon()
+}
+
 let scrollScheduled = false
 function scrollToBottomSoon() {
   if (scrollScheduled) return
@@ -134,7 +150,15 @@ function scrollToBottomSoon() {
 watch(logVersion, () => scrollToBottomSoon())
 
 async function clearLogs() {
-  if (!confirm('清空所有运行日志（当天截断 + 删除历史）？')) return
+  try {
+    await ElMessageBox.confirm(
+      '将清空当天运行日志并删除历史日志文件，且不可恢复。',
+      '清空日志',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch (e) {
+    return // 用户取消
+  }
   const res = await post('/api/logs/clear', {})
   if (res.ok) { seed.value = []; logEvents.length = 0; logVersion.value++ }
 }
@@ -143,24 +167,26 @@ async function clearLogs() {
 <template>
   <div class="card">
     <div class="row">
-      <div class="chips">
-        <span
-          v-for="f in filters" :key="f.key"
-          class="chip" :class="{ active: filter === f.key }"
-          @click="filter = f.key"
-        >{{ f.label }}</span>
-      </div>
+      <el-radio-group v-model="filter" size="small">
+        <el-radio-button v-for="f in filters" :key="f.key" :value="f.key">{{ f.label }}</el-radio-button>
+      </el-radio-group>
       <span class="spacer" />
-      <label class="row muted" style="gap:4px">
-        <input v-model="autoScroll" type="checkbox" @change="autoScroll && scrollToBottomSoon()" /> 跟随最新
-      </label>
-      <button class="btn sm" @click="togglePause">{{ paused ? '继续' : '暂停' }}</button>
-      <button class="btn sm danger" @click="clearLogs">清空日志</button>
-      <span class="tag dim">{{ rows.length }} 条</span>
+      <el-switch v-model="autoScroll" size="small" active-text="跟随最新" @change="onFollowChange" />
+      <el-button size="small" :type="paused ? 'warning' : 'default'" @click="togglePause">
+        <el-icon><VideoPause v-if="!paused" /><VideoPlay v-else /></el-icon>
+        <span>{{ paused ? '继续' : '暂停' }}</span>
+      </el-button>
+      <el-button size="small" type="danger" plain @click="clearLogs">
+        <el-icon><Delete /></el-icon>
+        <span>清空日志</span>
+      </el-button>
+      <el-tag size="small" type="info" effect="plain">显示 {{ rows.length }} 条</el-tag>
+      <span v-if="rows.length >= MAX_DOM" class="muted small">只显示最近 {{ MAX_DOM }} 条</span>
+      <el-tag v-if="paused" size="small" type="warning" effect="plain">已暂停（列表冻结）</el-tag>
     </div>
   </div>
 
-  <div v-if="err" class="card"><span class="tag danger">{{ err }}</span></div>
+  <el-alert v-if="err" class="mb" type="error" :closable="false" show-icon :title="err" />
 
   <div ref="listEl" class="log-list" @scroll.passive="onScroll">
     <div
@@ -173,14 +199,19 @@ async function clearLogs() {
       <span class="acc">{{ ev.account || '' }}</span>
       <span class="msg">{{ textOf(ev) }}</span>
     </div>
-    <div v-if="!rows.length" class="empty">
-      <svg class="empty-art" viewBox="0 0 48 48" width="46" height="46" aria-hidden="true">
-        <rect x="10" y="14" width="28" height="20" rx="6" fill="none" stroke="currentColor" stroke-width="2" />
-        <circle cx="19" cy="24" r="2.4" fill="currentColor" />
-        <circle cx="29" cy="24" r="2.4" fill="currentColor" />
-        <path d="M18 30h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-      </svg>
-      暂无日志。运行历史按天写入 <span class="mono">data/runs_YYYYMMDD.jsonl</span>，有事件时这里会实时滚动。
-    </div>
+    <el-empty v-if="!rows.length" :image-size="60">
+      <template #description>
+        <span class="muted">
+          暂无日志。运行历史按天写入 <span class="mono">data/runs_YYYYMMDD.jsonl</span>，有事件时这里会实时滚动。
+        </span>
+      </template>
+    </el-empty>
   </div>
 </template>
+
+<style scoped>
+/* 两个卡片之间的间距（.card 自带 margin-bottom，这里只给 alert 补一点） */
+.mb { margin-bottom: 12px; }
+/* 日志列表固定高度（一屏铺满、内部滚动）：只靠 max-height 时行少会塌成一条 */
+.log-list { height: calc(100vh - 236px); min-height: 320px; max-height: none; }
+</style>

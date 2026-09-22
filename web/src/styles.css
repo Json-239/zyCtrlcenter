@@ -84,11 +84,19 @@ button.btn.ghost { background: transparent; }
 button.btn:disabled { opacity: .45; cursor: not-allowed; }
 button.btn.sm { padding: 3px 9px; font-size: 12px; }
 
-input[type="text"], input[type="number"], select {
+/* 2026-09-22 修复: 全局表单控件规则必须排除 Element 组件内部的 input/select ——
+   否则 el-select 的 filterable 搜索框背景被这里覆盖，而 Element 用 z-index:-1 的
+   placeholder 承载"选中文本"，被 background 盖住后会看起来"下拉是空白的"
+   （由 MapView/ChainView 改造实测发现；排除 [class*="el-"] 即覆盖全部 Element 内部控件）。*/
+input[type="text"]:not([class*="el-"]),
+input[type="number"]:not([class*="el-"]),
+select:not([class*="el-"]) {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 10px; font-size: 13px; outline: none;
 }
-input:focus, select:focus { border-color: var(--accent); }
+input[type="text"]:not([class*="el-"]):focus,
+input[type="number"]:not([class*="el-"]):focus,
+select:not([class*="el-"]):focus { border-color: var(--accent); }
 
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .spacer { flex: 1; }
@@ -302,4 +310,114 @@ button.btn:active { transform: translateY(1px) scale(.985); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
+
+/* ============================================================
+   2026-09-22 Element Plus 深色主题适配
+   - 组件库已全量注册（main.js），深色由 html.dark 提供；
+   - 这里把 Element 的设计变量对到项目色板（--bg/--panel/--accent…），
+     保证 el-table / el-dialog / el-input 等与现有页面同一套配色；
+   - 下面的滚动条是全站细样式（原 .table-wrap/.log-list 专属样式保留）。
+   ============================================================ */
+html.dark {
+  /* 主色 / 语义色（与 --accent/--ok/--warn/--danger/--info 一致） */
+  --el-color-primary: #4c8dff;
+  --el-color-primary-light-3: #3f79dd;
+  --el-color-primary-light-5: #335fa9;
+  --el-color-primary-light-7: #274675;
+  --el-color-primary-light-8: #203a60;
+  --el-color-primary-light-9: #1a2c49;
+  --el-color-primary-dark-2: #6ba1ff;
+  --el-color-success: #3ecf8e;
+  --el-color-success-light-3: #32a973;
+  --el-color-success-light-9: #16302a;
+  --el-color-warning: #f5b83d;
+  --el-color-warning-light-3: #c79531;
+  --el-color-warning-light-9: #332c1c;
+  --el-color-danger: #ff5d6c;
+  --el-color-danger-light-3: #cc4a57;
+  --el-color-danger-light-9: #331c22;
+  --el-color-error: #ff5d6c;
+  --el-color-info: #93a1c0;
+  --el-color-info-light-3: #76829c;
+  --el-color-info-light-9: #232b3d;
+
+  /* 背景 / 文字 / 边框 */
+  --el-bg-color: #182136;
+  --el-bg-color-page: #0e1320;
+  --el-bg-color-overlay: #1e2941;
+  --el-text-color-primary: #e8edf7;
+  --el-text-color-regular: #c7d3ea;
+  --el-text-color-secondary: #93a1c0;
+  --el-text-color-placeholder: #64719b;
+  --el-text-color-disabled: #55627f;
+  --el-border-color: #2a3757;
+  --el-border-color-light: #24304d;
+  --el-border-color-lighter: #202b45;
+  --el-border-color-extra-light: #1c2740;
+  --el-border-color-dark: #33415f;
+  --el-fill-color: #1e2941;
+  --el-fill-color-light: #202b45;
+  --el-fill-color-lighter: #1c2740;
+  --el-fill-color-extra-light: #182136;
+  --el-fill-color-dark: #24304d;
+  --el-fill-color-darker: #2a3757;
+  --el-fill-color-blank: #141b2d;
+  --el-mask-color: rgba(6, 10, 20, .72);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+  --el-box-shadow-light: 0 4px 16px rgba(0, 0, 0, .35);
+  --el-box-shadow-lighter: 0 2px 10px rgba(0, 0, 0, .28);
+  --el-disabled-bg-color: #1c2740;
+}
+
+/* 表格：默认透明底（融入卡片），表头贴合面板色，行悬停用主色淡染 */
+html.dark .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: #141b2d;
+  --el-table-header-text-color: #93a1c0;
+  --el-table-text-color: #e8edf7;
+  --el-table-border-color: #24304d;
+  --el-table-row-hover-bg-color: rgba(76, 141, 255, .08);
+  --el-table-current-row-bg-color: rgba(76, 141, 255, .12);
+  --el-table-fixed-box-shadow: 2px 0 8px rgba(0, 0, 0, .35);
+}
+html.dark .el-table th.el-table__cell { font-weight: 600; }
+html.dark .el-table .el-table__inner-wrapper::before { background-color: transparent; }
+
+/* 对话框 / 抽屉 / 卡片 / 折叠面板：统一圆角与描边 */
+html.dark .el-dialog { border: 1px solid var(--border); }
+html.dark .el-dialog__header { margin-right: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+html.dark .el-dialog__title { font-size: 15px; font-weight: 600; }
+html.dark .el-card { border-color: var(--border); }
+html.dark .el-collapse { --el-collapse-header-bg-color: transparent; --el-collapse-content-bg-color: transparent; --el-collapse-border-color: var(--border); }
+
+/* 分页：小尺寸、贴合面板 */
+html.dark .el-pagination { --el-pagination-bg-color: transparent; --el-pagination-button-bg-color: transparent; --el-pagination-hover-color: #fff; }
+
+/* 输入类控件：与现有 input 视觉一致 */
+html.dark .el-input__wrapper,
+html.dark .el-select__wrapper,
+html.dark .el-textarea__inner { box-shadow: 0 0 0 1px var(--border) inset; background-color: var(--bg); }
+html.dark .el-input__wrapper.is-focus,
+html.dark .el-select__wrapper.is-focused { box-shadow: 0 0 0 1px var(--accent) inset; }
+
+/* 全站细滚动条（覆盖 el-scrollbar 之外的普通滚动容器） */
+* { scrollbar-width: thin; scrollbar-color: #33415f transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: #33415f; border-radius: 8px;
+  border: 3px solid transparent; background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: #43557e; background-clip: content-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* 弹层内滚动条同色（MessageBox / Select 下拉 / Dialog 内容） */
+.el-message-box, .el-select-dropdown, .el-dialog { scrollbar-color: #33415f transparent; }
+
+/* 表格在卡片里留白更紧凑 */
+.el-card + .el-card { margin-top: 16px; }
+.el-table .cell { line-height: 1.45; }
 

@@ -1,5 +1,9 @@
 <script setup>
+// 「链数据」页：链文件列表 / 任务节点表 / 模块视图（组装出的链路）。
+// 2026-09-22 UI 改 Element Plus：下拉与输入换组件、两个大表换 el-table（长文本溢出用 tooltip）、
+// 模块用量/步骤标签换 el-tag；数据来源与交互（含"自动分配"哨兵值）保持不变。
 import { computed, onMounted, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { apiGet } from '../api'
 import { post } from '../store'
 
@@ -15,6 +19,7 @@ const chainId = ref('')
 const accountsText = ref('')
 const keyword = ref('')
 const warnings = ref([]) // /api/start 回带的"条件不匹配"提示（如该走抓鬼却选了剧情链）
+const loading = ref(false)
 
 // 「自动分配」是下拉里的哨兵值（不是链 id）：交给后端按意图分组下发
 const AUTO = '__auto__'
@@ -22,7 +27,15 @@ const current = computed(() => list.value.find((c) => c.id === chainId.value) ||
 // 导航数据（没有任务节点的文件，如 zhongkui_nav）：**可以在这里查看**，但不能当任务链启动
 const navOnly = computed(() => !!current.value?.nav_only)
 
+// 节点表空态文案（三种情况分开说，别让"自动分配"看起来像掉数据了）
+const emptyText = computed(() => {
+  if (chainId.value === AUTO) return '「自动分配」由后端按每个号的意图决定跑哪条链，这里没有单条链的节点表；选一条具体的链可以看节点。'
+  if (found.value) return '该链没有任务节点数据'
+  return '还没有链数据文件：把 <chain_id>.json 放进上面的链目录即可'
+})
+
 async function loadList() {
+  loading.value = true
   try {
     const res = await apiGet('/api/chains')
     list.value = res.chains || []
@@ -30,6 +43,8 @@ async function loadList() {
     if (!chainId.value && list.value.length) chainId.value = AUTO // 默认「自动分配」：按账号意图决定跑哪条（抓鬼走 ghost_start）
   } catch (e) {
     err.value = e.message
+  } finally {
+    loading.value = false
   }
 }
 
@@ -75,6 +90,10 @@ const MODULE_LABEL = {
 function modLabel(m) { return MODULE_LABEL[m] || m }
 function modLevel(m) {
   return { talk: 'ok', fight: 'danger', buy: 'warn', restore: 'warn', wait: 'dim' }[m] || 'dim'
+}
+// 原有语义色类名 → el-tag 的 type（配色含义不变）
+function tagType(cls) {
+  return { ok: 'success', danger: 'danger', warn: 'warning', info: 'info', dim: 'info' }[cls] || 'info'
 }
 function stepTitle(s) {
   const args = s.args ? JSON.stringify(s.args) : ''
@@ -132,42 +151,56 @@ async function start() {
   warnings.value = Array.isArray(res?.warnings) ? res.warnings : []
 }
 async function stop() { await post('/api/stop', cmdBody()) }
-async function reset() { await post('/api/reset', cmdBody()) }
+// 重置重跑：给账号下发 reset（机器人端会从头跑），属破坏性动作 → 二次确认
+async function reset() {
+  try {
+    await ElMessageBox.confirm(
+      '给所选账号下发「重置重跑」？该号当前的链路进度会被清掉、从头开始跑。',
+      '重置重跑',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch (e) {
+    return // 用户取消
+  }
+  await post('/api/reset', cmdBody())
+}
 </script>
 
 <template>
-  <div v-if="err" class="card"><span class="tag danger">{{ err }}</span></div>
+  <el-alert v-if="err" class="mb" type="error" :closable="false" show-icon :title="err" />
 
   <div class="card">
     <h3>启动任务链</h3>
     <div class="row">
-      <select v-model="chainId" style="min-width: 300px">
-        <option :value="AUTO">自动分配（按意图：等级 &lt;31 新手链 / 其余抓鬼）</option>
-        <option value="">（不指定链，仅下发 chain_id）</option>
-        <option v-for="c in list" :key="c.id" :value="c.id">
-          {{ c.name || c.chain_id || c.id }}（{{ c.nav_only ? '导航数据，不可直接启动' : c.task_count + ' 节点' }}）
-        </option>
-      </select>
-      <input v-model="accountsText" type="text" placeholder="账号（空=全部；多个用逗号分隔）" style="width: 380px" />
-      <button
-        class="btn primary"
+      <el-select v-model="chainId" size="small" style="width: 340px" filterable>
+        <el-option :value="AUTO" label="自动分配（按意图：等级 <31 新手链 / 其余抓鬼）" />
+        <el-option value="" label="（不指定链，仅下发 chain_id）" />
+        <el-option
+          v-for="c in list" :key="c.id" :value="c.id"
+          :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据，不可直接启动' : c.task_count + ' 节点'}）`"
+        />
+      </el-select>
+      <el-input v-model="accountsText" size="small" style="width: 380px" clearable
+                placeholder="账号（空=全部；多个用逗号分隔）" />
+      <el-button
+        size="small" type="primary"
         :disabled="navOnly"
         :title="navOnly ? '这是导航数据（没有任务节点），不能作为任务链启动；抓鬼请选「自动分配」' : ''"
         @click="start"
-      >启动链</button>
-      <button class="btn" @click="stop">停链</button>
-      <button class="btn danger" @click="reset">重置重跑</button>
-      <button class="btn ghost" @click="loadList(); loadDetail()">刷新</button>
+      >启动链</el-button>
+      <el-button size="small" @click="stop">停链</el-button>
+      <el-button size="small" type="danger" plain @click="reset">重置重跑</el-button>
+      <el-button size="small" @click="loadList(); loadDetail()">
+        <el-icon><Refresh /></el-icon>
+        <span>刷新</span>
+      </el-button>
     </div>
-    <p v-if="navOnly" class="muted" style="margin: 10px 0 0">
-      <span class="tag warn">导航数据</span>
+    <el-alert v-if="navOnly" class="mt" type="warning" :closable="false" show-icon title="导航数据">
       <span class="mono">{{ chainId }}</span> 是抓鬼导航数据（没有任务节点）：可以在这里查看内容，但
       <b>不能作为任务链启动</b> —— 抓鬼请选「自动分配」（后端会下发
       <span class="mono">ghost_start</span> 并带上这份导航数据）。
-    </p>
-    <p v-for="w in warnings" :key="w.account" class="muted" style="margin: 10px 0 0">
-      <span class="tag warn">提示</span> {{ w.msg }}
-    </p>
+    </el-alert>
+    <el-alert v-for="w in warnings" :key="w.account" class="mt" type="warning" :closable="false" show-icon :title="w.msg" />
     <p class="muted" style="margin: 10px 0 0">
       链数据文件驱动：把 <span class="mono">&lt;chain_id&gt;.json</span> 放进链目录即会出现在列表；
       文件内容由中控<b>原样透传</b>给机器人（未声明字段与字段形状都不改）。
@@ -178,7 +211,8 @@ async function reset() { await post('/api/reset', cmdBody()) }
 
   <div class="card">
     <div class="row" style="margin-bottom: 8px">
-      <span class="tag" :class="found ? 'ok' : 'warn'">{{ found ? '已找到链数据' : '无链数据文件' }}</span>
+      <el-tag v-if="chainId === AUTO" size="small" type="info" effect="plain">自动分配（按意图）</el-tag>
+      <el-tag v-else size="small" :type="found ? 'success' : 'warning'" effect="plain">{{ found ? '已找到链数据' : '无链数据文件' }}</el-tag>
       <span class="mono muted">{{ chainId || '（未选择）' }}</span>
       <span v-if="note" class="muted">{{ note }}</span>
     </div>
@@ -201,33 +235,38 @@ async function reset() { await post('/api/reset', cmdBody()) }
       </div>
     </div>
 
-    <div class="table-wrap" style="max-height: 46vh; margin-top: 12px">
-      <table>
-        <thead><tr><th style="width:90px">序号</th><th style="width:140px">任务号</th><th>名称</th><th style="width:140px">接取 NPC</th><th style="width:200px">后续任务</th></tr></thead>
-        <tbody>
-          <tr v-for="(n, i) in nodes" :key="i" :title="n.raw">
-            <td class="muted">{{ i + 1 }}</td>
-            <td class="mono">{{ n.index }}</td>
-            <td>{{ n.name || '--' }}</td>
-            <td class="mono">{{ n.npc || '--' }}</td>
-            <td class="mono muted">{{ n.next || '--' }}</td>
-          </tr>
-          <tr v-if="!nodes.length">
-            <td colspan="5">
-              <div class="empty">
-                {{ found ? '该链没有任务节点数据' : '还没有链数据文件：把 <chain_id>.json 放进上面的链目录即可' }}
-                <div v-if="!found" style="margin-top:10px">
-                  <button class="btn sm" @click="chainId = '_example'">看示例模板（_example）</button>
-                  <span class="muted"> —— 模板里有一条任务节点 + 购买提示，能直接看到「模块视图」长什么样</span>
-                </div>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <el-table :data="nodes" v-loading="loading" size="small" max-height="46vh" style="width: 100%; margin-top: 12px">
+      <el-table-column label="序号" width="70">
+        <template #default="{ $index }"><span class="muted">{{ $index + 1 }}</span></template>
+      </el-table-column>
+      <el-table-column label="任务号" width="140">
+        <template #default="{ row }"><span class="mono">{{ row.index }}</span></template>
+      </el-table-column>
+      <el-table-column label="名称" min-width="200" show-overflow-tooltip>
+        <!-- 原始 JSON 仍挂在名称上（悬停可看），排障习惯不变 -->
+        <template #default="{ row }"><span :title="row.raw">{{ row.name || '--' }}</span></template>
+      </el-table-column>
+      <el-table-column label="接取 NPC" width="150">
+        <template #default="{ row }"><span class="mono">{{ row.npc || '--' }}</span></template>
+      </el-table-column>
+      <el-table-column label="后续任务" min-width="180" show-overflow-tooltip>
+        <template #default="{ row }"><span class="mono muted">{{ row.next || '--' }}</span></template>
+      </el-table-column>
+      <template #empty>
+        <el-empty :image-size="56" :description="emptyText">
+          <template v-if="!found && chainId !== AUTO" #default>
+            <el-button size="small" @click="chainId = '_example'">看示例模板（_example）</el-button>
+            <div class="muted small" style="margin-top: 6px">
+              模板里有一条任务节点 + 购买提示，能直接看到「模块视图」长什么样
+            </div>
+          </template>
+        </el-empty>
+      </template>
+    </el-table>
     <div class="row" style="margin-top: 8px" v-if="detail && (detail.task_order || []).length > 100">
-      <input v-model="keyword" type="text" placeholder="搜索任务号或名称" style="width: 240px" />
+      <el-input v-model="keyword" size="small" style="width: 240px" clearable placeholder="搜索任务号或名称">
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
       <span class="muted">节点较多，默认只显示前 100 个</span>
     </div>
   </div>
@@ -238,45 +277,43 @@ async function reset() { await post('/api/reset', cmdBody()) }
       <h3 style="margin:0">模块视图（组装出的链路）</h3>
       <span class="muted">寻路 → 移动 →（跨图）→ 战斗 → 状态补充 → 对话 → 购买/加点 → 等下一环</span>
       <span class="spacer" />
-      <span v-if="plan.active_accept" class="tag warn">允许主动接取</span>
+      <el-tag v-if="plan.active_accept" size="small" type="warning" effect="plain">允许主动接取</el-tag>
       <span class="muted">任务 {{ planTasks.length }} 个</span>
     </div>
 
     <div class="row" style="margin-bottom:6px" v-if="planModules.length">
       <span class="muted">模块用量</span>
-      <span v-for="[m, n] in planModules" :key="m" class="tag" :class="modLevel(m)">{{ modLabel(m) }} ×{{ n }}</span>
+      <el-tag v-for="[m, n] in planModules" :key="m" size="small" :type="tagType(modLevel(m))" effect="plain">
+        {{ modLabel(m) }} ×{{ n }}
+      </el-tag>
     </div>
 
-    <div class="row" v-if="planErr" style="margin-bottom:6px">
-      <span class="tag danger">结构问题</span>
-      <span class="warnText">{{ planErr }}</span>
-    </div>
-    <div class="row muted" v-if="planWarnings.length" style="margin-bottom:6px; display:block">
-      <div v-for="(w, i) in planWarnings" :key="i">· {{ w }}</div>
-    </div>
+    <el-alert v-if="planErr" class="mb" type="error" :closable="false" show-icon :title="`结构问题：${planErr}`" />
+    <el-alert v-if="planWarnings.length" class="mb" type="warning" :closable="false" show-icon title="组装提示">
+      <div v-for="(w, i) in planWarnings" :key="i" class="muted small">· {{ w }}</div>
+    </el-alert>
 
-    <div class="table-wrap" style="max-height: 42vh">
-      <table>
-        <thead><tr><th style="width:140px">任务号</th><th style="width:160px">名称</th><th>模块序列</th></tr></thead>
-        <tbody>
-          <tr v-for="t in planTasks" :key="t.task_index">
-            <td class="mono">{{ t.task_index }}</td>
-            <td>{{ t.name || '--' }}</td>
-            <td>
-              <span v-for="s in t.steps" :key="s.order" class="tag" :class="modLevel(s.module)"
-                    :title="stepTitle(s)" style="margin-right:4px">{{ modLabel(s.module) }}</span>
-            </td>
-          </tr>
-          <tr v-if="!planTasks.length">
-            <td colspan="3">
-              <div class="empty">
-                {{ (plan.tasks || []).length ? '没有匹配的任务' : '这条链没有任务节点（task_order 为空）：只下发 chain_id，由机器人端自行决定怎么跑' }}
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <el-table :data="planTasks" size="small" max-height="42vh" style="width: 100%">
+      <el-table-column label="任务号" width="140">
+        <template #default="{ row }"><span class="mono">{{ row.task_index }}</span></template>
+      </el-table-column>
+      <el-table-column label="名称" width="170" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.name || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="模块序列" min-width="320">
+        <template #default="{ row }">
+          <el-tag
+            v-for="s in row.steps" :key="s.order"
+            size="small" :type="tagType(modLevel(s.module))" effect="plain"
+            :title="stepTitle(s)" style="margin: 1px 4px 1px 0"
+          >{{ modLabel(s.module) }}</el-tag>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <el-empty :image-size="56"
+                  :description="(plan.tasks || []).length ? '没有匹配的任务' : '这条链没有任务节点（task_order 为空）：只下发 chain_id，由机器人端自行决定怎么跑'" />
+      </template>
+    </el-table>
     <p class="muted" style="margin:8px 0 0">
       <b>这是骨架 / 排障视图，不是固定脚本</b>：实际推进由服务端推送驱动，抓鬼/捉鬼要自己寻路去找
       任务给予者 NPC 接取，刷鬼点与任务怪目标都是服务端动态给的（每次跑不一样）。
@@ -285,3 +322,13 @@ async function reset() { await post('/api/reset', cmdBody()) }
     </p>
   </div>
 </template>
+
+<style scoped>
+.mb { margin-bottom: 8px; }
+.mt { margin-top: 10px; }
+/* 排障记录（2026-09-22）：全局规则 input[type="text"]{background:var(--bg)} 会命中 el-select 内部的
+   搜索输入框，而 Element 的选中文本用的是 z-index:-1 的 .el-select__placeholder，
+   结果 filterable 下拉的选中项被这个实心输入框盖住（看起来像"空的下拉"）。
+   这里只把下拉内嵌输入框还原成透明（不写死颜色）；根治应在 styles.css 把那条全局规则排除 .el-*。 */
+:deep(.el-select__input) { background: transparent; border: 0; padding: 0; }
+</style>

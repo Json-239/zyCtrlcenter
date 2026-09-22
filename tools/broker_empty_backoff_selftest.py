@@ -9,7 +9,7 @@ __need_relogin，中控当日卡死计数快速累加，达 3 触发 churn 防�
 
 修复（本文件校验的就是上线那份源码）：
   1) 空菜单未达下线阈值：关对话 + 设 no_action_retry_at = now + 退避
-     （第 1 次 60s、第 2 次 120s）+ 回 READY；不再立即重登。
+     （第 1 次 5s、第 2 次 10s）+ 回 READY；不再立即重登。
   2) READY「找钟馗接取」前加退避判定：未到期原地等（return 0），不点钟馗。
   3) 退避重试上限 BROKER_EMPTY_RETRY_MAX=2；用尽才走 __need_relogin 兜底。
   4) 拿到正常菜单/接到任务 → 清空退避与重试计数。
@@ -118,9 +118,9 @@ real_clear = ns_exec["__clear_broker_empty_backoff"]
 
 
 # ---------------------------------------------------------------- 静态断言
-check("S1 常量: RETRY_MAX=2 / BACKOFF=(60000,120000)",
+check("S1 常量: RETRY_MAX=2 / BACKOFF=(5000, 10000)（2026-09-22 缩短：闲聊菜单=当日不可用，快速二连判下线）",
       ns_exec["BROKER_EMPTY_RETRY_MAX"] == 2 and
-      ns_exec["BROKER_EMPTY_BACKOFF_MS"] == (60 * 1000, 120 * 1000),
+      ns_exec["BROKER_EMPTY_BACKOFF_MS"] == (5 * 1000, 10 * 1000),
       "max=%s backoff=%s" % (ns_exec["BROKER_EMPTY_RETRY_MAX"],
                              ns_exec["BROKER_EMPTY_BACKOFF_MS"]))
 
@@ -264,19 +264,19 @@ def run_empty(branch_fn, need_token, g=None, empty_note_ret=False):
     return ret, g, quest, calls, notes
 
 
-# C1: 空菜单第 1 次(A 路径: 没钱/没令, 未达下线阈值) → 退避 60s, 不重登/不立即重点
+# C1: 空菜单第 1 次(A 路径: 没钱/没令, 未达下线阈值) → 退避 5s, 不重登/不立即重点
 del LOGS[:]
 CLOCK[0] = 10 ** 12
 ret, g, quest, calls, _ = run_empty(empty_branch, need_token=False)
 ok = (ret is True and calls["relogin"] == 0 and calls["goto"] == 0
       and g.no_action_retry == 1
-      and g.no_action_retry_at == CLOCK[0] + 60 * 1000
+      and g.no_action_retry_at == CLOCK[0] + 5 * 1000
       and g.state == "READY"
       and quest.dialog_open is False and quest.dialog is None
       and quest.pending is None and quest.walk_target is None
       and quest.dijkstra_route == []
-      and any("退避 60s 后重试(第 1/2 次)" in m for _l, m in LOGS))
-check("C1 空菜单第1次(A路径) → 退避60s/回READY/不重登不发点击", ok,
+      and any("退避 5s 后重试(第 1/2 次)" in m for _l, m in LOGS))
+check("C1 空菜单第1次(A路径) → 退避5s/回READY/不重登不发点击", ok,
       "ret=%s relogin=%d goto=%d retry=%s at=%s state=%s log=%s" % (
           ret, calls["relogin"], calls["goto"], g.no_action_retry,
           g.no_action_retry_at, g.state, [m for _l, m in LOGS][-1:]))
@@ -287,10 +287,10 @@ CLOCK[0] = 10 ** 12
 ret, g, quest, calls, _ = run_empty(empty_branch, need_token=True)
 ok = (ret is True and calls["relogin"] == 0 and calls["goto"] == 0
       and g.no_action_retry == 1
-      and g.no_action_retry_at == CLOCK[0] + 60 * 1000
+      and g.no_action_retry_at == CLOCK[0] + 5 * 1000
       and g.state == "READY"
-      and any("退避 60s 后重试" in m for _l, m in LOGS))
-check("C1b 空菜单第1次(B路径) → 退避60s/不重登(修复前此处立即重登)", ok,
+      and any("退避 5s 后重试" in m for _l, m in LOGS))
+check("C1b 空菜单第1次(B路径) → 退避5s/不重登(修复前此处立即重登)", ok,
       "ret=%s relogin=%d retry=%s log=%s" % (
           ret, calls["relogin"], g.no_action_retry, [m for _l, m in LOGS][-1:]))
 
@@ -318,17 +318,17 @@ check("C2 退避未到期 → READY 原地等(不发 __goto); 到期/无退避 �
       "wait_ret=%s wait_goto=%d due_ret=%s none_ret=%s" % (
           r_wait, n_after_wait, r_due, r_none))
 
-# C3: 重试序列 60s → 120s → 用尽; B 路径用尽 → 走 __need_relogin 兜底
+# C3: 重试序列 5s → 10s → 用尽; B 路径用尽 → 走 __need_relogin 兜底
 CLOCK[0] = 10 ** 12
 g = FakeG()
 ok_seq = []
 for _i in range(3):
     _t = real_backoff("robot", g, FakeQuest())
     ok_seq.append((_t, g.no_action_retry, g.no_action_retry_at - CLOCK[0]))
-ok_seq_ok = (ok_seq[0] == (True, 1, 60 * 1000)
-             and ok_seq[1] == (True, 2, 120 * 1000)
-             and ok_seq[2] == (False, 2, 120 * 1000))
-check("C3a 退避序列: 60s → 120s → 用尽(返回 False)", ok_seq_ok, "seq=%s" % (ok_seq,))
+ok_seq_ok = (ok_seq[0] == (True, 1, 5 * 1000)
+             and ok_seq[1] == (True, 2, 10 * 1000)
+             and ok_seq[2] == (False, 2, 10 * 1000))
+check("C3a 退避序列: 5s → 10s → 用尽(返回 False)", ok_seq_ok, "seq=%s" % (ok_seq,))
 
 del LOGS[:]
 g2 = FakeG(no_action_retry=2)

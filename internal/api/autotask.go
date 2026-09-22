@@ -230,6 +230,11 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			out = append(out, autotask.Candidate{Account: acc, Online: hasLive && r.Online, Level: level,
 				Reason: fmt.Sprintf("新手链（%d 级，未毕业）", level)})
 		case autotask.KindGhost:
+			// 2026-09-22 今日抓鬼已满（服务端 50 次上限，钟馗只回闲聊菜单）→ 当天不再派，
+			//   跨日自动恢复；否则会"满额→下线→又被拉起→钟馗空转"循环堆积。
+			if a.St != nil && a.St.GhostDoneToday(acc) {
+				continue
+			}
 			// 未毕业（新手链未完成）一律不派抓鬼，**含等级未知（<=0）**：
 			// 旧判据 `level > 0 &&` 让 level=0 穿过这道过滤，ghostGate 又不拦 0，
 			// 于是 1 级新手号在上线瞬间被当抓鬼候选下发，服务端以通知码 71
@@ -386,39 +391,15 @@ func (a *API) autotaskOnlineCount(kind autotask.Kind) int {
 // ---------------------------------------------------------------- 真实动作
 
 // onlineForAuto 上线一批号（密码只从池里取；分批 + 间隔，避免一次砸太多）。
+// 与手动「批量上线」共用同一条下发通路（sendOnlineChunks）。
 func (a *API) onlineForAuto(accs []string) (int, error) {
-	gameAddr := a.gameAddrOf("")
-	sent, chunks := 0, 0
-	for start := 0; start < len(accs); start += 10 {
-		end := start + 10
-		if end > len(accs) {
-			end = len(accs)
-		}
-		payload := make([]any, 0, end-start)
-		for _, acc := range accs[start:end] {
-			pwd, ok := a.Accounts.PasswordFor(acc, gameAddr)
-			if !ok {
-				continue
-			}
-			payload = append(payload, []string{acc, pwd})
-		}
-		if len(payload) == 0 {
-			continue
-		}
-		if a.Events.SendCmd(map[string]any{"cmd": "robot_manage", "action": "add", "accounts": payload}, "autotask_add") {
-			sent += len(payload)
-		}
-		chunks++
-		if end < len(accs) {
-			time.Sleep(300 * time.Millisecond)
-		}
-	}
-	if sent == 0 {
+	sentAccounts, chunks, _ := a.sendOnlineChunks(accs, a.gameAddrOf(""), 10, 300, "autotask_add")
+	if len(sentAccounts) == 0 {
 		return 0, errors.New("没有可上线的号（池里没密码或通道未连接）")
 	}
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "autotask_online",
-		"zone": a.currentZoneKey(), "requested": len(accs), "sent": sent, "chunks": chunks})
-	return sent, nil
+		"zone": a.currentZoneKey(), "requested": len(accs), "sent": len(sentAccounts), "chunks": chunks})
+	return len(sentAccounts), nil
 }
 
 // registerForAuto 自动注册：按配置前缀/序号/后缀生成名字 → **后台**注册并入池，

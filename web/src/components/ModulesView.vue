@@ -1,6 +1,7 @@
 <script setup>
 // 模块地图：把"拆出来的功能模块 + 各自职责/数据来源/对应参考实现/关联用例"摆出来。
 // 数据源 GET /api/modules（注册表在 Go 侧，动作层 9 个键与 chainplan.ModuleNames() 有单测钉住）。
+// 2026-09-22 UI 改 Element Plus：搜索换 el-input（带图标），模块卡片换 el-card，状态换 el-tag。
 import { computed, onMounted, ref } from 'vue'
 import { apiGet } from '../api'
 
@@ -10,8 +11,10 @@ const modules = ref([])
 const report = ref(null)
 const reportPath = ref('')
 const keyword = ref('')
+const loading = ref(false)
 
 async function load() {
+  loading.value = true
   try {
     const res = await apiGet('/api/modules')
     layers.value = res.layers || []
@@ -21,6 +24,8 @@ async function load() {
     err.value = res.report_error || ''
   } catch (e) {
     err.value = e.message
+  } finally {
+    loading.value = false
   }
 }
 onMounted(load)
@@ -35,8 +40,9 @@ const pkgIndex = computed(() => {
 function pkgOf(t) { return String(t).split('::')[0] }
 
 // 卡片右上角徽标：该模块关联用例所在包在最近一次报告里的结果；没跑过报告显示 —
+// type 直接给 el-tag 用（原先是 .tag 的语义色类名）
 function statusOf(mod) {
-  if (!report.value) return { text: '—', cls: 'dim', title: '还没跑过报告：go run ./tools/test_report' }
+  if (!report.value) return { text: '—', type: 'info', title: '还没跑过报告：go run ./tools/test_report' }
   const pkgs = [...new Set((mod.tests || []).map(pkgOf))]
   let cases = 0, passed = 0, failed = 0
   for (const p of pkgs) {
@@ -46,9 +52,9 @@ function statusOf(mod) {
     passed += st.passed || 0
     failed += st.failed || 0
   }
-  if (!cases) return { text: '—', cls: 'dim', title: '报告里没有这些包（可能还没登记）' }
-  if (failed) return { text: `失败 ${failed}/${cases}`, cls: 'danger', title: '有失败用例，见报告' }
-  return { text: `通过 ${passed}/${cases}`, cls: 'ok', title: `${pkgs.join('、')} 全绿` }
+  if (!cases) return { text: '—', type: 'info', title: '报告里没有这些包（可能还没登记）' }
+  if (failed) return { text: `失败 ${failed}/${cases}`, type: 'danger', title: '有失败用例，见报告' }
+  return { text: `通过 ${passed}/${cases}`, type: 'success', title: `${pkgs.join('、')} 全绿` }
 }
 
 function match(m, kw) {
@@ -73,15 +79,20 @@ function reportLine() {
 </script>
 
 <template>
-  <div v-if="err" class="card"><span class="tag danger">{{ err }}</span></div>
+  <el-alert v-if="err" class="mb" type="error" :closable="false" show-icon :title="err" />
 
   <div class="card">
     <div class="row">
       <h3 style="margin: 0">模块地图</h3>
-      <span class="tag" :class="report ? (report.ok ? 'ok' : 'warn') : 'dim'">{{ reportLine() }}</span>
+      <el-tag size="small" :type="report ? (report.ok ? 'success' : 'warning') : 'info'" effect="plain">{{ reportLine() }}</el-tag>
       <span class="spacer" />
-      <input v-model="keyword" class="grow-sm" style="max-width: 260px" placeholder="搜模块 / 职责 / 用例" />
-      <button class="btn sm" @click="load">刷新</button>
+      <el-input v-model="keyword" size="small" style="width: 260px" clearable placeholder="搜模块 / 职责 / 用例">
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-button size="small" @click="load">
+        <el-icon><Refresh /></el-icon>
+        <span>刷新</span>
+      </el-button>
     </div>
     <p class="muted" style="margin: 10px 0 0">
       中控不执行链：动作原语由机器人端执行，这里只描述"卡住时卡在哪一层"。
@@ -90,28 +101,38 @@ function reportLine() {
     </p>
   </div>
 
-  <div v-for="g in grouped" :key="g.key" class="card">
+  <div v-for="g in grouped" :key="g.key" class="card" v-loading="loading">
     <div class="row" style="margin-bottom: 8px">
       <h3 style="margin: 0">{{ g.name }}</h3>
       <span class="muted">{{ g.items.length }} 个</span>
     </div>
     <div class="grid cols-4">
-      <div v-for="m in g.items" :key="m.key" class="stat">
+      <el-card v-for="m in g.items" :key="m.key" shadow="hover" class="mod-card">
         <div class="row" style="gap: 6px">
           <span class="mono">{{ m.key }}</span>
-          <span class="tag" :class="statusOf(m).cls" :title="statusOf(m).title">{{ statusOf(m).text }}</span>
+          <el-tag size="small" :type="statusOf(m).type" :title="statusOf(m).title" effect="plain">{{ statusOf(m).text }}</el-tag>
         </div>
         <div class="value" style="font-size: 18px">{{ m.name }}</div>
         <div class="sub">{{ m.desc }}</div>
-        <div class="muted" style="font-size: 12px; margin-top: 6px">数据：{{ m.data }}</div>
-        <div class="muted" style="font-size: 12px">py：{{ m.py }}</div>
-        <div class="muted" style="font-size: 12px; margin-top: 6px">
+        <div class="muted small" style="margin-top: 6px">数据：{{ m.data }}</div>
+        <div class="muted small">py：{{ m.py }}</div>
+        <div class="muted small" style="margin-top: 6px">
           测试：
           <span v-for="t in m.tests" :key="t" class="mono" style="display: block">{{ t }}</span>
         </div>
-      </div>
+      </el-card>
     </div>
   </div>
 
-  <div v-if="!grouped.length" class="card"><div class="empty">没有匹配的模块：换个关键词。</div></div>
+  <div v-if="!grouped.length" class="card">
+    <el-empty :image-size="56" description="没有匹配的模块：换个关键词。" />
+  </div>
 </template>
+
+<style scoped>
+.mb { margin-bottom: 12px; }
+.mod-card :deep(.el-card__body) { padding: 12px 14px; }
+/* styles.css 里有一条"卡片竖排叠放"的全局规则 .el-card + .el-card{margin-top:16px}，
+   在网格里会顶歪第二列起的每一张卡：这里按本页布局覆盖掉 */
+.mod-card + .mod-card { margin-top: 0; }
+</style>

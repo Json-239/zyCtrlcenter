@@ -131,7 +131,9 @@ NS = {"protocol3": proto_mod}   # bag_ops 模块级 import protocol3(提取块�
 parts = []
 for n in ("POS_BAG_BEGIN", "POS_BAG_END", "POS_EQUIP_BEGIN", "POS_EQUIP_END",
           "DROP_PROTECT_INDEXES", "EGG_EQUIP_POS", "MOUNT_EGG_ELEMENT_PREFIX",
-          "MOUNT_EGG_ELEMENT_KEYWORD", "GUARDIAN_EGG_INDEXES", "GUARDIAN_EGG_NAMES"):
+          "MOUNT_EGG_ELEMENT_KEYWORD", "GUARDIAN_EGG_INDEXES", "GUARDIAN_EGG_NAMES",
+          # 2026-09-22 防重复丢弃闸门(两套整理共用): auto_equip_best_items 也调它
+          "_DROP_GUARD", "_DROP_GUARD_MS"):
     parts.append(grab_const(bag_src, n))
 # 2026-09-22 孵化链路: auto_equip_best_items 现在调 is_egg_item/is_protected_item,
 # 提取块必须带上蛋判据依赖链(否则 NameError —— 上一版漏了这组, 本自检曾 FAIL)。
@@ -141,6 +143,8 @@ for n in ("_is_in_bag_pos", "_item_data", "egg_kind_of", "egg_kind", "is_mount_e
           "_get_equip_slot", "parse_equip_lv", "_get_equip_lv",
           "meta_quality", "equip_score", "score_gt", "score_lt", "equip_slot",
           "collect_best_equipped", "should_drop_equip", "_emit_log",
+          # 2026-09-22 防重复丢弃闸门依赖链(否则 auto_equip_best_items 里 NameError)
+          "_now_ms", "item_recently_dropped", "mark_item_dropped",
           "auto_equip_best_items"):
     parts.append(grab_func(bag_src, n))
 exec("\n".join(parts), NS)
@@ -152,7 +156,9 @@ aparts = []
 for n in ("_BAG_CLEAN_COOLDOWN_MS", "_TITLE_RESTORE_DELAYS_MS"):
     aparts.append(grab_const(as_src, n))
 for n in ("_find_bag", "_emit_level", "_emit", "_emit_warn", "_schedule_title_restore",
-          "_try_title_restore", "_try_bag_cleanup"):
+          "_try_title_restore",
+          # 2026-09-22 用卡逻辑抽成 use_buff_card(空闲整理与"领双"前置共用), 必须一起抽
+          "use_buff_card", "_try_bag_cleanup"):
     aparts.append(grab_func(as_src, n))
 exec("\n".join(aparts), AS)
 check("auto_summon 源码块提取(_try_bag_cleanup 等)", True)
@@ -233,6 +239,9 @@ check("反证: 已穿戴 lv0 白装若无 pos 过滤会被判丢(说明过滤是
 def run_equip(bag, meta):
     r = FakeRobot()
     r.m_bag_meta = meta
+    # 2026-09-22 防重丢闸门是 bag_ops 模块级共享的(2 分钟窗口) —— 逐例清空,
+    # 否则后续用例会因"该实例刚被丢过"被跳过, 误判成丢弃失败。
+    NS["_DROP_GUARD"].clear()
     e, d = NS["auto_equip_best_items"](r, dict(bag))
     return r, e, d
 
@@ -316,12 +325,43 @@ r, ret, st = run_clean(rbag, rmeta)
 check("H 助战令/药品/锁定装备: 全不丢", r.sent == [], "sent=%s" % (r.sent,))
 
 # 用例 I: 用 buff 卡 → 发 USEITEM + 安排延迟称谓还原
+# 2026-09-22 新口径: 空闲整理默认**不再**用卡(robot_use_buff_items_idle=False,
+#   卡统一留给"领双"时用); 且等级 < robot_use_buff_items_min_level(默认 31)不用卡。
+#   本用例只验"用卡能力成立", 故显式放开两个门槛; 门槛行为由 I2/I3 覆盖。
+cfg_mod.robot_use_buff_items_idle = True
+cfg_mod.robot_use_buff_items_min_level = 0
 rbag = {190016: [777, 1, 8192]}
 r, ret, st = run_clean(rbag, {190016: {"quality": 0, "is_equip": False}}, now_ms=100000)
 check("I 用 buff 卡: USEITEM 发出且安排 2 次称谓还原",
       r.sent == [(80090, [777])] and ret is True
       and len(st.get("title_restore_at") or []) == 2,
       "sent=%s st=%s" % (r.sent, st.get("title_restore_at")))
+
+# 用例 I2: 空闲整理默认不用卡（用户新口径: 卡留给领双, 避免空闲期耗光）
+cfg_mod.robot_use_buff_items_idle = False
+r2, ret2, st2 = run_clean({190016: [777, 1, 8192]},
+                          {190016: {"quality": 0, "is_equip": False}}, now_ms=200000)
+check("I2 空闲整理默认不用卡(留给领双)", r2.sent == [] and not (st2.get("title_restore_at")),
+      "sent=%s" % (r2.sent,))
+
+# 用例 I3: 新手链阶段(等级 < 门槛 31)不用卡; 够级才用
+cfg_mod.robot_use_buff_items_idle = True
+cfg_mod.robot_use_buff_items_min_level = 31
+r3 = FakeRobot()
+r3.m_level = 10
+r3.m_bag_cache = {190016: [777, 1, 8192]}
+ret3 = AS["use_buff_card"](r3, {"last_bag_clean_ms": -100000}, 300000, reason="test ")
+r4 = FakeRobot()
+r4.m_level = 40
+r4.m_bag_cache = {190016: [777, 1, 8192]}
+st4 = {"last_bag_clean_ms": -100000}
+ret4 = AS["use_buff_card"](r4, st4, 400000, reason="test ")
+check("I3 等级门槛: lv10 不用卡 / lv40 用卡",
+      ret3 is False and r3.sent == [] and ret4 is True and r4.sent == [(80090, [777])],
+      "ret3=%s sent3=%s ret4=%s sent4=%s" % (ret3, r3.sent, ret4, r4.sent))
+# 复原成生产默认
+cfg_mod.robot_use_buff_items_idle = False
+cfg_mod.robot_use_buff_items_min_level = 31
 
 # 用例 J: _try_title_restore 到点后调用 msghandle.change_to_normal_title
 r = FakeRobot()

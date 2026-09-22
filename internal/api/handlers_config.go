@@ -102,10 +102,15 @@ func (a *API) handleConfigSwitch(w http.ResponseWriter, r *http.Request) {
 	a.syncZoneTag()
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "zone_switch",
 		"zone": flat.Key, "addr": flat.Addr(), "coding": flat.Coding})
+	// 2026-09-22 文案纠正：旧文案让用户点「应用到机器人」，但本部署的 config.py
+	// ip/port 是环境变量表达式（ROBOT_ZONE_IP/PORT），写值工具会跳过 → 点了没效果。
+	// 真正生效路径 = 切区 + 重启机器人（中控启动机器人时按当前区注入环境变量）。
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "zone": flat.Key,
 		"current": a.currentZone(),
 		"msg": "已切换到区 " + flat.Key + "（" + flat.Addr() + " / " + flat.Coding + "）；" +
-			"要让机器人真正登录过去，点「应用到机器人」并重启机器人进程"})
+			"要让机器人真正登录过去：**重启机器人进程**（中控会按当前区自动注入 " +
+			"ROBOT_ZONE_IP/PORT；本部署 config.py 的 ip/port 是环境变量表达式，" +
+			"「应用到机器人」不会改写它们）"})
 }
 
 // handleConfigServerUpsert 新增/更新服（含其下区列表全量覆盖）。
@@ -271,8 +276,12 @@ func (a *API) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 		msg = "内容已一致，无需改写"
 	}
 	if len(res.Skipped) > 0 {
-		// 值是表达式（如环境变量）：跳过不改，提示人工处理，避免改坏生产配置
-		msg += "；已跳过（值为表达式，未改动，需人工处理）: " + strings.Join(res.Skipped, ", ")
+		// 值是表达式（如环境变量）：跳过不改，提示人工处理，避免改坏生产配置。
+		// 2026-09-22 补充：本部署（single_robot_zy）的 ip/port 就是
+		// `_os.environ.get("ROBOT_ZONE_IP") or ...` 形式 —— 正确做法是"切区 + 重启机器人"
+		// （中控启动时按当前区注入 ROBOT_ZONE_IP/PORT），不需要改 config.py。
+		msg += "；已跳过（值为表达式，未改动）: " + strings.Join(res.Skipped, ", ") +
+			"。本部署走环境变量注入：**切区后重启机器人进程**即可生效，无需改 config.py"
 	}
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "zone_apply", "zone": flat.Key,
 		"addr": flat.Addr(), "coding": flat.Coding, "applied": res.Applied,

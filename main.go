@@ -34,9 +34,12 @@ import (
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/event"
 	"zyctrlcenter/internal/services/intent"
+	"zyctrlcenter/internal/services/livecount"
 	"zyctrlcenter/internal/services/process"
 	"zyctrlcenter/internal/services/reghost"
 	"zyctrlcenter/internal/services/restorer"
+	"zyctrlcenter/internal/services/roampool"
+	"zyctrlcenter/internal/services/waterline"
 	"zyctrlcenter/internal/services/zones"
 	"zyctrlcenter/internal/state"
 	"zyctrlcenter/internal/store"
@@ -55,6 +58,14 @@ func main() {
 	log.Printf("[MAIN] 数据目录: %s", cfg.DataDir)
 	log.Printf("[MAIN] 日志目录: %s（按日期切分）", cfg.LogsDir)
 	log.Printf("[MAIN] 机器人程序: %s（存在=%v）", cfg.RobotExe, fileExists(cfg.RobotExe))
+	// 面板静态资源（web/dist）：存在则由中控直接托管（GET /），不存在时 / 返回 JSON 提示。
+	if fileExists(filepath.Join(cfg.WebDistDir, "index.html")) {
+		log.Printf("[MAIN] 面板静态资源: %s（中控直接托管，打开 http://%s/ 即面板）", cfg.WebDistDir, cfg.WebAddr())
+	} else {
+		log.Printf("[MAIN] 面板未构建（%s）：打开 http://%s/ 只有 JSON 提示；"+
+			"运行 start.bat / ./start.sh 一键构建，或 cd web && npm install && npm run dev（http://localhost:5273）",
+			cfg.WebDistDir, cfg.WebAddr())
+	}
 
 	// ---- 状态 / 运行历史 ----
 	st := state.New()
@@ -195,6 +206,39 @@ func main() {
 	go webAPI.AutoTask.Run(ctx)
 	go webAPI.Reghost.Run(ctx)
 	webAPI.LoadAutoTask() // 恢复上次的定时任务参数（保持数/间隔/启用状态；2026-09-21 落盘）
+
+	// ---- 服务端在线数直连数据源（参考 game_admin_web origin/hqm 的 /gm/online；默认关）----
+	// 中控直接 HTTP 拉游戏服在线数（不需要 GM 授权），读到后 /api/status.svr_online 与在线水位
+	// 保持器优先用它（source=svr_provider）；失败/过期自动回落 @online 回执 → 本地握手数。
+	webAPI.LiveCount = livecount.New(livecount.Config{
+		Enabled:     cfg.LiveCountEnabled,
+		BaseURL:     cfg.LiveCountURL,
+		ServerID:    cfg.LiveCountServerID,
+		IntervalSec: cfg.LiveCountIntervalSec,
+		TimeoutSec:  cfg.LiveCountTimeoutSec,
+		Token:       cfg.LiveCountToken,
+	}, func(format string, args ...any) { log.Printf(format, args...) })
+	if webAPI.LiveCount.Ready() {
+		go webAPI.LiveCount.Start(ctx)
+		log.Printf("[LIVECOUNT] 服务端在线数直连数据源已启动：%s（间隔=%ds，无需 GM 授权）",
+			webAPI.LiveCount.Config().Endpoint(), webAPI.LiveCount.Config().IntervalSec)
+	} else {
+		log.Printf("[LIVECOUNT] 服务端在线数直连数据源未启用（默认关闭；用 CTRL_LIVECOUNT_ENABLED=1 + CTRL_LIVECOUNT_URL=... 打开）")
+	}
+
+	// ---- 在线水位保持器（把当前区在线人数维持在目标附近；默认关，参数落盘 data/waterline.json）----
+	webAPI.Waterline = waterline.New(filepath.Join(cfg.DataDir, "waterline.json"), webAPI.WaterlineDeps())
+	webAPI.LoadWaterline()
+	go webAPI.Waterline.Start(ctx)
+	log.Printf("[WATERLINE] 水位保持器已装配（默认 enabled=false；参数文件 %s）", webAPI.Waterline.Path())
+
+	// ---- 游荡池 keeper（任务池缺人 → **立刻回收**游荡号；余量 → 按图**均匀**派游荡；默认关）----
+	// 口径（2026-09-22 用户拍板）：在线总数 200 = 抓鬼池 100 + 新手池 0 + 游荡池（余量，目标 100 左右）。
+	// 下发/停止与面板 /api/random_walk 共用同一实现；缺口直接读 autotask 的 States()（不走 HTTP）。
+	webAPI.Roampool = roampool.New(filepath.Join(cfg.DataDir, "roampool.json"), webAPI.RoampoolDeps())
+	webAPI.LoadRoampool()
+	go webAPI.Roampool.Start(ctx)
+	log.Printf("[ROAMPOOL] 游荡池 keeper 已装配（默认 enabled=false；参数文件 %s）", webAPI.Roampool.Path())
 
 	srv := &http.Server{Handler: webAPI.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	// 显式 Listen：端口被占用时立刻失败退出（而不是留下一个什么都不做的僵尸进程）

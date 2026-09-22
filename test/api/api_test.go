@@ -63,9 +63,12 @@ func newTestEnvInDir(t *testing.T, token, dataDir string) *testEnv {
 	} else {
 		cfg.DataDir = t.TempDir()
 	}
-	cfg.ChainDir = filepath.Join(cfg.DataDir, "chains")
-	cfg.DeployDir = t.TempDir() // 单进程：部署目录（config.py 写入目标）
-	cfg.RobotExe = filepath.Join(cfg.DeployDir, "robot_single_robot.exe")
+        cfg.ChainDir = filepath.Join(cfg.DataDir, "chains")
+        cfg.DeployDir = t.TempDir() // 单进程：部署目录（config.py 写入目标）
+        cfg.RobotExe = filepath.Join(cfg.DeployDir, "robot_single_robot.exe")
+        // 建号节奏：测试里的假游戏服没有"同 IP 风控"，批间隔/抖动置 0（跑得快、不空等）；
+        // 生产默认（5s 基准 + ±2s 抖动）由 test/api/create_throttle_test.go 断言 config.Default()。
+        cfg.CreateBatchIntervalSec, cfg.CreateJitterSec = 0, 0
 
 	c := testsupport.NewTestChannel(t) // 端口 0 + 区标记 test-srv/z1
 	zreg := testsupport.NewTestZones(t)

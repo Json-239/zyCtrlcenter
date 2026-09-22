@@ -21,6 +21,7 @@ export const state = reactive({
     zones: [],
     current: {},
     task_failed: { count: 0, items: [] },
+    waterline: {},       // 在线水位保持器摘要（/api/status 顺带带）
   },
   statusError: '',
   wsConnected: false,
@@ -108,6 +109,8 @@ function mergeStatus(next) {
   st.current = next?.current || st.current
   st.current_keys = next?.current_keys
   st.zone_counts = next?.zone_counts
+  // 在线水位保持器摘要（当前/目标/差值/来源/待下线）：/api/status 顺带带，面板少一次请求
+  st.waterline = next?.waterline || st.waterline
   for (const k of ['version', 'robot_connected', 'ctrl_addr', 'ctrl_zone', 'robot_running',
     'robot_exe', 'robot_exe_exists', 'server', 'chains', 'maps_count', 'grid_cell',
     'ws_clients', 'logs_file', 'data_dir', 'chain_dir', 'zones_file', 'deploy_dir']) {

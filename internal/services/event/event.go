@@ -458,10 +458,19 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			if v, ok := st["walk"]; ok {
 				r.Walk = v
 			}
+			// 2026-09-22 全服在线(含真人)：机器人 @online 回执解析后上报 {count,ts(ms)}。
+			// 只有"查到过"的那个号带该字段；带上就更新（保留最新读数，不带不动）。
+			if v, ok := st["svr_online"].(map[string]any); ok {
+				r.SvrOnline = v
+			}
 			if v, ok := st["route"]; ok {
 				r.Route = v
 			}
 			r.HS = toBool(st["hs"]) // 旧版机器人不带 hs → 按未握手处理
+			// 2026-09-22 孵化池过滤：机器人上报 has_egg（装备栏在孵 or 背包有蛋）
+			if v, ok := st["has_egg"]; ok {
+				r.HasEgg = toBool(v)
+			}
 			// 心跳里的「最近错误」：非空就写入（保留最后一次错误供排查；机器人端是毫秒）；
 			// **机器人不带错误且不在 ERROR 态 = 已经恢复** → 清掉残留，否则面板会一直显示"需要处理"
 			//（err_repeat 是熔断计数，恢复后归零：别再拿旧错误去熔断这个号）。
@@ -634,6 +643,16 @@ func (h *Handler) onError(ev map[string]any) {
 	h.Store.LogEvent(ev)
 }
 
+// isGhostUnavailableCode 是否"本号今天抓鬼不可用"类原因（无动作项/无令/没钱）。
+// 2026-09-22：这类原因下线后，当天不再派抓鬼（跨日恢复），避免在钟馗反复空转。
+func isGhostUnavailableCode(code string) bool {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "NO_ACTION", "NO_TOKEN", "NO_MONEY", "DAILY_LIMIT":
+		return true
+	}
+	return false
+}
+
 // isStuckCode 是否"卡死类"错误码（要计入当日 churn 计数 + 触发重登恢复）。
 // GHOST_DIALOG_STUCK/TASK_STUCK 是抓鬼专属码；quest_engine 看门狗统一上报
 // STUCK_<STATE>（STUCK_WAIT_NEXT/STUCK_CLICK/...）—— 2026-09-21 前只认前两个，
@@ -654,6 +673,9 @@ func (h *Handler) onGhostDone(ev map[string]any) {
 	}
 	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": account,
 		"zone": zoneOf(ev), "msg": "抓鬼满额（业务处置如换号/补位由使用方实现）"})
+	// 2026-09-22：记"今天抓鬼已满" —— 服务端满额后钟馗不再给任务，若不记住，
+	// 抓鬼池会把它再拉起来 → 在钟馗空转（今日堆积分分钟涨到 26+ 的那个坑）。
+	h.St.MarkGhostDoneToday(account)
 	if h.autoRemove() {
 		h.removeAccount(account, "ghost_done")
 	}
@@ -674,9 +696,15 @@ func (h *Handler) onGhostOffline(ev map[string]any) {
 			}
 		})
 	}
+	// 2026-09-22：抓鬼"下线换号"类原因（无动作项/无令/没钱/服务端不给任务）→ 记"今天抓鬼不可用"，
+	//   当天不再把它当抓鬼候选（跨日自动恢复）。理由：机器人已先做了 3 轮退避+自愈才判下线，
+	//   若控制器再把它拉起 = "满额/不可用 → 下线 → 又被拉起 → 钟馗空转"的堆积循环。
+	if isGhostUnavailableCode(str(ev, "code")) {
+		h.St.MarkGhostDoneToday(account)
+	}
 	h.Store.LogEvent(map[string]any{"type": "log", "level": "warn", "account": account,
 		"zone": zoneOf(ev),
-		"msg":  "抓鬼不可行(" + str(ev, "code") + "): " + str(ev, "reason") +
+		"msg": "抓鬼不可行(" + str(ev, "code") + "): " + str(ev, "reason") +
 			"（业务处置如换号/冷却由使用方实现）"})
 	if h.autoRemove() {
 		h.removeAccount(account, "ghost_offline")

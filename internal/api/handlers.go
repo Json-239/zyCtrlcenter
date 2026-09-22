@@ -23,10 +23,13 @@ func (a *API) handleNotFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleIndex(w http.ResponseWriter, r *http.Request) {
+	// 走到这里说明 web/dist 未构建（否则 handleRoot 已直接返回面板首页）。
+	// 面板地址口径：构建后用 http://<host>:<web-port>/ 直连；未构建时用 vite dev（5273）。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":     "zyctrlcenter 中控 API",
 		"version":  config.Version,
-		"frontend": "web（Vue3 + Vite，dev http://localhost:5273）",
+		"frontend": "web（Vue3 + Vite）",
+		"panel":    "未构建：运行 start.bat（Windows）/ ./start.sh（Linux/macOS）一键构建并启动；开发模式 cd web && npm install && npm run dev（http://localhost:5273）",
 		"api":      "/api/status",
 		"ws":       "/ws",
 		"ports":    map[string]any{"web": a.Cfg.WebPort, "ctrl": a.Cfg.CtrlPort},
@@ -36,33 +39,51 @@ func (a *API) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	online, handshake, total := a.St.Counts()
 	serverKey, zoneKey := a.Zones.CurrentKeys()
+	// 2026-09-22 全服在线（含真实玩家）：中控直连游戏服 /gm/online（livecount，source=svr_provider）
+	// 优先；其次机器人 @online 回执（source=svr）；都没有时 source=local（面板/水位保持器会用
+	// 本地握手数兜底）。count/ts/age_sec 字段语义不变，仅新增 source 标明来源。
+	svrOnline := map[string]any{"source": "local"}
+	if c, tsMS, source, ok := a.svrOnlineReading(); ok {
+		ageSec := 0.0
+		if tsMS > 0 {
+			ageSec = float64(time.Now().UnixMilli())/1000.0 - tsMS/1000.0
+			if ageSec < 0 {
+				ageSec = 0
+			}
+		}
+		svrOnline = map[string]any{"count": c, "ts": int64(tsMS), "age_sec": int(ageSec), "source": source}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":               true,
-		"version":          config.Version,
-		"robots":           a.St.Snapshot(),
-		"counts":           map[string]any{"total": total, "online": online, "handshake": handshake},
-		"zones":            a.zoneSnapshots(), // 全部候选区（含 current 标记）
-		"current":          a.currentZone(),
-		"current_keys":     map[string]any{"server": serverKey, "zone": zoneKey},
-		"zone_counts":      a.St.ZoneCounts(),
-		"removed":          a.St.RemovedList(),
-		"robot_connected":  a.Ctrl.Connected(),
-		"ctrl_addr":        a.Ctrl.Addr(),
-		"ctrl_zone":        a.Ctrl.Tag(),
-		"robot_running":    a.Proc.Running(),
-		"robot_exe":        a.Cfg.RobotExe,
-		"robot_exe_exists": a.Proc.ExeExists(),
-		"server":           a.St.CurServer(zoneKey), // 当前区机器人上报的游戏服地址
-		"task_failed":      a.St.FailedTasks(2, 30),
-		"chains":           len(a.chainInfo()),
-		"maps_count":       a.Maps.Count(), // 地图名表条目数（表在 /api/maps）
-		"grid_cell":        a.Cfg.GridCell, // 客户端坐标口径：pos_grid = pos / grid_cell
-		"ws_clients":       a.WS.Count(),
-		"logs_file":        a.Store.CurrentPath(),
-		"data_dir":         a.Cfg.DataDir,
-		"chain_dir":        a.Cfg.ChainDir,
-		"zones_file":       a.Zones.Path(),
-		"deploy_dir":       a.Cfg.DeployDir,
+		"ok":                      true,
+		"version":                 config.Version,
+		"robots":                  a.St.Snapshot(),
+		"counts":                  map[string]any{"total": total, "online": online, "handshake": handshake},
+		"ghost_unavailable_today": a.St.GhostUnavailableTodayCount(), // 今日已标"抓鬼不可用/已满"的号数
+		"svr_online":              svrOnline,
+		"zones":                   a.zoneSnapshots(), // 全部候选区（含 current 标记）
+		"current":                 a.currentZone(),
+		"current_keys":            map[string]any{"server": serverKey, "zone": zoneKey},
+		"zone_counts":             a.St.ZoneCounts(),
+		"removed":                 a.St.RemovedList(),
+		"robot_connected":         a.Ctrl.Connected(),
+		"ctrl_addr":               a.Ctrl.Addr(),
+		"ctrl_zone":               a.Ctrl.Tag(),
+		"robot_running":           a.Proc.Running(),
+		"robot_exe":               a.Cfg.RobotExe,
+		"robot_exe_exists":        a.Proc.ExeExists(),
+		"server":                  a.St.CurServer(zoneKey), // 当前区机器人上报的游戏服地址
+		"waterline":               a.waterlineSnapshot(),   // 在线水位保持器摘要（面板少一次请求）
+		"livecount":               a.liveCountSnapshot(),   // 服务端在线数直连数据源诊断（默认关闭）
+		"task_failed":             a.St.FailedTasks(2, 30),
+		"chains":                  len(a.chainInfo()),
+		"maps_count":              a.Maps.Count(), // 地图名表条目数（表在 /api/maps）
+		"grid_cell":               a.Cfg.GridCell, // 客户端坐标口径：pos_grid = pos / grid_cell
+		"ws_clients":              a.WS.Count(),
+		"logs_file":               a.Store.CurrentPath(),
+		"data_dir":                a.Cfg.DataDir,
+		"chain_dir":               a.Cfg.ChainDir,
+		"zones_file":              a.Zones.Path(),
+		"deploy_dir":              a.Cfg.DeployDir,
 	})
 }
 
@@ -686,7 +707,7 @@ func (a *API) handleRobotsManage(w http.ResponseWriter, r *http.Request) {
 			names = append(names, p[0])
 			a.St.MarkRemoved(p[0]) // 防心跳复活
 			a.St.Remove(p[0])
-		a.cancelRegHost([]string{p[0]}) // 手动移除 → 取消自动重登恢复
+			a.cancelRegHost([]string{p[0]}) // 手动移除 → 取消自动重登恢复
 		}
 		ok := a.Events.SendCmd(map[string]any{
 			"cmd": "robot_manage", "action": "remove", "accounts": names}, "remove")

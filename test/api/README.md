@@ -12,6 +12,8 @@
 | `restore_test.go` | 补发接口（手动触发、跳过在跑、**合并下发**） |
 | `modules_test.go` | **模块地图接口**（注册表口径 + 最近一次测试报告） |
 | `chainplan_test.go` / `intents_test.go` / `create_test.go` / `verify_test.go` / `verify_job_test.go` | 模块视图 / 意图表 / 建号 / 验证 |
+| `create_throttle_test.go` | **注册自适应限速**（112 降速 / 连续成功回升 / 抖动 / 请求只能更保守）+ 建号响应 `throttle` 统计 |
+| `livecount_test.go` | **服务端在线数来源优先级**（直连 provider `svr_provider` → @online 回执 `svr` → `local`）+ `/api/status.livecount` 诊断摘要（httptest 假游戏服） |
 
 ## 前置条件
 - `httptest.Server` + **真实启动的测试控制通道**（`Port=0`，`testsupport.NewTestChannel`）+ 假机器人（`testsupport.FakeRobot`）。
@@ -78,6 +80,17 @@
 | `TestModulesEndpointRegistry` | GET /api/modules | 总数 12；动作层键集/顺序 == `chainplan.ModuleNames()`；每卡有职责/数据/参考实现/关联用例；无报告时 `report=null` |
 | `TestModulesEndpointReadsLastReport` | 有 `data/test_report.json` | 报告内容原样透出 + `report_path` |
 | `TestModulesEndpointBadReportDoesNotPanic` | 报告文件损坏 | 模块注册表照常返回，另给 `report_error` |
+| `TestSvrOnlineSourcePriority` | 两路都无 → @online 回执 → provider 直连 → provider 失败回落 | `svr_online.source` 依次为 `local`（无 count）/`svr`/`svr_provider`/`svr`；`livecount` 摘要 ok/count 正确；水位保持器 `Deps.SvrOnline` 与 /api/status 同源 |
+| `TestLiveCountSnapshotWithoutProvider` | 未装配 provider（默认关闭） | `/api/status.livecount` 与 `.waterline` 均为空对象（现状不回归） |
+
+| `TestCreateThrottleConfigDefaults` | `config.Default()` 的 `CTRL_CREATE_*` | 自适应开、并发 8/≥2、批间隔 5s、抖动 ±2s |
+| `TestCreateThrottleSlowsOn112AndCapsInterval` | 连续 112 | 并发 8→4→2（下限）、批间隔 5→10→20→40→60s（上限）；`total_112` 累加 |
+| `TestCreateThrottleRecoversAfterSuccessStreak` | 降速后连续成功 | 满 10 次才 +1 / 间隔减半；并发回到上限止，间隔回到基准止 |
+| `TestCreateThrottleNeutralErrorBreaksStreak` | 成功连击里夹一次中性错误 | 不回升（中断连击），也不降速 |
+| `TestCreateThrottleAdaptiveOffOnlyCounts` | `Adaptive=false` | 节奏不变，但 112 仍计数（可观测） |
+| `TestCreateThrottlePaceTakesConservativeSide` | 请求并发/间隔与限速器不同 | 并发取 `min`、间隔取 `max`（请求只能更保守）+ 抖动边界（±2s，不落负） |
+| `TestAccountsCreateResponseCarriesThrottle` | 建号成功一次 | 响应 `throttle`：状态并发=上限 8、实际并发=请求 2、`total_ok=1`、无 112 |
+| `TestAccountsCreateThrottleSlowsDownOn112` | 假服注册固定回 112 | 有效并发 8→4→2（连续两次）；结果带 `errid=112`，提示点明风控 |
 
 ## 已知限制
 - WS 端到端推送未在此覆盖（握手/帧由 `test/wsutil` 覆盖，广播口径由 `test/event` 覆盖）。

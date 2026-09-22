@@ -1,14 +1,40 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
+// 脚本式 API（ElMessage / ElMessageBox）必须显式 import；模板里的 <el-xxx> 是全局注册的
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiGet, apiPost } from '../api'
-import { state, post, toast, zones, currentZoneKey } from '../store'
+import { state, post, zones, currentZoneKey } from '../store'
+
+// MessageBox 的 message 用 VNode 才能保留 \n 换行（纯文本里的换行会被折叠）
+function pre(text) { return h('div', { style: 'white-space: pre-line' }, text) }
+// 破坏性/长说明类操作统一走 ElMessageBox（替换原来的 window.confirm）；点"取消"不算错误
+async function confirmBox(msg, title, okText) {
+  try {
+    await ElMessageBox.confirm(pre(msg), title, {
+      type: 'warning', confirmButtonText: okText || '确定', cancelButtonText: '取消',
+    })
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+// 弹窗开关（原来内嵌在页面里的表单搬进 el-dialog，纯 UI 状态）
+const ui = reactive({ createOpen: false, addOpen: false })
+
+// 项目色板的状态类（ok/warn/danger/info/dim）→ el-tag 的 type。纯 UI 映射，判据不变。
+const TAG_TYPE = { ok: 'success', warn: 'warning', danger: 'danger', info: 'info', dim: 'info' }
+function tagType(cls) { return TAG_TYPE[cls] || 'info' }
+
+// el-table 的行 class 回调：在线行淡绿底（原来裸 table 上是 .row-on）
+function poolRowClass({ row }) { return row.online ? 'row-on' : '' }
 
 const PAGE_SIZES = [20, 50, 100]
 
 const rows = ref([])
 const meta = ref({})
 const stats = ref({})
-const pageInfo = ref({ page: 1, pageSize: 20, hasMore: false })
+const pageInfo = ref({ page: 1, pageSize: 50, hasMore: false }) // 默认 50/页（可切 20/50/100）
 const loading = ref(false)
 const err = ref('')
 const selected = ref(new Set())
@@ -105,9 +131,15 @@ function toggle(name) {
   else s.add(name)
   selected.value = s
 }
+// 本页勾选状态（跨页选择保留，所以判断"全选"必须只看本页行）
+const allPageSelected = computed(() => rows.value.length > 0 && rows.value.every((r) => selected.value.has(r.name)))
+const somePageSelected = computed(() => !allPageSelected.value && rows.value.some((r) => selected.value.has(r.name)))
+// 表头全选：只增删"本页这一批"，别把别的页已勾的号一起清掉
 function toggleAll() {
-  if (selected.value.size === rows.value.length) selected.value = new Set()
-  else selected.value = new Set(rows.value.map((r) => r.name))
+  const s = new Set(selected.value)
+  if (allPageSelected.value) rows.value.forEach((r) => s.delete(r.name))
+  else rows.value.forEach((r) => s.add(r.name))
+  selected.value = s
 }
 const selectedNames = computed(() => Array.from(selected.value))
 
@@ -126,7 +158,7 @@ async function loadPending() {
 // 默认动作：从本地库按当前区选号 → 后台批量验证 → 结果逐条同步回账号池
 async function startBatchVerify() {
   const zone = verifyForm.zone || targetZone()
-  if (!zone) { alert('还没有可用的区：先在「系统信息 → 区管理」配置一个区'); return }
+  if (!zone) { ElMessage.warning('还没有可用的区：先在「系统信息 → 区管理」配置一个区'); return }
   if (jobRunning.value) return
   // 预计个数与耗时（并发越高越快；每个号大约 0.5~1 秒）
   const planned = verifyForm.limit > 0
@@ -139,7 +171,7 @@ async function startBatchVerify() {
     + (mins ? `，约 ${mins} 分钟` : '')
     + (verifyForm.skip_online ? '，跳过正在线的号' : '') + '\n\n'
     + '每个账号会真连一次游戏服（不进入游戏），结果实时同步回账号池；跑着的时候可以点「停止」。'
-  if (!confirm(tip)) return
+  if (!await confirmBox(tip, '开始批量验证', '开始验证')) return
   try {
     const res = await apiPost('/api/accounts/verify', {
       zone,
@@ -153,7 +185,7 @@ async function startBatchVerify() {
     })
     if (!res.ok) {
       verify.msg = res.msg || '批量验证没跑起来'
-      toast(verify.msg, 'warn')
+      ElMessage.warning(verify.msg)
       loadPending()
       return
     }
@@ -164,10 +196,10 @@ async function startBatchVerify() {
     verify.coding = res.coding || ''
     verify.results = []
     verify.summary = null
-    toast(res.msg, 'ok')
+    ElMessage.success(res.msg || '批量验证已开始')
     pollJob()
   } catch (e) {
-    toast(e.message, 'danger')
+    ElMessage.error(e.message)
     verify.msg = e.message
   }
 }
@@ -189,9 +221,10 @@ function pollJob() {
     const j = verify.job
     if (j) {
       const head = j.status === 'canceled' ? '批量验证已停止' : '批量验证完成'
-      toast(`${head}：可用 ${j.usable} · 不可用 ${j.unusable} · 不存在 ${j.not_exists}`
-        + (j.error ? ` · 失败 ${j.error}` : '') + `（${j.done}/${j.total}）`,
-        j.status === 'canceled' ? 'warn' : 'ok')
+      const text = `${head}：可用 ${j.usable} · 不可用 ${j.unusable} · 不存在 ${j.not_exists}`
+        + (j.error ? ` · 失败 ${j.error}` : '') + `（${j.done}/${j.total}）`
+      if (j.status === 'canceled') ElMessage.warning(text)
+      else ElMessage.success(text)
     }
     load(true)
     loadPending()
@@ -204,19 +237,19 @@ async function stopBatchVerify() {
   try {
     const res = await apiPost('/api/accounts/verify/cancel', { id: verify.jobId })
     if (res.job) verify.job = res.job
-    toast(res.msg || '已请求停止', res.ok ? 'warn' : 'danger')
+    if (res.ok) ElMessage.warning(res.msg || '已请求停止')
+    else ElMessage.error(res.msg || '停止失败')
   } catch (e) {
-    toast(e.message, 'danger')
+    ElMessage.error(e.message)
   }
 }
 
 // 次要入口：手输账号，同步验证这几个（结果同样写回池）
 async function runVerify() {
   const tokens = verifyForm.text.split(/[,，;\s\n]+/).filter(Boolean)
-  if (!tokens.length) { alert('请输入要验证的账号（每行一个，可写 账号:密码）'); return }
+  if (!tokens.length) { ElMessage.warning('请输入要验证的账号（每行一个，可写 账号:密码）'); return }
   if (tokens.length > 20) {
-    const ok = confirm(`要一次验证 ${tokens.length} 个账号吗？\n建议一次 1 个：每个账号都会真连一次游戏服。`)
-    if (!ok) return
+    if (!await confirmBox(`要一次验证 ${tokens.length} 个账号吗？\n建议一次 1 个：每个账号都会真连一次游戏服。`, '确认批量验证', '验证')) return
   }
   const accounts = tokens.map((t) => {
     const i = t.indexOf(':')
@@ -235,7 +268,7 @@ async function runVerify() {
     })
     if (!res.ok) {
       verify.msg = res.msg || '验证失败'
-      toast(verify.msg, 'warn')
+      ElMessage.warning(verify.msg)
       return
     }
     verify.summary = res.summary || {}
@@ -243,11 +276,11 @@ async function runVerify() {
     verify.msg = res.msg || ''
     verify.game_addr = res.game_addr || ''
     verify.coding = res.coding || ''
-    toast(`${res.msg}（${res.game_addr}）`, 'ok')
+    ElMessage.success(`${res.msg}（${res.game_addr}）`)
     load(true)
     loadPending()
   } catch (e) {
-    toast(e.message, 'danger')
+    ElMessage.error(e.message)
     verify.msg = e.message
   } finally {
     verify.running = false
@@ -297,25 +330,26 @@ async function copyText(text) {
   if (!text) return
   try {
     await navigator.clipboard.writeText(text)
-    toast('已复制：' + text, 'ok')
+    ElMessage.success('已复制：' + text)
   } catch (e) {
-    alert('复制失败，请手动选中：' + text)
+    // 剪贴板 API 要安全上下文（https/localhost）；失败就把内容摆出来让用户手抄
+    ElMessage.error('复制失败，请手动选中：' + text)
   }
 }
 
 async function runCreate() {
   const zone = createForm.zone || targetZone()
-  if (!zone) { alert('先选一个区'); return }
+  if (!zone) { ElMessage.warning('先选一个区'); return }
   const count = createForm.mode === 'number' ? Number(createForm.count) || 0 : createPreview.value.count
-  if (count <= 0) { alert('数量要大于 0'); return }
-  if (count > 200) { alert('一次最多建 200 个号（注册同 IP 过频会触发风控）'); return }
+  if (count <= 0) { ElMessage.warning('数量要大于 0'); return }
+  if (count > 200) { ElMessage.warning('一次最多建 200 个号（注册同 IP 过频会触发风控）'); return }
   const what = createForm.mode === 'number'
     ? `${createPreview.value.first} … ${createPreview.value.last}（共 ${count} 个）`
     : `指定的 ${count} 个账号`
   const tip = `建号：${what}\n区：${zone}\n密码：随机 ${createForm.password_len} 位，建号成功后写入账号库\n`
     + `分批：每批 ${createForm.batch_size} 个 · 并发 ${createForm.concurrency}\n`
     + '本项目没有统一密码：之后登录/验证都用库里的密码。'
-  if (!confirm(tip)) return
+  if (!await confirmBox(tip, '确认建号', '开始建号')) return
   createState.running = true
   try {
     const body = {
@@ -344,16 +378,34 @@ async function runCreate() {
     createState.results = res.results || []
     createState.created = res.created || 0
     createState.msg = res.msg || ''
-    toast(res.msg || '建号完成', res.ok ? 'ok' : 'warn')
+    if (res.ok) {
+      ElMessage.success(res.msg || '建号完成')
+      ui.createOpen = false // 关了弹窗才能在下面的卡片里看逐条结果
+    } else {
+      ElMessage.warning(res.msg || '建号失败（结果见卡片）')
+    }
     load(true)
     loadPending()
   } catch (e) {
-    toast(e.message, 'danger')
+    ElMessage.error(e.message)
     createState.msg = e.message
   } finally {
     createState.running = false
   }
 }
+
+// 弹窗里的"建号"入口：先过表单校验（必填/数量），再走原来的 runCreate
+const createFormRef = ref(null)
+async function submitCreate() {
+  try { await createFormRef.value?.validate() } catch (e) { return }
+  runCreate()
+}
+const createRules = computed(() => ({
+  prefix: createForm.mode === 'number' ? [{ required: true, message: '前缀不能为空', trigger: 'blur' }] : [],
+  count: createForm.mode === 'number'
+    ? [{ required: true, message: '数量要大于 0', trigger: 'blur' }] : [],
+  text: createForm.mode === 'list' ? [{ required: true, message: '请输入要建的账号', trigger: 'blur' }] : [],
+}))
 
 // 建号结果状态（先验证再注册：新建 / 已存在可用 / 密码不符 / 失败）
 const CREATE_STATUS = {
@@ -382,8 +434,8 @@ async function toggleOnline(r) {
       zone: targetZone(),
       chunk: 1, interval_ms: 0,
     })
-    if (res && res.ok === false) alert(res.msg || (up ? '上线失败' : '下线失败'))
-    else toast(up ? `${r.name} 已通知上线` : `${r.name} 已下线`, 'ok')
+    // 成功提示由 post() 统一弹（res.msg），这里只兜失败
+    if (res && res.ok === false) ElMessage.error(res.msg || (up ? '上线失败' : '下线失败'))
     load()
   } finally {
     rowBusy.value = ''
@@ -405,11 +457,11 @@ function selectPage(kind) {
 // 批量上线：auto=true 时不看勾选，让服务端从池里挑可用号（限 batch.limit 个）
 async function batchOnline(auto = false) {
   const names = auto ? [] : selectedNames.value
-  if (!auto && !names.length) { toast('先勾选账号，或用「自动挑号」上线', 'warn'); return }
+  if (!auto && !names.length) { ElMessage.warning('先勾选账号，或用「自动挑号」上线'); return }
   const tip = auto
     ? `从池里自动挑最多 ${batch.limit} 个【${targetZone() || '当前区'}】可用号上线？`
     : `上线勾选的 ${names.length} 个账号？\n${names.slice(0, 5).join('\n')}${names.length > 5 ? `\n… 等 ${names.length} 个` : ''}`
-  if (!confirm(`${tip}\n分批：每批 ${batch.chunk} 个，间隔 ${batch.interval_ms}ms`)) return
+  if (!await confirmBox(`${tip}\n分批：每批 ${batch.chunk} 个，间隔 ${batch.interval_ms}ms`, '确认上线', '上线')) return
   batchBusy.value = true
   try {
     const body = {
@@ -420,11 +472,13 @@ async function batchOnline(auto = false) {
     if (names.length) body.accounts = names
     const res = await post('/api/robots/batch', body)
     if (res && res.ok) {
-      toast(`已通知上线：${res.sent ?? 0} 个（跳过 ${((res.skipped_online || []).length + (res.skipped_no_password || []).length)} 个）`, 'ok')
+      // 跳过数是服务端算的（post() 的通用提示里没有），这里补一条更有信息量的反馈
+      const skipped = (res.skipped_online || []).length + (res.skipped_no_password || []).length
+      if (skipped) ElMessage.info(`跳过 ${skipped} 个（已在线 / 没密码）`)
       if (!auto) selected.value = new Set()
       load()
     } else if (res) {
-      alert(res.msg || '批量上线失败')
+      ElMessage.error(res.msg || '批量上线失败')
     }
   } finally {
     batchBusy.value = false
@@ -433,8 +487,8 @@ async function batchOnline(auto = false) {
 
 async function batchOffline() {
   const names = selectedNames.value
-  if (!names.length) { alert('请先勾选要下线的账号'); return }
-  if (!confirm(`下线的 ${names.length} 个账号？`)) return
+  if (!names.length) { ElMessage.warning('请先勾选要下线的账号'); return }
+  if (!await confirmBox(`下线的 ${names.length} 个账号？`, '确认下线', '下线')) return
   const res = await post('/api/robots/batch', {
     action: 'offline', accounts: names, chunk: batch.chunk, interval_ms: batch.interval_ms,
   })
@@ -443,15 +497,22 @@ async function batchOffline() {
 
 async function addAccounts() {
   const names = addForm.text.split(/[,，;\s\n]+/).filter(Boolean)
-  if (!names.length) { alert('请输入账号（逗号/换行分隔，可写 账号:密码）'); return }
+  if (!names.length) { ElMessage.warning('请输入账号（逗号/换行分隔，可写 账号:密码）'); return }
   const res = await post('/api/accounts/add', { password: addForm.password, zone: addForm.zone, accounts: names })
-  if (res.ok) { addForm.text = ''; load(true) }
+  if (res.ok) { addForm.text = ''; ui.addOpen = false; load(true) }
+}
+
+// 弹窗里的"加入池"入口：先过表单校验，再走原来的 addAccounts
+const addFormRef = ref(null)
+async function submitAdd() {
+  try { await addFormRef.value?.validate() } catch (e) { return }
+  addAccounts()
 }
 
 async function removeAccounts() {
   const names = selectedNames.value
-  if (!names.length) { alert('请先勾选账号'); return }
-  if (!confirm(`从池里删除 ${names.length} 个账号？（游戏服上的账号不受影响）`)) return
+  if (!names.length) { ElMessage.warning('请先勾选账号'); return }
+  if (!await confirmBox(`从池里删除 ${names.length} 个账号？（游戏服上的账号不受影响）`, '确认删除', '从池删除')) return
   const res = await post('/api/accounts/remove', { accounts: names })
   if (res.ok) { selected.value = new Set(); load() }
 }
@@ -469,103 +530,118 @@ const headline = computed(() => {
 </script>
 
 <template>
-  <div class="grid cols-4">
-    <div class="stat">
-      <div class="label">池内账号</div>
+  <!-- 第一行统计卡：信息与原来一致，改成 el-card + 图标 + 大字号数字 -->
+  <div class="grid cols-4 stat-grid">
+    <el-card class="stat-card" shadow="never">
+      <div class="label"><el-icon><Collection /></el-icon>池内账号</div>
       <div class="value">{{ meta.count ?? 0 }}</div>
       <div class="sub">导入时间 {{ fmtTime(meta.generated_at) }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">该区可用</div>
-      <div class="value">{{ stats.usable ?? 0 }}<span class="muted" style="font-size:14px">/{{ stats.total ?? 0 }}</span></div>
+    </el-card>
+    <el-card class="stat-card" shadow="never">
+      <div class="label"><el-icon><CircleCheck /></el-icon>该区可用</div>
+      <div class="value">{{ stats.usable ?? 0 }}<span class="unit">/{{ stats.total ?? 0 }}</span></div>
       <div class="sub">{{ filter.zone || '未选区（任意区可用）' }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">当前在线</div>
-      <div class="value">{{ state.status.counts.online }}<span class="muted" style="font-size:14px">/{{ state.status.counts.total }}</span></div>
+    </el-card>
+    <el-card class="stat-card" shadow="never">
+      <div class="label"><el-icon><Monitor /></el-icon>当前在线</div>
+      <div class="value">{{ state.status.counts.online }}<span class="unit">/{{ state.status.counts.total }}</span></div>
       <div class="sub">当前区 {{ state.status.current.key || '--' }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">已勾选</div>
+    </el-card>
+    <el-card class="stat-card" shadow="never">
+      <div class="label"><el-icon><Select /></el-icon>已勾选</div>
       <div class="value">{{ selectedNames.length }}</div>
       <div class="sub">批量上线/下线/删号用</div>
-    </div>
+    </el-card>
   </div>
 
-  <div class="card">
-    <div class="row">
+  <el-card class="panel-card" shadow="never">
+    <div class="toolbar">
       <span class="headline">{{ headline }}</span>
       <span class="spacer" />
-      <select v-model="filter.zone" style="min-width: 230px" @change="load(true); loadPending()">
-        <option value="">区：任意（不过滤）</option>
-        <option v-for="z in zoneOptions()" :key="z.value" :value="z.value">区：{{ z.label }}</option>
-      </select>
-      <input v-model="filter.keyword" type="text" placeholder="检索：账号 / 角色名" style="width: 200px"
-             @keyup.enter="load(true)" />
-      <button class="btn primary" @click="load(true)">检索</button>
-      <label class="row muted" style="gap:4px">
-        <input v-model="filter.usable" type="checkbox" @change="load(true)" /> 只看可用
-      </label>
-      <label class="row muted" style="gap:4px">
-        <input v-model="filter.onlyOnline" type="checkbox" @change="load(true)" /> 只看在线
-      </label>
-      <label class="row muted" style="gap:4px" title="把池里没有但当前在线的号也列出来">
-        <input v-model="filter.includeLive" type="checkbox" @change="load(true)" /> 含池外在线
-      </label>
-      <select v-model="filter.pool" @change="load(true)" style="min-width: 130px"
-              title="号池分区：新手池 = 未毕业；抓鬼池 = 已毕业（≥31 级或链完成）">
-        <option value="">池分区：全部</option>
-        <option value="newbie">新手池（未毕业）</option>
-        <option value="ghost">抓鬼池（已毕业）</option>
-        <option value="unknown">未知（等级未上报）</option>
-      </select>
+      <el-select v-model="filter.zone" size="small" style="width: 240px" placeholder="区：任意（不过滤）"
+                 @change="load(true); loadPending()">
+        <el-option value="" label="区：任意（不过滤）" />
+        <el-option v-for="z in zoneOptions()" :key="z.value" :value="z.value" :label="`区：${z.label}`" />
+      </el-select>
+      <el-input v-model="filter.keyword" size="small" style="width: 200px" placeholder="检索：账号 / 角色名"
+                clearable @keyup.enter="load(true)">
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-button type="primary" size="small" @click="load(true)">检索</el-button>
+      <el-checkbox v-model="filter.usable" size="small" @change="load(true)">只看可用</el-checkbox>
+      <el-checkbox v-model="filter.onlyOnline" size="small" @change="load(true)">只看在线</el-checkbox>
+      <el-checkbox v-model="filter.includeLive" size="small" title="把池里没有但当前在线的号也列出来"
+                   @change="load(true)">含池外在线</el-checkbox>
+      <el-select v-model="filter.pool" size="small" style="width: 176px" @change="load(true)"
+                 placeholder="池分区：全部"
+                 title="号池分区：新手池 = 未毕业；抓鬼池 = 已毕业（≥31 级或链完成）">
+        <el-option value="" label="池分区：全部" />
+        <el-option value="newbie" label="新手池（未毕业）" />
+        <el-option value="ghost" label="抓鬼池（已毕业）" />
+        <el-option value="unknown" label="未知（等级未上报）" />
+      </el-select>
+      <span class="spacer" />
+      <el-button size="small" type="primary" plain @click="ui.addOpen = true">
+        <el-icon><Plus /></el-icon>加号入池
+      </el-button>
+      <el-button size="small" type="primary" @click="ui.createOpen = true">
+        <el-icon><Plus /></el-icon>建号 / 校验
+      </el-button>
     </div>
-  </div>
+  </el-card>
 
-  <div class="card">
-    <h3>可用性验证（直连游戏服跑登录协议 102，不进入游戏、无副作用）</h3>
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">可用性验证（直连游戏服跑登录协议 102，不进入游戏、无副作用）</span>
+      </div>
+    </template>
 
     <!-- 默认动作：从本地库按当前区批量验证，结果逐条同步回账号池 -->
-    <div class="row" style="margin-bottom: 8px">
-      <select v-model="verifyForm.zone" style="min-width: 210px" @change="loadPending()">
-        <option value="">验证区：跟随当前区</option>
-        <option v-for="z in zoneOptions()" :key="z.value" :value="z.value">{{ z.label }}</option>
-      </select>
-      <select v-model="verifyForm.scope" style="min-width: 250px">
-        <option v-for="s in SCOPES" :key="s.value" :value="s.value">范围：{{ s.label }}</option>
-      </select>
-      <label class="muted">本次</label>
-      <input v-model.number="verifyForm.limit" type="number" style="width: 88px"
-             title="0 = 不限（验完范围内全部）" />
+    <div class="toolbar" style="margin-bottom: 8px">
+      <el-select v-model="verifyForm.zone" size="small" style="width: 220px" placeholder="验证区：跟随当前区"
+                 @change="loadPending()">
+        <el-option value="" label="验证区：跟随当前区" />
+        <el-option v-for="z in zoneOptions()" :key="z.value" :value="z.value" :label="z.label" />
+      </el-select>
+      <el-select v-model="verifyForm.scope" size="small" style="width: 260px">
+        <el-option v-for="s in SCOPES" :key="s.value" :value="s.value" :label="`范围：${s.label}`" />
+      </el-select>
+      <span class="k">本次</span>
+      <el-input-number v-model="verifyForm.limit" size="small" :min="0" :max="100000" :controls="false"
+                       style="width: 96px" title="0 = 不限（验完范围内全部）" />
       <span v-if="!verifyForm.limit" class="muted">全部 ≈ {{ pending.zone ?? 0 }} 个</span>
-      <label class="muted">并发</label>
-      <input v-model.number="verifyForm.concurrency" type="number" style="width: 70px" title="同时探测几个账号（默认 2）" />
-      <label class="row muted" style="gap:4px"><input v-model="verifyForm.skip_online" type="checkbox" /> 跳过在线号</label>
-      <button class="btn primary" :disabled="jobRunning" @click="startBatchVerify">
+      <span class="k">并发</span>
+      <el-input-number v-model="verifyForm.concurrency" size="small" :min="1" :max="16" :controls="false"
+                       style="width: 78px" title="同时探测几个账号（默认 2）" />
+      <el-checkbox v-model="verifyForm.skip_online" size="small">跳过在线号</el-checkbox>
+      <el-button type="primary" size="small" :disabled="jobRunning" :loading="jobRunning" @click="startBatchVerify">
         {{ jobRunning ? '批量验证中…' : '批量验证当前区' }}
-      </button>
-      <button class="btn danger" :disabled="!jobRunning" @click="stopBatchVerify">停止</button>
+      </el-button>
+      <el-button type="danger" size="small" plain :disabled="!jobRunning" @click="stopBatchVerify">停止</el-button>
     </div>
 
-    <div class="row muted" style="gap:14px">
-      <span>本区全部 <b>{{ pending.zone ?? 0 }}</b></span>
-      <span>待验证 <b>{{ pending.unverified ?? 0 }}</b></span>
-      <span>已知不可用 <b>{{ pending.unusable ?? 0 }}</b></span>
-      <span>该区无记录 <b>{{ pending.unknown ?? 0 }}</b></span>
-      <span>池内共 <b>{{ pending.all ?? 0 }}</b></span>
+    <div class="toolbar">
+      <el-tag size="small" effect="plain" disable-transitions>本区全部 <b>{{ pending.zone ?? 0 }}</b></el-tag>
+      <el-tag size="small" effect="plain" disable-transitions>待验证 <b>{{ pending.unverified ?? 0 }}</b></el-tag>
+      <el-tag size="small" effect="plain" disable-transitions>已知不可用 <b>{{ pending.unusable ?? 0 }}</b></el-tag>
+      <el-tag size="small" effect="plain" disable-transitions>该区无记录 <b>{{ pending.unknown ?? 0 }}</b></el-tag>
+      <el-tag size="small" effect="plain" disable-transitions>池内共 <b>{{ pending.all ?? 0 }}</b></el-tag>
       <span class="spacer" />
-      <label class="row" style="gap:4px"><input v-model="verifyForm.query_role" type="checkbox" /> 查角色名/等级</label>
-      <label class="row" style="gap:4px"><input v-model="verifyForm.persist" type="checkbox" /> 结果写回池（同步）</label>
-      <label class="muted">超时(秒)</label>
-      <input v-model.number="verifyForm.timeout_sec" type="number" style="width: 66px" />
+      <el-checkbox v-model="verifyForm.query_role" size="small">查角色名/等级</el-checkbox>
+      <el-checkbox v-model="verifyForm.persist" size="small">结果写回池（同步）</el-checkbox>
+      <span class="k">超时(秒)</span>
+      <el-input-number v-model="verifyForm.timeout_sec" size="small" :min="1" :max="120" :controls="false"
+                       style="width: 78px" />
     </div>
 
-    <!-- 批量进度 -->
+    <!-- 批量进度：el-progress 的 status 跟着任务状态走（进行中/已停止/已完成） -->
     <div v-if="verify.job" class="verify-job">
-      <div class="row" style="margin-bottom: 6px">
-        <span class="tag" :class="jobRunning ? 'info' : (verify.job.status === 'canceled' ? 'warn' : 'ok')">
+      <div class="toolbar" style="margin-bottom: 6px">
+        <el-tag size="small" disable-transitions
+                :type="jobRunning ? 'info' : (verify.job.status === 'canceled' ? 'warning' : 'success')">
           {{ jobRunning ? '进行中' : (verify.job.status === 'canceled' ? '已停止' : '已完成') }}
-        </span>
+        </el-tag>
         <span class="muted">
           {{ verify.job.done }}/{{ verify.job.total }} · 可用 {{ verify.job.usable }} · 不可用
           {{ verify.job.unusable }} · 不存在 {{ verify.job.not_exists }}
@@ -575,270 +651,429 @@ const headline = computed(() => {
         <span class="spacer" />
         <span class="muted mono">{{ verify.job.zone }}</span>
       </div>
-      <div class="bar"><i :style="{ width: jobProgress + '%' }" :class="{ live: jobRunning }" /></div>
+      <el-progress :percentage="jobProgress" :stroke-width="12" :show-text="false"
+                   :status="jobRunning ? undefined : (verify.job.status === 'canceled' ? 'warning' : 'success')" />
     </div>
 
-    <div v-if="verify.msg" class="row" style="margin-top: 10px">
-      <span class="tag" :class="(verify.summary?.error || verify.job?.error) ? 'warn' : 'ok'">{{ verify.msg }}</span>
+    <div v-if="verify.msg" class="toolbar" style="margin-top: 10px">
+      <el-tag size="small" disable-transitions
+              :type="(verify.summary?.error || verify.job?.error) ? 'warning' : 'success'">{{ verify.msg }}</el-tag>
       <span class="muted mono">{{ verify.game_addr }} · {{ verify.coding }}</span>
     </div>
 
     <!-- 次要入口：手输账号（同步验证这几个） -->
-    <div class="row" style="margin-top: 12px">
+    <div class="toolbar" style="margin-top: 12px">
       <span class="muted">手输账号单独验（密码从库里取）：</span>
-      <input v-model="verifyForm.text" type="text" style="flex:1; min-width: 260px"
-             placeholder="账号（每行/逗号分隔，可写 账号:密码）；默认 1 个就够"
-             @keyup.enter="runVerify" />
-      <button class="btn" :disabled="verify.running" @click="runVerify">
+      <el-input v-model="verifyForm.text" size="small" style="flex:1; min-width: 260px"
+                placeholder="账号（每行/逗号分隔，可写 账号:密码）；默认 1 个就够" @keyup.enter="runVerify" />
+      <el-button size="small" :disabled="verify.running" :loading="verify.running" @click="runVerify">
         {{ verify.running ? '验证中…' : '立即验证' }}
-      </button>
+      </el-button>
     </div>
 
-    <table v-if="verify.results.length" style="margin-top: 8px">
-      <thead>
-        <tr><th>账号</th><th>结论</th><th>服务端码</th><th>角色</th><th>等级</th><th>耗时</th><th>说明</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in verify.results" :key="r.account">
-          <td class="mono">{{ r.account }}</td>
-          <td><span class="tag" :class="verifyTagClass(r)">{{ verifyText(r) }}</span></td>
-          <td class="mono">{{ r.ret_code }}</td>
-          <td>{{ r.role_name || '--' }}</td>
-          <td>{{ r.level || '--' }}</td>
-          <td class="muted">{{ r.elapsed_ms }}ms</td>
-          <td class="muted">{{ r.err || r.msg }}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+    <el-table v-if="verify.results.length" :data="verify.results" size="small" max-height="320"
+              row-key="account" style="margin-top: 8px">
+      <el-table-column label="账号" min-width="170" class-name="mono" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.account }}</template>
+      </el-table-column>
+      <el-table-column label="结论" width="94">
+        <template #default="{ row: r }">
+          <el-tag size="small" disable-transitions :type="tagType(verifyTagClass(r))">{{ verifyText(r) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="服务端码" width="96" class-name="mono">
+        <template #default="{ row: r }">{{ r.ret_code }}</template>
+      </el-table-column>
+      <el-table-column label="角色" min-width="120" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.role_name || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="等级" width="70">
+        <template #default="{ row: r }">{{ r.level || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="耗时" width="90">
+        <template #default="{ row: r }"><span class="muted">{{ r.elapsed_ms }}ms</span></template>
+      </el-table-column>
+      <el-table-column label="说明" min-width="200" show-overflow-tooltip>
+        <template #default="{ row: r }"><span class="muted">{{ r.err || r.msg }}</span></template>
+      </el-table-column>
+    </el-table>
+  </el-card>
 
-  <div class="card">
-    <div class="row" style="margin-bottom: 8px">
-      <h3 style="margin:0">建号 / 校验账号（注册协议 106 → 104 → 700）</h3>
-      <span class="spacer" />
-      <div class="seg">
-        <button :class="{ on: createForm.mode === 'number' }" @click="createForm.mode = 'number'">按编号</button>
-        <button :class="{ on: createForm.mode === 'list' }" @click="createForm.mode = 'list'">指定账号</button>
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">建号 / 校验账号（注册协议 106 → 104 → 700）</span>
+        <span class="spacer" />
+        <el-button type="primary" size="small" @click="ui.createOpen = true">
+          <el-icon><Plus /></el-icon>打开建号表单
+        </el-button>
       </div>
-      <select v-model="createForm.zone" style="min-width: 200px">
-        <option value="">建号区：跟随当前区</option>
-        <option v-for="z in zoneOptions()" :key="z.value" :value="z.value">{{ z.label }}</option>
-      </select>
-    </div>
-
-    <div v-if="createForm.mode === 'number'" class="row muted">
-      <label>前缀</label>
-      <input v-model="createForm.prefix" type="text" style="width: 110px" placeholder="robot000" />
-      <label>起始序号</label>
-      <input v-model.number="createForm.start" type="number" style="width: 84px" :disabled="createForm.auto_start" />
-      <label class="row" style="gap:4px" title="取池内同前缀最大序号+1，避免撞已有账号">
-        <input v-model="createForm.auto_start" type="checkbox" /> 自动接续
-      </label>
-      <label>数量</label>
-      <input v-model.number="createForm.count" type="number" style="width: 70px" />
-      <label>后缀</label>
-      <input v-model="createForm.suffix" type="text" style="width: 110px" placeholder="@xy3.com" />
-      <label>补零位数</label>
-      <input v-model.number="createForm.pad" type="number" style="width: 70px" title="0=自动（按最大序号位数）" />
-      <button class="btn primary" :disabled="createState.running" @click="runCreate">
-        {{ createState.running ? '建号中…' : '建号' }}
-      </button>
-    </div>
-    <div v-else class="row" style="margin-bottom: 8px">
-      <textarea v-model="createForm.text" rows="2" class="textarea"
-                placeholder="要建的账号名（每行/逗号分隔）"></textarea>
-      <button class="btn primary" :disabled="createState.running" @click="runCreate">
-        {{ createState.running ? '建号中…' : '建号' }}
-      </button>
-    </div>
-
-    <div class="row muted" style="gap:14px">
-      <span v-if="createPreview.count" class="mono">
-        将建：{{ createPreview.first }}<template v-if="createPreview.count > 1"> … {{ createPreview.last }}</template>
-        （共 {{ createPreview.count }} 个）
-      </span>
-      <span v-else class="warnText">还没有可建的账号（检查前缀/数量）</span>
+    </template>
+    <div class="toolbar">
+      <span class="muted">先验证再注册：已存在且密码对 → 跳过（标可用）；不存在 → 建号；密码不符 → 提示改密码</span>
       <span class="spacer" />
-      <label>每批</label>
-      <input v-model.number="createForm.batch_size" type="number" style="width: 66px" />
-      <label>并发</label>
-      <input v-model.number="createForm.concurrency" type="number" style="width: 60px" title="过高易触发同 IP 频控(112)" />
-      <label>密码长度</label>
-      <input v-model.number="createForm.password_len" type="number" style="width: 66px" title="默认 16 位（最少 8）" />
-      <label>超时(秒)</label>
-      <input v-model.number="createForm.timeout_sec" type="number" style="width: 66px" />
-      <label>密匙(可选)</label>
-      <input v-model="createForm.agent_key" type="text" style="width: 130px" placeholder="写入姓名位" />
+      <span class="muted">密码每号随机、按服通用、存账号库（登录只用库里的密码）</span>
     </div>
-    <div class="row muted">
-      <span>先验证再注册：已存在且密码对 → 跳过（标可用）；不存在 → 建号；密码不符 → 提示改密码</span>
-      <span class="spacer" />
-      <span>密码每号随机、按服通用、存账号库（登录只用库里的密码）</span>
+    <div v-if="createState.msg" class="toolbar" style="margin-top: 8px">
+      <el-tag size="small" disable-transitions :type="createState.created ? 'success' : 'warning'">{{ createState.msg }}</el-tag>
     </div>
-    <div v-if="createState.msg" class="row" style="margin-top: 8px">
-      <span class="tag" :class="createState.created ? 'ok' : 'warn'">{{ createState.msg }}</span>
-    </div>
-    <table v-if="createState.results.length" style="margin-top: 8px">
-      <thead>
-        <tr><th>账号</th><th>结果</th><th>探测码</th><th>errid</th><th>密码（已入库）</th><th>角色</th><th>说明</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in createState.results" :key="r.account">
-          <td class="mono">{{ r.account }}</td>
-          <td><span class="tag" :class="createStatusClass(r.status)">{{ createStatusLabel(r.status) }}</span></td>
-          <td class="mono">{{ r.ret_code }}</td>
-          <td class="mono">{{ r.err_id || '--' }}</td>
-          <td class="mono copyable" :title="r.password ? '点一下复制' : ''" @click="copyText(r.password)">
-            {{ r.password ? r.password + ' ⧉' : '--' }}
-          </td>
-          <td>{{ r.role_name ? `${r.role_name} Lv${r.level || 0}` : '--' }}</td>
-          <td class="muted">{{ r.err || r.msg }}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+    <el-table v-if="createState.results.length" :data="createState.results" size="small" max-height="320"
+              row-key="account" style="margin-top: 8px">
+      <el-table-column label="账号" min-width="170" class-name="mono" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.account }}</template>
+      </el-table-column>
+      <el-table-column label="结果" width="112">
+        <template #default="{ row: r }">
+          <el-tag size="small" disable-transitions :type="tagType(createStatusClass(r.status))">
+            {{ createStatusLabel(r.status) }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="探测码" width="92" class-name="mono">
+        <template #default="{ row: r }">{{ r.ret_code }}</template>
+      </el-table-column>
+      <el-table-column label="errid" width="90" class-name="mono">
+        <template #default="{ row: r }">{{ r.err_id || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="密码（已入库）" min-width="180">
+        <template #default="{ row: r }">
+          <el-tooltip :disabled="!r.password" content="点击复制" placement="top">
+            <span class="mono copyable" @click="copyText(r.password)">{{ r.password ? r.password + ' ⧉' : '--' }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="角色" min-width="130" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.role_name ? `${r.role_name} Lv${r.level || 0}` : '--' }}</template>
+      </el-table-column>
+      <el-table-column label="说明" min-width="200" show-overflow-tooltip>
+        <template #default="{ row: r }"><span class="muted">{{ r.err || r.msg }}</span></template>
+      </el-table-column>
+    </el-table>
+  </el-card>
 
-  <div v-if="err" class="card"><span class="tag danger">{{ err }}</span></div>
+  <el-card v-if="err" class="panel-card" shadow="never">
+    <el-tag size="small" type="danger" disable-transitions>{{ err }}</el-tag>
+  </el-card>
 
   <!-- 上线/下线放在表格**上面**：勾完就能点，不用往下滚 -->
-  <div class="card">
-    <div class="row" style="margin-bottom:8px">
-      <h3 style="margin:0">上线 / 下线</h3>
-      <span class="muted">点行内「上线」立刻拉起；批量就勾选（可跨页），不用输账号</span>
-      <span class="spacer" />
-      <span class="muted">已选</span><b>{{ selectedNames.length }}</b>
-      <button class="btn primary" :disabled="!selectedNames.length || batchBusy" @click="batchOnline(false)">
-        {{ batchBusy ? '下发中…' : `上线勾选的 ${selectedNames.length} 个` }}
-      </button>
-      <button class="btn" :disabled="!selectedNames.length || batchBusy" @click="batchOffline">下线勾选的</button>
-      <button class="btn danger" :disabled="!selectedNames.length" @click="removeAccounts">从池删除</button>
-    </div>
-    <div class="row">
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">上线 / 下线</span>
+        <span class="muted">点行内「上线」立刻拉起；批量就勾选（可跨页），不用输账号</span>
+        <span class="spacer" />
+        <span class="muted">已选</span><b>{{ selectedNames.length }}</b>
+        <el-button type="primary" size="small" :disabled="!selectedNames.length" :loading="batchBusy"
+                   @click="batchOnline(false)">
+          {{ batchBusy ? '下发中…' : `上线勾选的 ${selectedNames.length} 个` }}
+        </el-button>
+        <el-button size="small" :disabled="!selectedNames.length || batchBusy" @click="batchOffline">下线勾选的</el-button>
+        <el-button type="danger" size="small" plain :disabled="!selectedNames.length" @click="removeAccounts">从池删除</el-button>
+      </div>
+    </template>
+    <div class="toolbar">
       <span class="muted">快捷选择</span>
-      <button class="btn sm" @click="selectPage('all')">全选本页</button>
-      <button class="btn sm" @click="selectPage('usable')">选本页可用</button>
-      <button class="btn sm" @click="selectPage('offline')">选本页未上线</button>
-      <button class="btn sm" @click="selectPage('online')">选本页在线</button>
-      <button class="btn sm" @click="selectPage('none')">清空</button>
+      <el-button size="small" @click="selectPage('all')">全选本页</el-button>
+      <el-button size="small" @click="selectPage('usable')">选本页可用</el-button>
+      <el-button size="small" @click="selectPage('offline')">选本页未上线</el-button>
+      <el-button size="small" @click="selectPage('online')">选本页在线</el-button>
+      <el-button size="small" @click="selectPage('none')">清空</el-button>
       <span class="spacer" />
-      <label class="muted">自动挑号上限</label>
-      <input v-model.number="batch.limit" type="number" style="width: 70px" title="不勾选时自动挑号的个数（默认 1：一次一个）" />
-      <button class="btn" :disabled="batchBusy" @click="batchOnline(true)">自动挑 {{ batch.limit }} 个可用号上线</button>
+      <span class="k">自动挑号上限</span>
+      <el-input-number v-model="batch.limit" size="small" :min="1" :max="500" :controls="false"
+                       style="width: 78px" title="不勾选时自动挑号的个数（默认 1：一次一个）" />
+      <el-button size="small" :disabled="batchBusy" @click="batchOnline(true)">自动挑 {{ batch.limit }} 个可用号上线</el-button>
     </div>
-    <div class="row muted">
-      <label>每批</label>
-      <input v-model.number="batch.chunk" type="number" style="width: 66px" />
-      <label>批间隔(ms)</label>
-      <input v-model.number="batch.interval_ms" type="number" style="width: 92px" />
-      <label class="row" style="gap:4px"><input v-model="batch.only_usable" type="checkbox" /> 只选可用号</label>
+    <div class="toolbar muted" style="margin-top: 8px">
+      <span class="k">每批</span>
+      <el-input-number v-model="batch.chunk" size="small" :min="1" :max="200" :controls="false" style="width: 78px" />
+      <span class="k">批间隔(ms)</span>
+      <el-input-number v-model="batch.interval_ms" size="small" :min="0" :max="60000" :controls="false" style="width: 100px" />
+      <el-checkbox v-model="batch.only_usable" size="small">只选可用号</el-checkbox>
       <span class="spacer" />
       <span>默认「一次一个」（上限/每批都是 1）——想放量再往上调；已在线的会被跳过</span>
     </div>
-  </div>
+  </el-card>
 
-  <div class="card">
-    <div class="row" style="margin-bottom:8px">
-      <h3 style="margin:0">账号池（第 {{ pageInfo.page }} 页 · 本页 {{ rows.length }} 行{{ loading ? ' · 加载中…' : '' }}）</h3>
-      <span class="spacer" />
-      <span class="muted">密码不下发到前端；批量上线由服务端从池里取密码</span>
-    </div>
-    <div class="table-wrap" style="max-height: 56vh">
-      <table>
-        <thead>
-          <tr>
-            <th style="width:36px"><input type="checkbox" :checked="selected.size === rows.length && rows.length > 0" @change="toggleAll" /></th>
-            <th>账号</th><th style="width:64px">池</th><th>等级</th><th>角色</th><th>该区可用</th><th>验证信息</th>
-            <th>验证时间</th><th>在线</th><th>状态</th><th>运行时区</th><th>密码</th><th>备注</th>
-            <th style="width:96px">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="r in rows" :key="r.name" :class="{ 'row-on': r.online }">
-            <td><input type="checkbox" :checked="selected.has(r.name)" @change="toggle(r.name)" /></td>
-            <td class="mono">{{ r.name }}</td>
-            <td>
-              <span v-if="r.pool === 'newbie'" class="tag info" title="新手池：未毕业（等级<31 且未链完成）">新手</span>
-              <span v-else-if="r.pool === 'ghost'" class="tag warn" title="抓鬼池：已毕业（≥31 级 或 链完成）">抓鬼</span>
-              <span v-else class="tag dim" title="等级未上报/无记录">未知</span>
-            </td>
-            <td>{{ r.level || '--' }}</td>
-            <td>{{ r.role_name || '--' }}</td>
-            <td>
-              <span class="tag" :class="r.usable ? 'ok' : (r.verified ? 'danger' : 'dim')">
-                {{ r.usable ? '可用' : (r.verified ? '不可用' : '未验证') }}
-              </span>
-            </td>
-            <td class="muted ellipsis" :title="r.verify_msg || ''">{{ r.verify_msg || '--' }}</td>
-            <td class="muted" :title="r.verified_at ? fmtTime(r.verified_at) : '从未验证'">
-              {{ r.verified_at ? fmtTime(r.verified_at) : '--' }}
-            </td>
-            <td><span class="tag" :class="r.online ? 'ok' : 'dim'">{{ r.online ? '在线' : '离线' }}</span></td>
-            <td><span class="tag dim">{{ r.state || '--' }}</span></td>
-            <td class="mono muted">{{ r.runtime_zone || r.zone || '--' }}</td>
-            <td><span class="tag" :class="r.has_password ? 'dim' : 'warn'">{{ r.has_password ? '已设' : '未设' }}</span></td>
-            <td class="muted">{{ r.note || '--' }}</td>
-            <td>
-              <button v-if="r.online" class="btn sm" :disabled="!!rowBusy"
-                      @click="toggleOnline(r)">
-                {{ rowBusy === r.name ? '下线中…' : '下线' }}
-              </button>
-              <button v-else class="btn sm primary" :disabled="!!rowBusy"
-                      @click="toggleOnline(r)">
-                {{ rowBusy === r.name ? '上线中…' : '上线' }}
-              </button>
-            </td>
-          </tr>
-          <tr v-if="!rows.length">
-            <td colspan="13">
-              <div class="empty">
-                这一页没有数据。
-                <template v-if="!meta.count">先在下面「加号入池」把账号加进来。</template>
-                <template v-else>换个关键词/筛选，或翻回上一页。</template>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">账号池</span>
+        <span class="muted">第 {{ pageInfo.page }} 页 · 本页 {{ rows.length }} 行{{ loading ? ' · 加载中…' : '' }}</span>
+        <span class="spacer" />
+        <span class="muted">密码不下发到前端；批量上线由服务端从池里取密码</span>
+      </div>
+    </template>
+    <el-table v-loading="loading" :data="rows" class="pool-table" size="small" stripe height="560"
+              row-key="name" :row-class-name="poolRowClass">
+      <el-table-column width="46">
+        <template #header>
+          <el-checkbox :model-value="allPageSelected" :indeterminate="somePageSelected"
+                       :disabled="!rows.length" @change="toggleAll" />
+        </template>
+        <template #default="{ row: r }">
+          <el-checkbox :model-value="selected.has(r.name)" @change="toggle(r.name)" />
+        </template>
+      </el-table-column>
+      <el-table-column label="账号" min-width="170" class-name="mono" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.name }}</template>
+      </el-table-column>
+      <el-table-column label="池" width="66">
+        <template #default="{ row: r }">
+          <el-tag v-if="r.pool === 'newbie'" size="small" type="info" effect="light" disable-transitions
+                  title="新手池：未毕业（等级<31 且未链完成）">新手</el-tag>
+          <el-tag v-else-if="r.pool === 'ghost'" size="small" type="warning" effect="light" disable-transitions
+                  title="抓鬼池：已毕业（≥31 级 或 链完成）">抓鬼</el-tag>
+          <el-tag v-else size="small" type="info" effect="plain" disable-transitions title="等级未上报/无记录">未知</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="等级" width="70">
+        <template #default="{ row: r }">{{ r.level || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="角色" min-width="120" show-overflow-tooltip>
+        <template #default="{ row: r }">{{ r.role_name || '--' }}</template>
+      </el-table-column>
+      <el-table-column label="该区可用" width="100">
+        <template #default="{ row: r }">
+          <el-tag size="small" disable-transitions
+                  :type="r.usable ? 'success' : (r.verified ? 'danger' : 'info')"
+                  :effect="r.usable || r.verified ? 'light' : 'plain'">
+            {{ r.usable ? '可用' : (r.verified ? '不可用' : '未验证') }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="验证信息" min-width="200" show-overflow-tooltip>
+        <template #default="{ row: r }"><span class="muted">{{ r.verify_msg || '--' }}</span></template>
+      </el-table-column>
+      <el-table-column label="验证时间" width="160">
+        <template #default="{ row: r }">
+          <span class="muted" :title="r.verified_at ? fmtTime(r.verified_at) : '从未验证'">
+            {{ r.verified_at ? fmtTime(r.verified_at) : '--' }}
+          </span>
+        </template>
+      </el-table-column>
+      <el-table-column label="在线" width="80">
+        <template #default="{ row: r }">
+          <el-tag size="small" disable-transitions :type="r.online ? 'success' : 'info'"
+                  :effect="r.online ? 'light' : 'plain'">{{ r.online ? '在线' : '离线' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="104">
+        <template #default="{ row: r }">
+          <el-tag size="small" type="info" effect="plain" disable-transitions>{{ r.state || '--' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="运行时区" width="150" class-name="mono" show-overflow-tooltip>
+        <template #default="{ row: r }"><span class="muted">{{ r.runtime_zone || r.zone || '--' }}</span></template>
+      </el-table-column>
+      <el-table-column label="密码" width="80">
+        <template #default="{ row: r }">
+          <el-tag size="small" disable-transitions :type="r.has_password ? 'info' : 'warning'"
+                  :effect="r.has_password ? 'plain' : 'light'">{{ r.has_password ? '已设' : '未设' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="备注" min-width="140" show-overflow-tooltip>
+        <template #default="{ row: r }"><span class="muted">{{ r.note || '--' }}</span></template>
+      </el-table-column>
+      <!-- 固定在最右：14 列在窄屏要横向滚动，固定列保证「上线/下线」随时点得到 -->
+      <el-table-column label="操作" width="92" fixed="right">
+        <template #default="{ row: r }">
+          <el-button link size="small" :type="r.online ? undefined : 'primary'" :disabled="!!rowBusy"
+                     @click="toggleOnline(r)">
+            {{ rowBusy === r.name ? (r.online ? '下线中…' : '上线中…') : (r.online ? '下线' : '上线') }}
+          </el-button>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <el-empty :image-size="60" description="这一页没有数据">
+          <div class="muted small">
+            <template v-if="!meta.count">先点「加号入池」把账号加进来，或「建号」批量注册。</template>
+            <template v-else>换个关键词/筛选，或翻回上一页。</template>
+          </div>
+        </el-empty>
+      </template>
+    </el-table>
 
+    <!-- 分页：接口是 offset+limit+hasMore（没有过滤后的总数），所以用"上一页/下一页"+每页条数 -->
     <div class="pager">
       <span class="muted">
         第 {{ pageInfo.page }} 页 · 本页 {{ rows.length }} 行
         <template v-if="stats.total">· 池内共 {{ stats.total }} 个（该区可用 {{ stats.usable ?? 0 }}）</template>
       </span>
       <span class="spacer" />
-      <label class="row muted" style="gap:4px">
-        每页
-        <select v-model.number="pageInfo.pageSize" @change="load(true)">
-          <option v-for="n in PAGE_SIZES" :key="n" :value="n">{{ n }}</option>
-        </select>
-      </label>
-      <button class="btn sm" :disabled="pageInfo.page <= 1" @click="gotoPage(-1)">上一页</button>
-      <button class="btn sm" :disabled="!pageInfo.hasMore" @click="gotoPage(1)">下一页</button>
+      <span class="k">每页</span>
+      <el-select v-model="pageInfo.pageSize" size="small" style="width: 96px" @change="load(true)">
+        <el-option v-for="n in PAGE_SIZES" :key="n" :value="n" :label="`${n} 行`" />
+      </el-select>
+      <el-button-group>
+        <el-button size="small" :disabled="pageInfo.page <= 1" @click="gotoPage(-1)">
+          <el-icon><ArrowLeft /></el-icon>上一页
+        </el-button>
+        <el-button size="small" :disabled="!pageInfo.hasMore" @click="gotoPage(1)">
+          下一页<el-icon><ArrowRight /></el-icon>
+        </el-button>
+      </el-button-group>
     </div>
-  </div>
+  </el-card>
 
+  <!-- 加号入池：原来是页面底部的内嵌表单，改成弹窗（逻辑不变） -->
+  <el-dialog v-model="ui.addOpen" title="加号入池" width="620px">
+    <el-form ref="addFormRef" :model="addForm" label-width="88px" size="small">
+      <el-form-item label="账号" prop="text" :rules="[{ required: true, message: '请输入账号（逗号/换行分隔）', trigger: 'blur' }]">
+        <el-input v-model="addForm.text" type="textarea" :rows="4"
+                  placeholder="账号，逗号/换行分隔（可写 账号:密码）" />
+      </el-form-item>
+      <el-form-item label="统一密码">
+        <el-input v-model="addForm.password" placeholder="可空 = 默认" />
+      </el-form-item>
+      <el-form-item label="分配区">
+        <el-select v-model="addForm.zone" placeholder="不指定" style="width: 100%">
+          <el-option value="" label="不指定" />
+          <el-option v-for="z in zoneOptions()" :key="z.value" :value="z.value" :label="z.label" />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button size="small" @click="ui.addOpen = false">取消</el-button>
+      <el-button type="primary" size="small" @click="submitAdd">加入池</el-button>
+    </template>
+  </el-dialog>
 
-  <div class="card">
-    <h3>加号入池</h3>
-    <div class="row">
-      <textarea v-model="addForm.text" rows="2" placeholder="账号，逗号/换行分隔（可写 账号:密码）"
-                class="textarea"></textarea>
-      <input v-model="addForm.password" type="text" placeholder="统一密码（可空=默认）" style="width: 170px" />
-      <select v-model="addForm.zone" style="min-width: 200px">
-        <option value="">分配区：不指定</option>
-        <option v-for="z in zoneOptions()" :key="z.value" :value="z.value">{{ z.label }}</option>
-      </select>
-      <button class="btn primary" @click="addAccounts">加入池</button>
-    </div>
-  </div>
+  <!-- 建号：原来是页面中部的内嵌表单，改成弹窗（分段用 el-radio-group） -->
+  <el-dialog v-model="ui.createOpen" title="建号 / 校验账号（注册协议 106 → 104 → 700）" width="720px">
+    <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="88px" size="small">
+      <el-form-item label="建号方式">
+        <el-radio-group v-model="createForm.mode">
+          <el-radio-button value="number">按编号</el-radio-button>
+          <el-radio-button value="list">指定账号</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="建号区">
+        <el-select v-model="createForm.zone" placeholder="跟随当前区" style="width: 100%">
+          <el-option value="" label="跟随当前区" />
+          <el-option v-for="z in zoneOptions()" :key="z.value" :value="z.value" :label="z.label" />
+        </el-select>
+      </el-form-item>
+
+      <template v-if="createForm.mode === 'number'">
+        <el-form-item label="前缀" prop="prefix">
+          <el-input v-model="createForm.prefix" placeholder="robot000" />
+        </el-form-item>
+        <div class="form-row">
+          <el-form-item label="起始序号">
+            <el-input-number v-model="createForm.start" :min="0" :max="999999" :disabled="createForm.auto_start"
+                             :controls="false" style="width: 110px" />
+          </el-form-item>
+          <el-form-item label="数量" prop="count" label-width="56px">
+            <el-input-number v-model="createForm.count" :min="1" :max="200" :controls="false" style="width: 100px" />
+          </el-form-item>
+        </div>
+        <div class="form-row">
+          <el-form-item label="后缀">
+            <el-input v-model="createForm.suffix" placeholder="@xy3.com" />
+          </el-form-item>
+          <el-form-item label="补零位数" label-width="76px">
+            <el-input-number v-model="createForm.pad" :min="0" :max="12" :controls="false" style="width: 110px"
+                             title="0=自动（按最大序号位数）" />
+          </el-form-item>
+        </div>
+        <el-form-item label=" ">
+          <el-checkbox v-model="createForm.auto_start" title="取池内同前缀最大序号+1，避免撞已有账号">自动接续</el-checkbox>
+        </el-form-item>
+      </template>
+      <el-form-item v-else label="账号" prop="text">
+        <el-input v-model="createForm.text" type="textarea" :rows="3" placeholder="要建的账号名（每行/逗号分隔）" />
+      </el-form-item>
+
+      <el-form-item label="将建">
+        <span v-if="createPreview.count" class="mono">
+          {{ createPreview.first }}<template v-if="createPreview.count > 1"> … {{ createPreview.last }}</template>
+          （共 {{ createPreview.count }} 个）
+        </span>
+        <span v-else class="warnText">还没有可建的账号（检查前缀/数量）</span>
+      </el-form-item>
+      <div class="form-row">
+        <el-form-item label="每批">
+          <el-input-number v-model="createForm.batch_size" :min="1" :max="100" :controls="false" style="width: 96px" />
+        </el-form-item>
+        <el-form-item label="并发" label-width="56px">
+          <el-input-number v-model="createForm.concurrency" :min="1" :max="16" :controls="false" style="width: 90px"
+                           title="过高易触发同 IP 频控(112)" />
+        </el-form-item>
+        <el-form-item label="密码长度" label-width="76px">
+          <el-input-number v-model="createForm.password_len" :min="8" :max="64" :controls="false" style="width: 96px"
+                           title="默认 16 位（最少 8）" />
+        </el-form-item>
+      </div>
+      <div class="form-row">
+        <el-form-item label="超时(秒)">
+          <el-input-number v-model="createForm.timeout_sec" :min="1" :max="120" :controls="false" style="width: 96px" />
+        </el-form-item>
+        <el-form-item label="密匙(可选)" label-width="86px">
+          <el-input v-model="createForm.agent_key" placeholder="写入姓名位" />
+        </el-form-item>
+      </div>
+      <el-form-item label="说明">
+        <span class="muted">
+          先验证再注册：已存在且密码对 → 跳过（标可用）；不存在 → 建号；密码不符 → 提示改密码。<br />
+          密码每号随机、按服通用、存账号库（登录只用库里的密码）；建号结果在下方的卡片里逐条列出。
+        </span>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button size="small" @click="ui.createOpen = false">取消</el-button>
+      <el-button type="primary" size="small" :loading="createState.running" @click="submitCreate">
+        {{ createState.running ? '建号中…' : '建号' }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
-.row-on { background: rgba(62, 207, 142, 0.06); }
-.ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.textarea {
-  flex: 1; min-width: 320px; background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+/* ============================================================
+   AccountsView 的 Element Plus 皮肤补丁（全局深色变量在 styles.css 里，这里不动）
+   ============================================================ */
+
+/* 统计卡：网格内并排，必须抵消全局的 `.el-card + .el-card { margin-top:16px }` */
+.stat-grid { margin-bottom: 16px; }
+.stat-grid > .el-card + .el-card { margin-top: 0; }
+.stat-card { height: 100%; }
+.stat-card :deep(.el-card__body) { padding: 12px 14px; }
+.stat-card .label { display: flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 12px; }
+.stat-card .value {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums;
 }
+.stat-card .value .unit { font-size: 13px; font-weight: 400; color: var(--text-dim); }
+.stat-card .sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+/* 面板卡 */
+.panel-card { margin-bottom: 16px; }
+.panel-card :deep(.el-card__header) { padding: 10px 14px; }
+.panel-card :deep(.el-card__body) { padding: 12px 14px; }
+.card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-title { font-size: 14px; font-weight: 600; color: var(--text-dim); }
+
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* el-button 相邻时自带 12px 左间距，和 flex gap 叠加会变宽，这里抹平 */
+.toolbar :deep(.el-button + .el-button) { margin-left: 0; }
+.k { color: var(--text-dim); font-size: 12px; }
+.pager { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* 弹窗表单里的多列排布（比如"每批 / 并发 / 密码长度"一行三个） */
+.form-row { display: flex; flex-wrap: wrap; gap: 0 12px; }
+
+/* 在线行淡绿底：el-table 的底色画在 td 上，所以要落到 td */
+:deep(.row-on td.el-table__cell) { background: rgba(62, 207, 142, 0.06); }
+
+/* 固定列（操作）用 position:sticky + background:inherit，而全局把 --el-table-tr-bg-color
+   设成了 transparent → 横向滚动时右侧列会从固定列底下透出来。
+   把表格行底色设成与卡片一致的实色即可（观感不变，斑马纹/悬停仍由 Element 自己的规则覆盖）。 */
+.pool-table { --el-table-tr-bg-color: var(--panel); }
+/* 表头行本身没有底色，固定表头要单独给（选择器要比 Element 的固定列规则更具体） */
+:deep(.el-table__header-wrapper tr th.el-table-fixed-column--right) { background-color: var(--el-table-header-bg-color); }
+
+/* 可点复制（建号拿到的随机密码） */
+.copyable { cursor: pointer; }
+.copyable:hover { color: var(--info); }
 </style>
