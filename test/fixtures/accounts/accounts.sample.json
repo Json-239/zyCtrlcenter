@@ -1,0 +1,37 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从导入产物 data/accounts.json（源：E:\\robot_accounts\\robot_accounts.db，5005 个账号）裁剪：只保留 robot0001000/1001/1002 三个号及其在 47.96.8.240:2300 的区状态，字段名与结构原样（等级/角色名/usable/verified 均取自真实库）。",
+    "source": "E:\\robot_accounts\\robot_accounts.db"
+  },
+  "pool": {
+    "_comment": "测试用账号池（真实库裁剪）",
+    "generated_at": 1789800000,
+    "source": "E:\\robot_accounts\\robot_accounts.db",
+    "servers": {"1": "47.96.8.240:2300"},
+    "accounts": [
+      {
+        "name": "robot0001000@xy3.com",
+        "password": "123456",
+        "level": 19,
+        "zones": {"47.96.8.240:2300": {"verified": true, "usable": true, "msg": "登录成功"}}
+      },
+      {
+        "name": "robot0001001@xy3.com",
+        "password": "123456",
+        "level": 1,
+        "zones": {"47.96.8.240:2300": {"verified": true, "usable": false, "msg": "账号不存在(服务端 100)"}}
+      },
+      {
+        "name": "robot0001002@xy3.com",
+        "password": "123456",
+        "level": 36,
+        "role_name": "测试角色",
+        "chain_done": true,
+        "zones": {"47.96.8.240:2300": {"verified": true, "usable": true, "msg": "登录成功"}}
+      }
+    ]
+  }
+}

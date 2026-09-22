@@ -1,0 +1,11 @@
+{
+  "provenance": {
+    "real": false,
+    "trimmed": false,
+    "raw": "",
+    "how": "按参考项目 docs/运维手册 §4.1 的 config.py 字段形状构造（包含 ip/port/PROTOCOL_CODING 三个会被中控改写的键 + 行尾注释 + 其它不应被改动的配置）。编码值写成旧的 GBK，用于覆盖「旧编码 → UTF-8（当前默认）」的改写场景。构造数据显式 real=false。",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/docs/运维手册.md"
+  },
+  "filename": "config.py",
+  "content": "# -*- coding: utf-8 -*-\n# 机器人端配置样例（仅用于测试中控写入逻辑）\nip = \"192.168.0.201\"\nport = 2300\nPROTOCOL_CODING = \"GBK\"  # 旧编码；当前环境统一为 UTF-8\nPROTOCOL_VERSION = \"11050911\"\nrobot_count = 1\nrobot_task_tester = True\n"
+}

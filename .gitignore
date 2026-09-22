@@ -1,0 +1,32 @@
+# 构建产物
+zyctrlcenter.exe
+web/dist/
+web/node_modules/
+
+# 机器人部署目录（副本/生产共用；含 exe 与大量日志，不入库）
+deploy/
+
+# 运行时数据（日志按日期切分，不入库）；链数据 assets 例外：data/chains/ 随项目入库
+data/*
+!data/chains/
+!data/chains/**
+!data/maps.json
+logs/
+
+# 本地覆盖配置（凭据/token，不入库）
+config.local.json
+
+# 编辑器 / 测试产物
+.idea/
+.vscode/
+.playwright-cli/
+*.tmp
+*.png
+
+# 2026-09-22 追加：构建产物/临时快照
+*.exe
+zyctrlcenter.new.exe
+panel.yaml
+nul
+.zyctrlcenter.new.exe
+*.bak_*

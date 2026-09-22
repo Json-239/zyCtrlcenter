@@ -1,0 +1,19 @@
+{
+  "_comment": "链数据模板（文件名以 _ 开头，不会出现在 /api/chains 列表里）。复制为 <chain_id>.json 并按需填写；键名可自由增减——中控只做原样透传，未知字段不会被丢弃。",
+  "chain_id": "example",
+  "name": "示例链",
+  "start_task": 7001001,
+  "end_task": 5010105,
+  "npcs": {
+    "13035": [[12, 3931, 882], [5, 1504, 1120]]
+  },
+  "task_hints": {
+    "7001115": {"executor": "shop_purchase", "shop": {"npc": 13520, "item_index": 101403, "count": 1}}
+  },
+  "task_order": [
+    {"task_index": 7001001, "name": "天命所归", "catcher_npc": "10103", "next": [7001002]}
+  ],
+  "grid_cell": 16,
+  "map_grids": {},
+  "dijkstra": {}
+}

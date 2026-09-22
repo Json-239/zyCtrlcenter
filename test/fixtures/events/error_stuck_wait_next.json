@@ -1,0 +1,19 @@
+{
+  "provenance": {
+    "real": false,
+    "trimmed": false,
+    "raw": "",
+    "how": "按机器人端 quest_engine.py:3185 看门狗上报格式构造：{\"type\":\"error\",\"code\":\"STUCK_%s\" % quest.state,\"msg\":\"状态 %s 重试 %d 次仍无进展\"}，account/role_name/ts 由 __emit（quest_engine.py:137-141）补齐；retry_count=4 = config.quest_max_retry(3)+1。样本取现场 2026-09-21 16:39 卡死号 robot0001065@xy3.com（8 号同批）。构造数据显式 real=false。",
+    "source": "deploy/zones/prod-240-2300/script/quest_engine.py:3185 / 现场 runs_20260921.jsonl"
+  },
+  "event": {
+    "type": "error",
+    "code": "STUCK_WAIT_NEXT",
+    "msg": "状态 WAIT_NEXT 重试 4 次仍无进展",
+    "task_index": 0,
+    "account": "robot0001065@xy3.com",
+    "role_name": "测试角色",
+    "ts": 1789893540,
+    "_zone": "47.96.8.240:2300"
+  }
+}

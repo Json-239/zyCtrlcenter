@@ -1,0 +1,20 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本项目 data/chains/zhongkui_nav.json（真实导出，2.2MB）只保留**抓鬼专属字段**：ghost_maps（刷鬼图列表）、ghost_map_pos（每图筋斗云落点）、maps（地图名）。基座的 npcs/map_grids/dijkstra/grid_cell/item_meta 由中控按参考实现 services/chain.py:ghost_nav_payload() 的口径从 newbie_full 复用（见 internal/api/chainpayload.go），因此夹具里**故意不放**这三项——正好验证「组装」而不是「照搬文件」",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/zhongkui_nav.json"
+  },
+  "chain": {
+    "ghost_maps": [9, 10],
+    "ghost_map_pos": {
+      "9": [787, 780],
+      "10": [2934, 504]
+    },
+    "maps": {
+      "9": "东海湾",
+      "10": "幽冥魔谷"
+    }
+  }
+}

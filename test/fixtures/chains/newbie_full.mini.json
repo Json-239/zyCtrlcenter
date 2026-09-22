@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本项目 data/chains/newbie_full.json（真实导出，2.2MB）裁剪成**基座链**夹具：npcs 留钟馗 10146（幽冥界 24）与图9 的一个 NPC、map_grids 留 9/10 两张图、dijkstra 留 1 条、task_order/task_hints 各留 1 条（它是任务链，所以这些字段本来就有）；键名与值结构原样（npcs 是嵌套 [[map,x,y]] 形状）",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/newbie_full.json"
+  },
+  "chain": {
+    "chain_id": "newbie_full",
+    "name": "新手链（夹具）",
+    "start_task": 7001001,
+    "end_task": 7001002,
+    "npcs": {
+      "10146": [[24, 1728, 1056]],
+      "44": [[9, 481, 604]]
+    },
+    "task_hints": {
+      "7001002": {"executor": "shop_purchase", "shop": {"npc": "44", "item_index": 1, "count": 1}}
+    },
+    "task_order": [
+      {"task_index": 7001001, "name": "天命所归", "catcher_npc": "44", "next": [7001002]}
+    ],
+    "grid_cell": 16,
+    "map_grids": {
+      "9": {"w": 110, "h": 73, "rows": ["1111000000", "0000011111"]},
+      "10": {"w": 120, "h": 80, "rows": ["0000011111", "1111000000"]}
+    },
+    "dijkstra": {
+      "1": {"destination_index": 1, "from_map": 1, "target_map": 5, "kind": "map_skip", "x": 1807, "y": 983, "target_name": "东海村"}
+    }
+  }
+}

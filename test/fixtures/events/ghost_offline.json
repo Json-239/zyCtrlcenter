@@ -1,0 +1,21 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": false,
+    "raw": "{\"type\": \"ghost_offline\", \"code\": \"NO_TOKEN\", \"account\": \"robot0001194@xy3.com\", \"done\": 5, \"limit\": 50, \"reason\": \"背包无助战令且本轮不购买(已买过/买不起) → 接不到捉鬼\", \"required_level\": 0, \"role_name\": \"司徒秋珊\", \"ts\": 1789800827, \"_zone\": \"47.96.8.240:2400\"}",
+    "how": "2026-09-19 从参考项目 robot/ctrlcenter/data/runs_20260919.jsonl 尾部抽取的真实事件（原样）",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/data/runs_20260919.jsonl"
+  },
+  "event": {
+    "type": "ghost_offline",
+    "code": "NO_TOKEN",
+    "account": "robot0001194@xy3.com",
+    "done": 5,
+    "limit": 50,
+    "reason": "背包无助战令且本轮不购买(已买过/买不起) → 接不到捉鬼",
+    "required_level": 0,
+    "role_name": "司徒秋珊",
+    "ts": 1789800827,
+    "_zone": "47.96.8.240:2400"
+  }
+}

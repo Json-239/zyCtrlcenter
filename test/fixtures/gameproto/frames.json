@@ -1,0 +1,228 @@
+{
+  "_comment": "账号可用性探测(登录协议 102)用协议字节夹具；hex 由参考实现实际生成",
+  "coding_note": "字符串编码随部署不同(参考实现 query_account 用 UTF-8)；本夹具为 UTF-8",
+  "md5_password_note": "密码字段是 md5(明文) 的小写 hex；示例密码 123456",
+  "frames": [
+    {
+      "name": "c2s_connect",
+      "desc": "客户端握手 MC_CONNECT(100)",
+      "msg_id": 100,
+      "fmt": [],
+      "data": [],
+      "coding": "UTF-8",
+      "hex": "6400000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_connect_query",
+      "desc": "服务端连接查询 S2C_CONNECT_QUERY(200)",
+      "msg_id": 200,
+      "fmt": [],
+      "data": [],
+      "coding": "UTF-8",
+      "hex": "C800000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "c2s_connect_back",
+      "desc": "握手回包 MS_CONNECT_BACK(255) = [200]",
+      "msg_id": 255,
+      "fmt": [
+        4
+      ],
+      "data": [
+        200
+      ],
+      "coding": "UTF-8",
+      "hex": "FF00000004000000C8000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "c2s_ver",
+      "desc": "版本验证 MC_VER(101) = 版本号字符串",
+      "msg_id": 101,
+      "fmt": [
+        ""
+      ],
+      "data": [
+        "58740022"
+      ],
+      "coding": "UTF-8",
+      "hex": "650000000C000000080000003538373430303232",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_ver_ok",
+      "desc": "版本返回 S2C_VER(400) = [0, msg]",
+      "msg_id": 400,
+      "fmt": [
+        4,
+        ""
+      ],
+      "data": [
+        0,
+        "登录成功"
+      ],
+      "coding": "UTF-8",
+      "hex": "9001000014000000000000000C000000E799BBE5BD95E68890E58A9F",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "c2s_login",
+      "desc": "狼旗登录 MC_LOGIN_LANGQI(102) = [账号, md5(密码)]",
+      "msg_id": 102,
+      "fmt": [
+        "",
+        ""
+      ],
+      "data": [
+        "robot0003004@xy3.com",
+        "e10adc3949ba59abbe56e057f20f883e"
+      ],
+      "coding": "UTF-8",
+      "hex": "660000003C00000014000000726F626F7430303033303034407879332E636F6D200000006531306164633339343962613539616262653536653035376632306638383365",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_ack_ok",
+      "desc": "登录成功 S2C_ACK_ACCOUNT(300) retcode=0",
+      "msg_id": 300,
+      "fmt": [
+        4,
+        ""
+      ],
+      "data": [
+        0,
+        "登录成功"
+      ],
+      "coding": "UTF-8",
+      "hex": "2C01000014000000000000000C000000E799BBE5BD95E68890E58A9F",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_ack_no_account",
+      "desc": "账号不存在 300 retcode=100",
+      "msg_id": 300,
+      "fmt": [
+        4,
+        ""
+      ],
+      "data": [
+        100,
+        "账号不存在"
+      ],
+      "coding": "UTF-8",
+      "hex": "2C01000017000000640000000F000000E8B4A6E58FB7E4B88DE5AD98E59CA8",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_ack_bad_pwd",
+      "desc": "密码错误 300 retcode=200",
+      "msg_id": 300,
+      "fmt": [
+        4,
+        ""
+      ],
+      "data": [
+        200,
+        ""
+      ],
+      "coding": "UTF-8",
+      "hex": "2C01000008000000C800000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_ack_freezed",
+      "desc": "账号冻结 300 retcode=300",
+      "msg_id": 300,
+      "fmt": [
+        4,
+        ""
+      ],
+      "data": [
+        300,
+        "账号已冻结"
+      ],
+      "coding": "UTF-8",
+      "hex": "2C010000170000002C0100000F000000E8B4A6E58FB7E5B7B2E586BBE7BB93",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "c2s_query_role",
+      "desc": "查询角色 C2S_QUERY_ROLE(1000) = [0]",
+      "msg_id": 1000,
+      "fmt": [
+        4
+      ],
+      "data": [
+        0
+      ],
+      "coding": "UTF-8",
+      "hex": "E80300000400000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_query_role",
+      "desc": "角色列表 S2C_QUERY_ROLE(90132) 1 个角色",
+      "msg_id": 90132,
+      "fmt": [
+        "raw"
+      ],
+      "data": [],
+      "coding": "UTF-8",
+      "hex": "146001002E00000001000000E9030000010009000000E6B58BE8AF95E794B21500000100000002000000030000000400000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    },
+    {
+      "name": "s2c_query_role_empty",
+      "desc": "角色列表 S2C_QUERY_ROLE(90132) 无角色",
+      "msg_id": 90132,
+      "fmt": [
+        "raw"
+      ],
+      "data": [],
+      "coding": "UTF-8",
+      "hex": "146001000400000000000000",
+      "provenance": {
+        "real": true,
+        "how": "由参考实现 F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/register_robot.py 的 build_frame/_pack_str_ex 实际打包生成(帧格式 [type int32 LE][pblen int32 LE][body])"
+      }
+    }
+  ]
+}

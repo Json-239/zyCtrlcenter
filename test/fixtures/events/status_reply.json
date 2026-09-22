@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "real": false,
+    "trimmed": true,
+    "raw": "",
+    "how": "参考项目 docs/协议规范.md §4 JSON 示例（文档示例报文，非抓包；status_reply 不落运行历史，无真实抓包可引）。为便于阅读仅保留 2 个机器人条目，字段与 v1.20+ 协议一致（含 hs/err_code/err_ts）。构造数据显式 real=false。",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/docs/协议规范.md"
+  },
+  "event": {
+    "type": "status_reply",
+    "server": "47.96.8.240:2400",
+    "robots": [
+      {
+        "account": "robot0003004@xy3.com",
+        "state": "DIALOG",
+        "task_index": 7001005,
+        "done": 3,
+        "chain_done": false,
+        "role_name": "测试",
+        "level": 21,
+        "mapid": 5,
+        "online": true,
+        "pos": [1200, 800],
+        "hp": 2400,
+        "hs": true,
+        "fpp": 84,
+        "ghost": {"enabled": false, "done": 0, "limit": 50},
+        "err_code": "",
+        "err_ts": 0
+      },
+      {
+        "account": "robot0001004@xy3.com",
+        "state": "IDLE",
+        "task_index": 0,
+        "done": 0,
+        "chain_done": true,
+        "role_name": "青云",
+        "level": 46,
+        "mapid": 9,
+        "online": true,
+        "pos": [2300, 2300],
+        "hp": 5200,
+        "hs": true,
+        "ghost": {"enabled": true, "done": 12, "limit": 50},
+        "err_code": "TASK_STUCK",
+        "err_ts": 1789800000000
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": false,
+    "raw": "{\"type\": \"chain_done\", \"chain_id\": \"newbie_full\", \"elapsed_sec\": 808, \"done\": 43, \"account\": \"robot0005281@xy3.com\", \"role_name\": \"庞白桃\", \"ts\": 1789800865, \"_zone\": \"47.96.8.240:2400\"}",
+    "how": "2026-09-19 从参考项目 robot/ctrlcenter/data/runs_20260919.jsonl 尾部抽取的真实事件（原样）",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/data/runs_20260919.jsonl"
+  },
+  "event": {
+    "type": "chain_done",
+    "chain_id": "newbie_full",
+    "elapsed_sec": 808,
+    "done": 43,
+    "account": "robot0005281@xy3.com",
+    "role_name": "庞白桃",
+    "ts": 1789800865,
+    "_zone": "47.96.8.240:2400"
+  }
+}

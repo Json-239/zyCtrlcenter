@@ -1,0 +1,19 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": false,
+    "raw": "{\"type\": \"error\", \"code\": \"TASK_STUCK\", \"msg\": \"任务 7001130 商店购买重复 4 次未入包(npc=13011 item_index=102007 goods_index=10002), 停链等待处理\", \"task_index\": 7001130, \"account\": \"robot0001032@xy3.com\", \"role_name\": \"令狐代芙\", \"ts\": 1789800764, \"_zone\": \"47.96.8.240:2400\"}",
+    "how": "2026-09-19 从参考项目 robot/ctrlcenter/data/runs_20260919.jsonl 尾部抽取的真实事件（原样）",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/data/runs_20260919.jsonl"
+  },
+  "event": {
+    "type": "error",
+    "code": "TASK_STUCK",
+    "msg": "任务 7001130 商店购买重复 4 次未入包(npc=13011 item_index=102007 goods_index=10002), 停链等待处理",
+    "task_index": 7001130,
+    "account": "robot0001032@xy3.com",
+    "role_name": "令狐代芙",
+    "ts": 1789800764,
+    "_zone": "47.96.8.240:2400"
+  }
+}

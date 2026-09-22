@@ -1,0 +1,16 @@
+{
+  "provenance": {
+    "real": false,
+    "trimmed": false,
+    "raw": "",
+    "how": "按参考项目 docs/协议规范.md §1.2 事件表字段构造（robot_online 不落运行历史，无真实抓包可引）。构造数据显式 real=false。",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/docs/协议规范.md"
+  },
+  "event": {
+    "type": "robot_online",
+    "account": "robot0003004@xy3.com",
+    "role_name": "测试",
+    "level": 21,
+    "mapid": 5
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本项目 data/chains/zhuaogui_nav.json（真实导出，2.1MB，来源=参考项目 services.chain.ghost_nav_payload()）裁剪：maps/npcs/map_grids/dijkstra/ghost_map_pos/item_meta 各保留 1~2 个键，ghost_maps 完整保留；键名与值结构原样（含 npcs 的扁平形状 [map,x,y] 这一关键差异）",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/zhuaogui_nav.json"
+  },
+  "chain": {
+    "chain_id": "zhuaogui",
+    "start_task": 1002201,
+    "end_task": 1002207,
+    "npcs": {
+      "44": [9, 481, 604],
+      "10146": [24, 2300, 2300]
+    },
+    "maps": {
+      "1": "彩荷清池",
+      "9": "东海湾"
+    },
+    "task_hints": {},
+    "task_order": [],
+    "grid_cell": 16,
+    "ghost_maps": [9, 10, 11, 12, 13, 25, 26],
+    "ghost_map_pos": {
+      "9": [481, 604],
+      "10": [1200, 800]
+    },
+    "item_meta": {
+      "101316": {"is_equip": true, "quality": null}
+    },
+    "map_grids": {
+      "9": {"w": 110, "h": 73, "rows": ["1111000000", "0000011111"]}
+    },
+    "dijkstra": {
+      "1": {"destination_index": 1, "from_map": 1, "target_map": 5, "kind": "map_skip", "x": 1807, "y": 983, "target_name": "东海村"}
+    }
+  }
+}

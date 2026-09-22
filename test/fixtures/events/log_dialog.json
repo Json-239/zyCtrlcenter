@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": false,
+    "raw": "{\"type\": \"log\", \"level\": \"debug\", \"msg\": \"对话打开: 任务 0, npc=0, 选项 3 个 ['放置到人物装备栏（之后自行到', '花费50金直接孵化', '先留着']\", \"account\": \"robot0001005@xy3.com\", \"role_name\": \"郭寄云\", \"ts\": 1789800727, \"_zone\": \"47.96.8.240:2400\"}",
+    "how": "2026-09-19 从参考项目 robot/ctrlcenter/data/runs_20260919.jsonl 尾部抽取的真实事件（原样）",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/robot/ctrlcenter/data/runs_20260919.jsonl"
+  },
+  "event": {
+    "type": "log",
+    "level": "debug",
+    "msg": "对话打开: 任务 0, npc=0, 选项 3 个 ['放置到人物装备栏（之后自行到', '花费50金直接孵化', '先留着']",
+    "account": "robot0001005@xy3.com",
+    "role_name": "郭寄云",
+    "ts": 1789800727,
+    "_zone": "47.96.8.240:2400"
+  }
+}

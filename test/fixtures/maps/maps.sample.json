@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从游戏配置 config/map.csv（UTF-8，131 张地图）裁剪：只保留 id=1/2/9/11/24/35 六张（含本仓库实测出现过 9/11/24），键名与值名原样。完整表见 data/maps.json（由 tools/export_maps.py 导出）。",
+    "source": "F:/ZyBin/xm/2d-xiyou-server/config/map.csv"
+  },
+  "maps": {
+    "_comment": "测试用裁剪地图表（真实数据的子集）",
+    "1": "彩荷清池",
+    "2": "烟云港",
+    "9": "大唐东-码头",
+    "11": "长安东市集",
+    "24": "幽冥界",
+    "35": "建邺城"
+  }
+}

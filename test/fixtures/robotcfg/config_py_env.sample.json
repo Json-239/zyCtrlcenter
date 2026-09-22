@@ -1,0 +1,11 @@
+{
+  "provenance": {
+    "real": false,
+    "trimmed": true,
+    "raw": "",
+    "how": "按**现场生产 config.py** 的关键行形状构造（值使用环境变量表达式 `_os.environ.get(...) or 默认值`），用于验证「非字面量 → 跳过不改」的安全约束；账号/密码等敏感行未收录。构造数据显式 real=false。",
+    "source": "现场机器人 config.py（script/config.py）关键行"
+  },
+  "filename": "config.py",
+  "content": "# -*- coding: utf-8 -*-\n# 现场配置形状：区/端口/控制地址都可用环境变量覆盖\nip = _os.environ.get(\"ROBOT_ZONE_IP\") or \"47.96.8.240\"\nport = int(_os.environ.get(\"ROBOT_ZONE_PORT\") or 2300)\nPROTOCOL_CODING = \"UTF-8\"\nctrl_server_ip = _os.environ.get(\"ROBOT_CTRL_HOST\") or \"127.0.0.1\"\nctrl_server_port = int(_os.environ.get(\"ROBOT_CTRL_PORT\") or 17200)\nrobot_count = 1\n"
+}
