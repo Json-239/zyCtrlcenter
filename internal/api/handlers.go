@@ -731,6 +731,25 @@ func (a *API) handleRobotRestart(w http.ResponseWriter, r *http.Request) {
 		"msg": "机器人进程已重启（部署目录 " + a.Cfg.DeployDir + "）"})
 }
 
+// handleRobotsClearRemoved 清空"已移除"名单（POST /api/robots/clear_removed）。
+//
+// 用途（2026-09-22 生产）：AutoRemoveOnDone 会把某些原因下线的号永久排除出候选池，
+// 池子被吃空后水位器补不到号（"号池里没有可上线的号"）、在线数上不去。
+// 这里一键清空名单（不重启、不断控制通道）→ 候选池立即恢复，随后由水位器/各池
+// 在下一轮（≤60s）按需补号。注意：被清掉的号若"今日满额"仍会被 MarkGhostDoneToday
+// 挡住（当天不派），属预期行为。
+func (a *API) handleRobotsClearRemoved(w http.ResponseWriter, r *http.Request) {
+	if a.St == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "state 不可用"})
+		return
+	}
+	names := a.St.ClearRemoved()
+	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_clear_removed",
+		"zone": a.currentZoneKey(), "count": len(names)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(names),
+		"msg": fmt.Sprintf("已清空移除名单（%d 个号回到候选池，水位器/池子将在下一轮按需补号）", len(names))})
+}
+
 // handleReloadScripts 热更机器人脚本（进程内 importlib.reload 指定模块，免重启）。
 //
 //	POST /api/robot/reload_scripts

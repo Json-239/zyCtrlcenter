@@ -427,6 +427,24 @@ func (s *State) RemovedList() []string {
 	return out
 }
 
+// ClearRemoved 清空"已移除"名单，返回被清掉的账号（升序）。
+//
+// 2026-09-22 生产背景：AutoRemoveOnDone 原先把"抓鬼满额/下线换号"的号也永久移除，
+// 一天累积 461 个（当前区可用号 544 个里 83% 被排除）→ 水位器候选池为空
+// （"号池里没有可上线的号"）→ 在线数卡在 83 上不到 200。这里提供一键恢复：
+// 清空后候选池立即恢复，水位器/池子会在下一轮（60s 内）按需补号。
+func (s *State) ClearRemoved() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.removed))
+	for a := range s.removed {
+		out = append(out, a)
+	}
+	s.removed = make(map[string]bool)
+	sort.Strings(out)
+	return out
+}
+
 // ---------------------------------------------------------------- 连接/服务器
 
 // SetCurServer 记录某区机器人上报的游戏服地址（zone 为空时记到 "default"）。

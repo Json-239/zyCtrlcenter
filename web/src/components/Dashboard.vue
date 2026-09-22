@@ -477,8 +477,16 @@ async function removeOffline() {
     if (res && res.ok) ok += chunk.length
     await new Promise((r) => setTimeout(r, 200))
   }
-  // 每批都被 post() 弹过一次提示，这里再汇总一句总数（批量操作要看最后结果）
+      // 每批都被 post() 弹过一次提示，这里再汇总一句总数（批量操作要看最后结果）
   ElMessage({ type: ok === accs.length ? 'success' : 'warning', message: `已移除掉线号 ${ok}/${accs.length} 个` })
+}
+
+// 2026-09-22：清空"已移除"名单。自动移除（满额/下线换号）会把号永久排除出候选池，
+// 池子被吃空后水位器补不到号（"号池里没有可上线的号"，在线数卡住上不去）。
+// 这里一键清空（不重启、不断控制通道）：候选池立即恢复，水位器/各池下一轮按需补号。
+async function clearRemoved() {
+  if (!await confirmBox('清空「已移除」名单？被移除的号会回到候选池（当天抓鬼满额的号仍会被挡，属预期）。', '确认清空', '清空')) return
+  await post('/api/robots/clear_removed', {})
 }
 
 function hpClass(r) {

@@ -676,9 +676,14 @@ func (h *Handler) onGhostDone(ev map[string]any) {
 	// 2026-09-22：记"今天抓鬼已满" —— 服务端满额后钟馗不再给任务，若不记住，
 	// 抓鬼池会把它再拉起来 → 在钟馗空转（今日堆积分分钟涨到 26+ 的那个坑）。
 	h.St.MarkGhostDoneToday(account)
-	if h.autoRemove() {
-		h.removeAccount(account, "ghost_done")
-	}
+	// 2026-09-22 策略修正：满额**不再自动移除**（原来 removeAccount(ghost_done)）。
+	//   抓鬼满额是"每日"的（次日重置可复用），而"移除"是当天永久排除 —— 生产实测
+	//   一天累积 461 个被移除（当前区可用号 544 个里 83%）→ 候选池为空、水位器
+	//   补不到号（"号池里没有可上线的号"）、在线卡在 83 上不到 200。
+	//   现在：满额只离线（机器人自己下线 + MarkGhostDoneToday 当天不再派），
+	//   次日 0 点自然恢复复用。只有"真坏号"才移除，见 onGhostOffline 的白名单。
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": account,
+		"zone": zoneOf(ev), "msg": "抓鬼满额：只离线不清号（次日可复用；如需换号由池子/水位器补位）"})
 }
 
 func (h *Handler) onGhostOffline(ev map[string]any) {
@@ -706,9 +711,24 @@ func (h *Handler) onGhostOffline(ev map[string]any) {
 		"zone": zoneOf(ev),
 		"msg": "抓鬼不可行(" + str(ev, "code") + "): " + str(ev, "reason") +
 			"（业务处置如换号/冷却由使用方实现）"})
-	if h.autoRemove() {
+	// 2026-09-22 策略修正：只对"真坏号"永久移除；满额/无动作项/无令/没钱等
+	//   "今天不行"的原因只离线（当天不派），不进移除名单 —— 否则候选池会被吃空。
+	if h.autoRemove() && ghostOfflineShouldRemove(str(ev, "code")) {
 		h.removeAccount(account, "ghost_offline")
 	}
+}
+
+// ghostOfflineShouldRemove 抓鬼"下线换号"时是否把该号**永久移除**（默认只离线）。
+//   - 移除白名单 = 服务端明确判了"这个号接不到"（等级不足/条件不符等），
+//     以及账号本身有问题（封禁/密码错）的情况；
+//   - NO_ACTION / NO_TOKEN / NO_MONEY / DAILY_LIMIT 等都属于"今天不行"，
+//     号明天还能用 → 只离线，不永久排除。
+func ghostOfflineShouldRemove(code string) bool {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "ACCEPT_FATAL", "BANNED", "ACCOUNT_INVALID", "PASSWORD_ERROR":
+		return true
+	}
+	return false
 }
 
 func (h *Handler) onLog(ev map[string]any) {
