@@ -30,3 +30,6 @@ panel.yaml
 nul
 .zyctrlcenter.new.exe
 *.bak_*
+
+# 编辑器/构建备份残留
+*~
