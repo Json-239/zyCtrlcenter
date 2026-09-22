@@ -201,6 +201,9 @@ type MapLoad struct {
 type Deps struct {
 	// Robots 当前区机器人的状态快照（判"在游荡/空闲"、算各图人数用）。
 	Robots func() []state.Robot
+	// ReclaimEligible 回收资格闸（可选）：只回收"回收后真能进任务池"的号。
+	// nil = 全放行（保持旧行为）。2026-09-22 P0，详见 PickReclaim 注释。
+	ReclaimEligible func(state.Robot) bool
 	// Deficit 任务池缺口 = 抓鬼池 deficit + 新手池 deficit（**正数=缺人**，负数=超编）。
 	Deficit func() int
 	// Maps 可用游荡图（链数据里有寻路网格的图；白名单为空时用它）。
@@ -406,7 +409,12 @@ func MapLoads(robots []state.Robot, maps []int) []MapLoad {
 // 顺带纠偏分布（图人数并列时按账号升序，结果稳定、便于测试）。
 //
 // 人数不足 n 就有几个给几个；n<=0 / 没有游荡号 → nil。
-func PickReclaim(robots []state.Robot, n int) []string {
+//
+// 2026-09-22 P0 修复（三池交互分析）：eligible 非 nil 时**只挑"回收后真能进任务池"的号**。
+// 原实现只判 Roaming —— 会把"今日满额/等级不够"的号也回收给任务池，而任务池会跳过它们，
+// 90s 后机器人端 auto_roam 又派去游荡 → 回收-重派来回损耗（实测 robot0001108/1127/1176
+// 各被回收 20+ 次，游荡产出被反复清空）。这两类号留在游荡池继续游荡更有价值。
+func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) []string {
 	if n <= 0 {
 		return nil
 	}
@@ -419,6 +427,9 @@ func PickReclaim(robots []state.Robot, n int) []string {
 	for _, r := range robots {
 		if !Roaming(r) {
 			continue
+		}
+		if eligible != nil && !eligible(r) {
+			continue // 2026-09-22 P0：回收后进不了任务池的号不回收（详见函数头注释）
 		}
 		cands = append(cands, cand{account: r.Account, count: load[r.MapID]})
 	}
@@ -630,7 +641,7 @@ func (k *Keeper) Tick(now time.Time) bool {
 			k.note(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running))
 			return false
 		}
-		picked := PickReclaim(robots, n)
+		picked := PickReclaim(robots, n, k.d.ReclaimEligible)
 		if len(picked) == 0 {
 			k.note(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running))
 			return false

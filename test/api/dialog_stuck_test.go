@@ -10,6 +10,7 @@ package api_test
 import (
 	"testing"
 	"time"
+	"zyctrlcenter/internal/services/autotask"
 
 	"zyctrlcenter/test/testsupport"
 )
@@ -19,6 +20,13 @@ func TestIntentsRestoreGhostStuckInDialog(t *testing.T) {
 	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
 	defer rb.Close()
 	testsupport.InstallGhostNav(t, env.cfg.ChainDir)
+	// 2026-09-22 P1（三池交互分析）：restorer 现在看池状态（池未启用/已达标 → 不补发），
+	//   单测里把抓鬼池启动起来，模拟生产（ghost enabled + 目标 10 → 有缺口）。
+	if err := env.api.AutoTask.Start(autotask.KindGhost, autotask.Config{
+		Kind: autotask.KindGhost, IntervalSec: 300, BatchMin: 1, BatchMax: 5, TargetOnline: 10,
+	}); err != nil {
+		t.Fatalf("启动抓鬼池失败: %v", err)
+	}
 
 	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
 		"robots": []any{map[string]any{

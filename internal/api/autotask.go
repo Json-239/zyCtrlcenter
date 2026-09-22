@@ -133,6 +133,16 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
 		}
+		// 2026-09-22 P1（三池交互分析）：池状态闸 —— restorer 原来不看池的 enabled/保持数，
+		//   池禁用或已超编时仍补发（实测 newbie target=0 却有 16 号在跑、ghost 102>100）。
+		if ok, why := a.poolAllowsDispatch(kind); !ok {
+			return true, why
+		}
+		// 2026-09-22 P1：满额闸 —— 今日已满/不可用的号不要再补发 ghost_start
+		//   （实测 21:42:33 刚回收、21:42:40 就补发，机器人同秒回"启动时计数已满 50/50"）。
+		if a.St != nil && a.St.GhostDoneToday(account) {
+			return true, "今日抓鬼已满/不可用（等跨日或清空移除名单）"
+		}
 		if ok, why := a.ghostGateFor(account); !ok {
 			return true, why
 		}
@@ -143,6 +153,24 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		}
 		return false, ""
 	}
+}
+
+// poolAllowsDispatch 池状态闸（2026-09-22 P1）：池未启用 / 已达标（无缺口）→ 不自动补发。
+func (a *API) poolAllowsDispatch(kind string) (bool, string) {
+	if a.AutoTask == nil {
+		return true, ""
+	}
+	st, ok := a.AutoTask.States()[autotask.Kind(kind)]
+	if !ok {
+		return true, ""
+	}
+	if !st.Enabled {
+		return false, kind + " 池未启用（不自动补发）"
+	}
+	if st.Target > 0 && st.Deficit <= 0 {
+		return false, fmt.Sprintf("%s 池已达标（%d/%d，不自动补发）", kind, st.Online, st.Target)
+	}
+	return true, ""
 }
 
 // accountLevel 取该号等级与"服务端要求的抓鬼等级"（运行时优先，其次账号池该区记录）。

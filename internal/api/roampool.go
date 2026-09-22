@@ -28,12 +28,31 @@ import (
 func (a *API) RoampoolDeps() roampool.Deps {
 	return roampool.Deps{
 		Robots:   a.roampoolRobots,
+		// 2026-09-22 P0：回收资格闸 —— 只回收"回收后真能进任务池"的号（否则回收-重派空转）
+		ReclaimEligible: a.roamReclaimEligible,
 		Deficit:  a.roampoolDeficit,
 		Maps:     a.roampoolMaps,
 		Dispatch: a.roampoolDispatch,
 		Stop:     a.roampoolStop,
 		Log:      func(format string, args ...any) { a.Log.Printf(format, args...) },
 	}
+}
+
+// roamReclaimEligible 回收资格（2026-09-22 P0，三池交互分析）：
+// 只回收"回收后真能进任务池"的号 ——
+//   · 今日抓鬼已满/不可用（GhostDoneToday）：任务池会跳过它；
+//   · 等级不到抓鬼门槛（ghostGate）：任务池同样跳过。
+// 这两类回收给任务池只是空转（90s 后 auto_roam 又派游荡，实测单号 20+ 次往返），
+// 让它们留在游荡池继续游荡（有产出）。
+func (a *API) roamReclaimEligible(r state.Robot) bool {
+	if a.St != nil && a.St.GhostDoneToday(r.Account) {
+		return false
+	}
+	lvl, req := a.accountLevel(r.Account)
+	if ok, _ := a.ghostGate(lvl, req); !ok {
+		return false
+	}
+	return true
 }
 
 // roampoolRobots 当前区的机器人快照（别的区的号不参与：游荡池只对当前区生效）。

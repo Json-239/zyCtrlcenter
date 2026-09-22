@@ -170,21 +170,37 @@ func TestStuckCodeCountsAndTriggersReghost(t *testing.T) {
 func TestGhostOfflineAutoRemoveWhenEnabled(t *testing.T) {
 	cfg := config.Default() // AutoRemoveOnDone=true
 	h, st, runStore, _ := testsupport.NewTestHandler(t, cfg)
-	fx := testsupport.LoadFixture(t, "ghost_offline.json")
+	fx := testsupport.LoadFixture(t, "ghost_offline.json") // code=NO_TOKEN（"今天不行"类）
+
+	// 预置一行"该号在线"（心跳已在库里），才能验证"非白名单下线只离线、不删行"
+	st.Update(accGhost, func(r *state.Robot) { r.Online = true })
 
 	h.HandleEvent(fx.Event)
 
-	if !st.IsRemoved(accGhost) {
-		t.Fatalf("ghost_offline 后 %s 应进入已移除集合（防心跳复活）", accGhost)
+	// 2026-09-22 策略细分（用户口径）：ghost_offline 只对"真坏号"白名单（ACCEPT_FATAL 等）
+	//   永久移除；NO_TOKEN/NO_ACTION/DAILY_LIMIT 这类只离线 —— 否则候选池会被吃空
+	//   （生产实测 removed 461 / 当前区可用 544，水位器补不到号）。
+	if st.IsRemoved(accGhost) {
+		t.Fatalf("NO_TOKEN 类下线不应永久移除（策略细分后只对白名单 code 移除）")
 	}
-	if st.Has(accGhost) {
-		t.Fatal("自动下机开启时 ghost_offline 应删除该账号行")
+	if !st.Has(accGhost) {
+		t.Fatal("非白名单下线：账号行应保留（只离线，次日可复用）")
 	}
 	if !testsupport.StoreHasType(runStore, "ghost_offline") {
 		t.Fatal("ghost_offline 必须写运行历史")
 	}
 	if !testsupport.StoreHasType(runStore, "log") {
 		t.Fatal("ghost_offline 应追加一条可读的 warn 日志（原因）")
+	}
+	// 白名单 code（ACCEPT_FATAL：服务端明确判了"这个号接不到"）→ 仍应自动下机（防心跳复活）
+	h.HandleEvent(map[string]any{"type": "ghost_offline", "code": "ACCEPT_FATAL",
+		"account": accGhost, "reason": "接取被拒：等级不足", "required_level": 40,
+		"_zone": "47.96.8.240:2400"})
+	if !st.IsRemoved(accGhost) {
+		t.Fatalf("ACCEPT_FATAL 应进入已移除集合（真坏号才永久移除）")
+	}
+	if st.Has(accGhost) {
+		t.Fatal("自动下机开启时白名单下线应删除该账号行")
 	}
 	// 下机动作异步执行（不阻塞事件循环）：等待其历史落盘，确保用例结束时无后台写入
 	testsupport.Eventually(t, 2*time.Second,

@@ -100,7 +100,7 @@ func TestPickReclaimPrefersCrowdedMap(t *testing.T) {
 		walking("b1", 26), // 图26：1 个
 		walking("c1", 24), // 图24：1 个
 	}
-	got := roampool.PickReclaim(robots, 2)
+	got := roampool.PickReclaim(robots, 2, nil)
 	if join(got) != "a1,a2" {
 		t.Fatalf("应先回收人最多的图上的游荡号（图10 的 a1/a2），实际 %v", got)
 	}
@@ -108,14 +108,14 @@ func TestPickReclaimPrefersCrowdedMap(t *testing.T) {
 
 func TestPickReclaimShortfallAndEmpty(t *testing.T) {
 	robots := []state.Robot{walking("b1", 26), online("x", 10)}
-	got := roampool.PickReclaim(robots, 5)
+	got := roampool.PickReclaim(robots, 5, nil)
 	if len(got) != 1 || got[0] != "b1" {
 		t.Fatalf("游荡号不够时有多少给多少，实际 %v", got)
 	}
-	if got := roampool.PickReclaim([]state.Robot{online("x", 10), ghosting("y")}, 3); len(got) != 0 {
+	if got := roampool.PickReclaim([]state.Robot{online("x", 10), ghosting("y")}, 3, nil); len(got) != 0 {
 		t.Fatalf("没有游荡号应返回空，实际 %v", got)
 	}
-	if got := roampool.PickReclaim(robots, 0); len(got) != 0 {
+	if got := roampool.PickReclaim(robots, 0, nil); len(got) != 0 {
 		t.Fatalf("n<=0 应返回空，实际 %v", got)
 	}
 }
@@ -123,7 +123,7 @@ func TestPickReclaimShortfallAndEmpty(t *testing.T) {
 func TestPickReclaimTieBreakIsStable(t *testing.T) {
 	// 两张图人数相同 → 按账号升序，结果稳定（日志/测试可预期）
 	robots := []state.Robot{walking("z9", 10), walking("a1", 24)}
-	if got := roampool.PickReclaim(robots, 1); join(got) != "a1" {
+	if got := roampool.PickReclaim(robots, 1, nil); join(got) != "a1" {
 		t.Fatalf("并列时应按账号升序取第一个，实际 %v", got)
 	}
 }
@@ -583,5 +583,28 @@ func TestConfigValidateRejectsOutOfRange(t *testing.T) {
 	// 没通过校验就不该改内存里的参数（保持默认）
 	if got := k.Config().Target; got != roampool.DefaultTarget {
 		t.Fatalf("非法参数不该生效，实际 target=%d", got)
+	}
+}
+
+// 2026-09-22 P0：回收资格闸 —— 回收后进不了任务池的号（今日满额/等级不够）不回收。
+// 背景：原实现只判"在游荡"，把满额号也回收给任务池，任务池跳过它们 → 90s 后机器人端
+// auto_roam 又派游荡 → 回收-重派来回损耗（实测单号 20+ 次往返）。eligible=nil 保持旧行为。
+func TestPickReclaimEligibleGate(t *testing.T) {
+	robots := []state.Robot{
+		walking("full", 10), // 满额：eligible=false → 不该回收
+		walking("ok", 10),   // 正常：该回收
+	}
+	got := roampool.PickReclaim(robots, 5, func(r state.Robot) bool { return r.Account == "ok" })
+	if join(got) != "ok" {
+		t.Fatalf("资格过滤后应只回收 ok，实际 %q", join(got))
+	}
+	all := roampool.PickReclaim(robots, 5, nil)
+	if len(all) != 2 {
+		t.Fatalf("eligible=nil 应全放行（2 个），实际 %d", len(all))
+	}
+	// 有资格的号不够 n：就有几个给几个（不硬凑）
+	only := roampool.PickReclaim(robots, 2, func(r state.Robot) bool { return r.Account == "ok" })
+	if join(only) != "ok" {
+		t.Fatalf("不够数时应只给 ok，实际 %q", join(only))
 	}
 }
