@@ -102,7 +102,8 @@ def build_branch_fn(body_text):
     lines = ["    " + l.replace("\t", "    ") if l.strip() else ""
              for l in body_text.splitlines()]
     code = ("def _branch(quest, robot_object, data, quest_state, "
-            "__handle_dialog, __emit, __emit_state):\n" + "\n".join(lines) + "\n")
+            "__handle_dialog, __emit, __emit_state, __now_ms):\n"
+            + "\n".join(lines) + "\n")
     ns = {}
     exec(compile(code, "<show_dialog branch>", "exec"), ns)
     return ns["_branch"]
@@ -148,7 +149,8 @@ def run_case(branch_fn, pending, active, data, real_handle=None):
         calls["states"] += 1
 
     branch_fn(q, "robot", data, quest_state,
-              real_handle if real_handle != None else handle, emit, emit_state)
+              real_handle if real_handle != None else handle, emit, emit_state,
+              lambda: 0)
     return q, calls
 
 
