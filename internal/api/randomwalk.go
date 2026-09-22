@@ -60,6 +60,17 @@ func (a *API) handleRandomWalk(w http.ResponseWriter, r *http.Request) {
 	if mapsErr == nil && isRandom && len(mapsList) == 0 && len(a.Cfg.RoamWorldMaps) > 0 {
 		mapsList = append([]int(nil), a.Cfg.RoamWorldMaps...)
 	}
+	// 2026-09-22 游荡排除图（用户口径）：幽冥界 24 是抓鬼专属 —— 无论随机白名单还是
+	// 显式 maps，都从这里剔除（与机器人端 config.robot_roam_exclude_maps 同口径，双保险）。
+	if len(a.Cfg.RoamExcludeMaps) > 0 && len(mapsList) > 0 {
+		kept := make([]int, 0, len(mapsList))
+		for _, m := range mapsList {
+			if !containsInt(a.Cfg.RoamExcludeMaps, m) {
+				kept = append(kept, m)
+			}
+		}
+		mapsList = kept
+	}
 	profile := modeStr
 	if isRandomWord(modeStr) {
 		if mapidRaw != nil && toInt(mapidRaw, 0) > 0 {
@@ -76,6 +87,12 @@ func (a *API) handleRandomWalk(w http.ResponseWriter, r *http.Request) {
 		if mapid <= 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false,
 				"msg": "mapid 必填（数字图号；或 \"random\"=随机图。例：6=半月岛、10=大唐东野林）"})
+			return
+		}
+		// 2026-09-22 游荡排除图（用户口径）：显式选到幽冥界(24) 直接拒绝（不动号上任务）
+		if containsInt(a.Cfg.RoamExcludeMaps, mapid) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false,
+				"msg": fmt.Sprintf("目标图 %d 不在游荡范围（幽冥界为抓鬼专属）", mapid)})
 			return
 		}
 		if len(mapsList) > 0 && !containsInt(mapsList, mapid) {

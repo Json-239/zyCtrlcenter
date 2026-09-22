@@ -54,6 +54,11 @@ const mapOptions = computed(() => {
   list.sort((a, b) => (b.online - a.online) || (a.id - b.id))
   return list
 })
+// 2026-09-22 游荡排除图（用户口径）：幽冥界(24) 是抓鬼专属（钟馗所在图），游荡不派
+//   → 游荡的「选图」与「多图分配」列表里不出现（机器人端 random_walk 还有一道兜底拒绝，
+//   见 config.robot_roam_exclude_maps —— 双保险）。顶部"选择地图"（浏览）不受影响。
+const ROAM_EXCLUDE_MAPS = [24]
+const roamMapOptions = computed(() => mapOptions.value.filter((m) => !ROAM_EXCLUDE_MAPS.includes(m.id)))
 function optLabel(m) { return `${m.name || ('#' + m.id)}（${m.id}）${m.online ? ' · 在线 ' + m.online : ''}` }
 const robotsOnMap = computed(() => robots.value.filter((r) => r.mapid === mapid.value))
 // 只暴露"个数"给模板：robotsOnMap 每次轮询都是新数组，直接用它会让本组件每 ~3 秒整体重渲染
@@ -641,7 +646,7 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
         <span class="lbl">选图</span>
         <el-select v-model="roamMap" size="small" filterable style="width:210px" placeholder="（请选择目标图）">
           <el-option :value="0" label="（请选择目标图）" />
-          <el-option v-for="m in mapOptions" :key="m.id" :value="m.id" :label="optLabel(m)" />
+          <el-option v-for="m in roamMapOptions" :key="m.id" :value="m.id" :label="optLabel(m)" />
         </el-select>
         <span class="lbl">孵化图</span>
         <el-select v-model="hatchMap" size="small" style="width:150px">
@@ -751,7 +756,7 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
         <span class="lbl">选图</span>
         <el-select v-model="roamMap" size="small" filterable style="width:200px" placeholder="（请选择目标图）">
           <el-option :value="0" label="（请选择目标图）" />
-          <el-option v-for="m in mapOptions" :key="m.id" :value="m.id" :label="optLabel(m)" />
+          <el-option v-for="m in roamMapOptions" :key="m.id" :value="m.id" :label="optLabel(m)" />
         </el-select>
         <span class="lbl">孵化图</span>
         <el-select v-model="hatchMap" size="small" style="width:140px">
@@ -816,7 +821,7 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             <el-button size="small" :disabled="!batchMaps.length" @click="clearDraftMaps()">清空图</el-button>
           </div>
           <el-checkbox-group v-model="draftIds" class="map-pick" @change="onDraftIds">
-            <div v-for="m in mapOptions" :key="m.id" class="map-pick-row">
+            <div v-for="m in roamMapOptions" :key="m.id" class="map-pick-row">
               <el-checkbox :value="m.id" class="mp-check">
                 <span class="mp-name">{{ m.name || ('#' + m.id) }}</span>
               </el-checkbox>

@@ -120,7 +120,13 @@ type Config struct {
 
 	// RoamWorldMaps 游荡世界图白名单（2026-09-22）：随机图游荡只从这些图里抽，排掉"大图里的小图"（房间/店铺/洞穴，如回春药铺 616）。来源：服务端 config/worldmap/worldmap.csv
 	// （44 张，缺省内置）。环境变量 CTRL_ROAM_WORLD_MAPS="1,2,3" 可覆盖；空/全非法 = 不过滤。
+	// 2026-09-22 用户口径：幽冥界(24) 已从缺省列表剔除（抓鬼专属，游荡不派）→ 43 张。
 	RoamWorldMaps []int
+
+	// RoamExcludeMaps 游荡排除图（2026-09-22 用户口径）：幽冥界 24 是抓鬼专属（钟馗所在图），
+	// 游荡一律不去 —— 显式选图会被拒绝；随机图/显式 maps 白名单里的该图也会被剔除。
+	// 环境变量 CTRL_ROAM_EXCLUDE_MAPS="24" 可覆盖（留空 = 不排除）。
+	RoamExcludeMaps []int
 
 	// Create* 建号（注册协议 106→104→700）的**节奏限制**：同 IP 过频会触发风控码 112
 	// （服务端 C++ login_server 的规则，改不动），所以除了"并发 ≤8、批量 ≤20"的硬上限，
@@ -269,7 +275,9 @@ func build(base string, opts *cliOpts) *Config {
 		LiveCountIntervalSec: envInt("CTRL_LIVECOUNT_INTERVAL_SEC", 60),
 		LiveCountTimeoutSec:  envInt("CTRL_LIVECOUNT_TIMEOUT_SEC", 3),
 		LiveCountToken:       env("CTRL_LIVECOUNT_TOKEN", ""),
-		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
+		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
+		// 2026-09-22 用户口径：幽冥界 24 是抓鬼专属，游荡排除（显式选图拒绝 + 白名单剔除）
+		RoamExcludeMaps:      envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24}),
 		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
 		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
 		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),
