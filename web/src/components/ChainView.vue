@@ -22,6 +22,7 @@ const warnings = ref([]) // /api/start 回带的"条件不匹配"提示（如该
 const loading = ref(false)
 
 // 「自动分配」是下拉里的哨兵值（不是链 id）：交给后端按意图分组下发
+// （等级 <31 → 新手链；≥40 且新日常未满 → 大唐神捕/烽火大唐；其余 → 抓鬼）
 const AUTO = '__auto__'
 const current = computed(() => list.value.find((c) => c.id === chainId.value) || null)
 // 导航数据（没有任务节点的文件，如 zhongkui_nav）：**可以在这里查看**，但不能当任务链启动
@@ -29,7 +30,7 @@ const navOnly = computed(() => !!current.value?.nav_only)
 
 // 节点表空态文案（三种情况分开说，别让"自动分配"看起来像掉数据了）
 const emptyText = computed(() => {
-  if (chainId.value === AUTO) return '「自动分配」由后端按每个号的意图决定跑哪条链，这里没有单条链的节点表；选一条具体的链可以看节点。'
+  if (chainId.value === AUTO) return '「自动分配」由后端按每个号的意图决定跑哪条链（<31 新手链 / ≥40 且新日常未满 → 大唐神捕·烽火大唐 / 其余抓鬼），这里没有单条链的节点表；选一条具体的链可以看节点。'
   if (found.value) return '该链没有任务节点数据'
   return '还没有链数据文件：把 <chain_id>.json 放进上面的链目录即可'
 })
@@ -40,7 +41,8 @@ async function loadList() {
     const res = await apiGet('/api/chains')
     list.value = res.chains || []
     chainDir.value = res.chain_dir || ''
-    if (!chainId.value && list.value.length) chainId.value = AUTO // 默认「自动分配」：按账号意图决定跑哪条（抓鬼走 ghost_start）
+    // 默认「自动分配」：按账号意图决定跑哪条（<31 新手链；≥40 且新日常未满 → 大唐神捕/烽火大唐；其余抓鬼走 ghost_start）
+    if (!chainId.value && list.value.length) chainId.value = AUTO
   } catch (e) {
     err.value = e.message
   } finally {
@@ -141,7 +143,8 @@ async function start() {
   const body = cmdBody()
   warnings.value = []
   if (chainId.value === AUTO) {
-    // 自动分配：不手选链，后端按每个号的意图分组（新手链 → start_chain；抓鬼 → ghost_start 带导航数据）
+    // 自动分配：不手选链，后端按每个号的意图分组
+    // （<31 新手链 → start_chain；≥40 且新日常未满 → 大唐神捕/烽火大唐；其余 → ghost_start 带导航数据）
     body.auto = true
   } else if (chainId.value) {
     body.chain_id = chainId.value
@@ -173,7 +176,7 @@ async function reset() {
     <h3>启动任务链</h3>
     <div class="row">
       <el-select v-model="chainId" size="small" style="width: 340px" filterable>
-        <el-option :value="AUTO" label="自动分配（按意图：等级 <31 新手链 / 其余抓鬼）" />
+        <el-option :value="AUTO" label="自动分配（按意图：等级 <31 新手链 / ≥40 且新日常未满 → 大唐神捕·烽火大唐 / 其余抓鬼）" />
         <el-option value="" label="（不指定链，仅下发 chain_id）" />
         <el-option
           v-for="c in list" :key="c.id" :value="c.id"
