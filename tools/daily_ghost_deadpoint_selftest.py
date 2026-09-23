@@ -144,6 +144,8 @@ def main():
           "_PATROL_CONN_UNAVAIL_WARNED" in dh)
     check("daily_ghost.__patrol 用 snap_walkable 吸附(只作试算起点)",
           'getattr(_rw, "snap_walkable", None)' in dh)
+    check("daily_ghost.__patrol 吸附带 ROAM_SNAP_MAX_DIST_PX 上限(超限本轮不巡逻/待命)",
+          "ROAM_SNAP_MAX_DIST_PX" in dh and "本轮不巡逻(待命)" in dh)
     check("daily_ghost.__patrol kill_area 图≠当前图 → 基准退回当前位置",
           "if g.kill_area and int(g.kill_area[0]) == int(robot_object.m_mapid):" in dh)
     check("daily_ghost.__patrol 候选点调 __patrol_point_ok(试算)",
@@ -267,6 +269,7 @@ def main():
 
         rw_stub.walk_point_connected = _rw_wpc
         rw_stub.snap_walkable = snap
+        rw_stub.ROAM_SNAP_MAX_DIST_PX = 1024   # 与 random_walk 同源口径(吸附距离上限)
 
         real_random = sys.modules.get("random")
         real_rw = sys.modules.get("random_walk")
@@ -355,6 +358,18 @@ def main():
         # 48,48 → (88,88) 竖墙格 → continue; 120,58 → (160,98) 可走 → 采用
         check("阻挡格重选: 跳过阻挡候选, 采用下一个可走点",
               len(sc) == 1 and sc[0]["data"]["to_x"] == 160 and sc[0]["data"]["to_y"] == 98, sc)
+
+        # ---- C6b. 吸附距离超上限(ROAM_SNAP_MAX_DIST_PX) → 本轮不巡逻(待命)
+        # 位置 (3000,3000): 网格外, 夹回后最近可走格 (312,184), 距离 ~3892px > 1024
+        ro, sc, lg = _run_patrol((3000, 3000), None, [10, 10])
+        check("吸附超限: 不安排走动(不采用远处吸附点当试算起点)", not sc, sc)
+        check("吸附超限: warn 写明距离/上限 + 本轮不巡逻",
+              any("超上限" in m and "本轮不巡逻" in m for _lv, m in lg), lg)
+        # 上限内(304px < 1024px) → 照常采用吸附点做试算起点(证明上限只拦"过远")
+        del wpc_calls[:]
+        ro, sc, lg = _run_patrol((600, 100), None, [10, 10])
+        check("吸附上限内: 仍采用吸附点(296,104)做试算起点(上限只拦过远)",
+              bool(wpc_calls) and tuple(wpc_calls[-1][0]) == (296, 104), wpc_calls[-1:])
 
         # ---- C7. 网格缺失 → 旧行为(不试算, 直接调度)
         _orig_grid = qe_dh.__chain_grid_for
