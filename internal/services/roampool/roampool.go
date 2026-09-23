@@ -376,6 +376,29 @@ func Idle(r state.Robot) bool {
 	return !waterline.Busy(r)
 }
 
+// Interruptible 该号是否"可中断"（超编收敛用，2026-09-23 P1）：允许从任务池转去游荡的号。
+//
+// 用户口径：**绝不打断**正在战斗/交付/对话/跨图导航的号。超编收敛只动"等待段"的号
+// （在等刷鬼、刚启动还没接活、空闲）—— 中断这类号只损失当前这一轮，链路由任务池
+// 后续按意图补发恢复（restorer/autotask 会重派；且超编期间池闸本身就拦补发）。
+//
+//   - 离线 / 战斗中（r.Fight）/ 游荡中 / 孵化中 → false（后者由本池自己管，不重复处理）；
+//   - WAIT_GHOST（钟馗等刷鬼/巡逻）、READY（刚启动未接活）、IDLE/ONLINE/空 → true；
+//   - FIGHT/SUBMIT/DIALOG/NAV/CLICK/SHOP/ALLOC/WAIT_NEXT → false（推进中，不打断）。
+func Interruptible(r state.Robot) bool {
+	if r.Account == "" || !r.Online {
+		return false
+	}
+	if r.Fight || r.Walking() {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(r.State)) {
+	case "WAIT_GHOST", "READY", "IDLE", "ONLINE", "":
+		return true
+	}
+	return false
+}
+
 // MapCounts 各图的"我们的号"人数（只数在线号；按图号升序返回）。
 func MapCounts(robots []state.Robot) map[int]int {
 	out := map[int]int{}
@@ -467,6 +490,35 @@ func PickIdle(robots []state.Robot, n int) []string {
 		}
 	}
 	return out
+}
+
+// PickExcess 从**任务池**（在抓鬼）里挑 n 个"可中断"的号转游荡（超编收敛用，2026-09-23 P1）。
+//
+// 只挑"真的在抓鬼（GhostActive）且当前可中断（Interruptible）"的号 ——
+// 空闲号走 PickIdle 的正常补位；战斗中/交付中/对话中/导航中的号**一律不碰**。
+// 按账号升序输出（结果稳定，便于测试与日志对照）。
+//
+// 为什么不用"所在图人数多"排序：超编收敛关心的是"能不能安全中断"，与图负载无关；
+// 已经超编的号分散在各图，按账号稳定挑即可（每轮 ≤ MaxStep，不会一次搬空）。
+func PickExcess(robots []state.Robot, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	cands := make([]string, 0, len(robots))
+	for _, r := range robots {
+		if !r.GhostActive() || !Interruptible(r) {
+			continue
+		}
+		cands = append(cands, r.Account)
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	sort.Strings(cands)
+	if n > len(cands) {
+		n = len(cands)
+	}
+	return cands[:n]
 }
 
 // BalanceAssign 把空闲号**按图均匀**分配：从"人最少的图"开始轮流派（每派一个就把它的人数 +1，
@@ -656,21 +708,31 @@ func (k *Keeper) Tick(now time.Time) bool {
 		return true
 	}
 
-	// ② 补位：在游荡 < 目标 → 空闲号按图均匀派游荡
+	// ② 补位：在游荡 < 目标 → 优先空闲号；不够且任务池**超编**时，从"可中断的超编号"里补
+	//    （2026-09-23 P1 超编温和收敛：把多余的抓鬼号转成游荡 → 任务池回到目标附近、
+	//    游荡池回补；每轮 ≤ MaxStep，绝不打断战斗/交付/对话/跨图导航中的号）。
 	if running >= cfg.Target {
 		k.note(fmt.Sprintf("游荡池达标（在游荡 %d / 目标 %d，空闲 %d，缺口 %d）", running, cfg.Target, idleN, deficit))
 		return false
 	}
-	want := minInt(cfg.Target-running, cfg.MaxStep, idleN)
-	if want <= 0 {
-		k.note(fmt.Sprintf("游荡池差 %d 个，但没有空闲号可派（在游荡 %d / 目标 %d，空闲 %d）",
-			cfg.Target-running, running, cfg.Target, idleN))
+	want := minInt(cfg.Target-running, cfg.MaxStep)
+	idle := PickIdle(robots, want)
+	excess := 0
+	if len(idle) < want && deficit < 0 {
+		// 任务池超编（deficit<0）才有"多余的号"可收；不足部分从可中断的在抓鬼号里补。
+		if extra := PickExcess(robots, want-len(idle)); len(extra) > 0 {
+			excess = len(extra)
+			idle = append(idle, extra...)
+		}
+	}
+	if len(idle) == 0 {
+		k.note(fmt.Sprintf("游荡池差 %d 个，但没有空闲号/可中断的超编号可派（在游荡 %d / 目标 %d，空闲 %d，任务池缺口 %d）",
+			cfg.Target-running, running, cfg.Target, idleN, deficit))
 		return false
 	}
-	idle := PickIdle(robots, want)
-	if len(idle) == 0 {
-		k.note("没有空闲号可派游荡")
-		return false
+	excessNote := ""
+	if excess > 0 {
+		excessNote = fmt.Sprintf("；含超编回收 %d 个（任务池缺口 %d）", excess, deficit)
 	}
 	if !cfg.Balance {
 		sent, err := k.doDispatch(idle, "random")
@@ -678,8 +740,8 @@ func (k *Keeper) Tick(now time.Time) bool {
 			k.fail("补位", err)
 			return false
 		}
-		k.note(fmt.Sprintf("补位 %d 个（随机图，每号自抽，在游荡 %d / 目标 %d）：%s",
-			len(sent), running, cfg.Target, strings.Join(sent, ",")))
+		k.note(fmt.Sprintf("补位 %d 个（随机图，每号自抽，在游荡 %d / 目标 %d）：%s%s",
+			len(sent), running, cfg.Target, strings.Join(sent, ","), excessNote))
 		return true
 	}
 	maps := k.roamMaps(true)
@@ -701,7 +763,7 @@ func (k *Keeper) Tick(now time.Time) bool {
 	if len(sent) == 0 {
 		return false
 	}
-	k.note(fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d）", countAssigned(sent), assignText(sent), running, cfg.Target))
+	k.note(fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d）%s", countAssigned(sent), assignText(sent), running, cfg.Target, excessNote))
 	return true
 }
 

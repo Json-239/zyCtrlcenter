@@ -483,10 +483,11 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	// 2026-09-23 P0：池配额截断 —— "启动(自动分配)"不再无上限直派。
 	// 生产实测（docs/04-测试/分析-20260923-抓鬼分配逻辑.md）：11:49:55 / 13:10:11 两次各带
 	// 231 个号，按意图直派 227/225 个 ghost_start，把抓鬼会话推到 200+（目标 100）；
-	// 与批量上线、RESTORE 补发叠加后长期超编 118。口径与池闸一致
-	// max(0, 目标 - 在跑 - 在途)；池停用（Target>0 且 Enabled=false）→ 一个都不派。
+	// 与批量上线、RESTORE 补发叠加后长期超编 118。口径：max(0, 目标 - 在跑 - 在途)。
+	// 手动通道特例（2026-09-23 调整）：池停用**不拦**手动（用户点了启动就是要跑），
+	// 但仍按目标截断（在跑+在途已达标 → 不派，超编不该手动再加）。
 	cutByQuota := func(accs []string, kind autotask.Kind, label string) []string {
-		cut := a.cutByPoolQuota(accs, kind)
+		cut := a.cutByPoolQuota(accs, kind, true) // manual=true：见上（池停用放行、配额仍生效）
 		if len(cut) == 0 {
 			return accs
 		}
@@ -498,7 +499,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		for i := range assignments {
 			if set[toStr(assignments[i]["account"])] {
 				assignments[i]["command"] = ""
-				assignments[i]["reason"] = label + "池配额已满/停用，本次不派（等池内号收工或调大 target）"
+				assignments[i]["reason"] = label + "池配额已满（在跑+在途 ≥ 目标），本次不派（等池内号收工或调大 target）"
 			}
 		}
 		skipped = append(skipped, fmt.Sprintf("%d 个（%s池配额拦下）", len(cut), label))

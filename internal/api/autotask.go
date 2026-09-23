@@ -262,9 +262,12 @@ func (a *API) restoreInflightCount() int {
 //
 //   - AutoTask 未装配 / Target<=0 → -1：没配目标 = 不限（沿用 autotask.Config 的 0=不限 语义，
 //     也让未配置池的测试环境保持旧行为）；
-//   - Target>0 且池未启用 → 0：池停用就一个都不直派（避免"池停了还被手动/自动拉起"）；
+//   - manual=false（**自动通道**：定时补号 / 恢复引擎补发）：Target>0 且池未启用 → 0
+//     （池停用就不自动派，避免"停了还被自动拉起"）；
+//   - manual=true（**手动通道**：面板"启动(自动分配)"，用户意图优先）：池停用**不拦**
+//     （用户点了启动就是要跑），但仍按目标截断（在跑 + 在途 ≥ 目标 → 0，超编不该手动再加）；
 //   - 其余 → max(0, Target - 在跑 - 在途)（抓鬼的在途 = 直派/重登恢复 + 恢复引擎补发两份）。
-func (a *API) poolQuota(kind autotask.Kind) int {
+func (a *API) poolQuota(kind autotask.Kind, manual bool) int {
 	if a.AutoTask == nil {
 		return -1
 	}
@@ -272,7 +275,7 @@ func (a *API) poolQuota(kind autotask.Kind) int {
 	if !ok || st.Target <= 0 {
 		return -1
 	}
-	if !st.Enabled {
+	if !st.Enabled && !manual {
 		return 0
 	}
 	inflight := 0
@@ -287,10 +290,10 @@ func (a *API) poolQuota(kind autotask.Kind) int {
 
 // cutByPoolQuota 按池配额截断一批待派号，返回被截断（本次不派）的号。
 //
-// 配额口径见 poolQuota：-1（不限）/ 0（池停用或已满）/ N（还能派 N 个）。
+// 配额口径见 poolQuota：-1（不限）/ 0（已满；自动通道下池停用也算 0）/ N（还能派 N 个）。
 // 返回的是**尾部**超出配额的号；调用方负责把它们从待派列表里去掉并回带原因。
-func (a *API) cutByPoolQuota(accs []string, kind autotask.Kind) []string {
-	q := a.poolQuota(kind)
+func (a *API) cutByPoolQuota(accs []string, kind autotask.Kind, manual bool) []string {
+	q := a.poolQuota(kind, manual)
 	if q < 0 || len(accs) <= q {
 		return nil
 	}
@@ -317,7 +320,7 @@ func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 	if st.Target <= 0 {
 		return true, "" // 没配目标 = 不限
 	}
-	if q := a.poolQuota(k); q <= 0 {
+	if q := a.poolQuota(k, false); q <= 0 {
 		inflight := 0
 		if k == autotask.KindGhost {
 			inflight = a.ghostInflightCount() + a.restoreInflightCount()

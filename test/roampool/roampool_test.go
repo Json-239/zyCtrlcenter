@@ -608,3 +608,96 @@ func TestPickReclaimEligibleGate(t *testing.T) {
 		t.Fatalf("不够数时应只给 ok，实际 %q", join(only))
 	}
 }
+
+// ---------------------------------------------------------------- 2026-09-23 P1：超编温和收敛
+
+// ghostAt 在抓鬼的号（ghost.enabled=true），指定当前状态。
+func ghostAt(acc, st string) state.Robot {
+	r := ghosting(acc)
+	r.State = st
+	return r
+}
+
+// 纯函数：只挑"在抓鬼 + 可中断"的号；战斗/交付/对话/跨图导航/游荡/孵化/离线一律不碰。
+func TestPickExcessOnlyInterruptible(t *testing.T) {
+	robots := []state.Robot{
+		ghostAt("g1", "WAIT_GHOST"), ghostAt("g2", "READY"), ghostAt("g3", "IDLE"),
+		ghostAt("f1", "FIGHT"), ghostAt("s1", "SUBMIT"), ghostAt("d1", "DIALOG"),
+		ghostAt("n1", "NAV"), ghostAt("c1", "CLICK"), ghostAt("w1", "WAIT_NEXT"),
+		walking("r1", 10), hatching("h1", 10),
+		online("i1", 99), // 空闲但没在抓鬼：走正常补位，不算"超编回收"
+	}
+	if got := roampool.PickExcess(robots, 10); join(got) != "g1,g2,g3" {
+		t.Fatalf("只该挑可中断的在抓鬼号（g1,g2,g3），实际 %s", join(got))
+	}
+	if extra := roampool.PickExcess(robots, 2); join(extra) != "g1,g2" {
+		t.Fatalf("n 应截断（升序前 2 个），实际 %s", join(extra))
+	}
+	if got := roampool.PickExcess(robots, 0); got != nil {
+		t.Fatalf("n<=0 应返回 nil，实际 %v", got)
+	}
+}
+
+// 任务池超编（deficit<0）+ 游荡不足 + 没有空闲号 → 从可中断的超编号里补位；
+// 动作文案要说清"含超编回收 N 个"（可追溯）。
+func TestTickExcessReclaimWhenOverDeficit(t *testing.T) {
+	f := &fakeDeps{
+		robots: []state.Robot{
+			ghostAt("g1", "WAIT_GHOST"), ghostAt("g2", "WAIT_GHOST"), ghostAt("g3", "READY"),
+			ghostAt("busy1", "FIGHT"), ghostAt("busy2", "SUBMIT"), ghostAt("busy3", "NAV"),
+			walking("w1", 10), walking("w2", 26),
+		},
+		deficit: -8, maps: []int{10, 26},
+	}
+	k := newKeeper(t, f, func(c *roampool.Config) { c.Target = 5 })
+	if !k.Tick(time.Now()) {
+		t.Fatal("任务池超编且游荡不足 → 应把可中断的超编号转游荡")
+	}
+	var got []string
+	for _, c := range f.disp {
+		got = append(got, c.accounts...)
+	}
+	sort.Strings(got)
+	if join(got) != "g1,g2,g3" {
+		t.Fatalf("应只回收可中断的 g1,g2,g3（busy/游荡号不碰），实际 %s", join(got))
+	}
+	if !strings.Contains(k.Status().LastAction, "含超编回收 3 个") {
+		t.Fatalf("动作文案应说明超编回收，实际 %q", k.Status().LastAction)
+	}
+}
+
+// 未超编（deficit>=0）时即使游荡不足、没有空闲号，也**不许**动抓鬼号。
+func TestTickNoExcessReclaimWhenNotOverDeficit(t *testing.T) {
+	f := &fakeDeps{
+		robots:  []state.Robot{ghostAt("g1", "WAIT_GHOST"), ghostAt("g2", "WAIT_GHOST"), walking("w1", 10)},
+		deficit: 0, maps: []int{10, 26},
+	}
+	k := newKeeper(t, f, func(c *roampool.Config) { c.Target = 5 })
+	if k.Tick(time.Now()) || len(f.disp) != 0 {
+		t.Fatalf("任务池不超编 → 不该回收抓鬼号，实际下发 %v", f.disp)
+	}
+	if !strings.Contains(k.Status().LastAction, "没有空闲号/可中断的超编号可派") {
+		t.Fatalf("应说明没有可派号，实际 %q", k.Status().LastAction)
+	}
+}
+
+// 节奏：每轮 ≤ MaxStep（用户口径"少量、别激进批量"）。
+func TestTickExcessRespectsMaxStep(t *testing.T) {
+	robots := []state.Robot{walking("w1", 10)}
+	for i := 1; i <= 9; i++ {
+		robots = append(robots, ghostAt(fmt.Sprintf("g%d", i), "WAIT_GHOST"))
+	}
+	f := &fakeDeps{robots: robots, deficit: -50, maps: []int{10, 26}}
+	k := newKeeper(t, f, func(c *roampool.Config) { c.Target = 10; c.MaxStep = 2 })
+	if !k.Tick(time.Now()) {
+		t.Fatal("应下发超编回收")
+	}
+	var got []string
+	for _, c := range f.disp {
+		got = append(got, c.accounts...)
+	}
+	if len(got) != 2 {
+		t.Fatalf("每轮最多 MaxStep=2 个，实际 %d（%v）", len(got), got)
+	}
+}
+

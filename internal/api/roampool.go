@@ -76,6 +76,10 @@ func (a *API) roampoolRobots() []state.Robot {
 //
 // 与 GET /api/autotask 的 pools.<kind>.deficit 同一口径（TargetOnline - 在跑数），
 // 这里直接读 Runner.States()（进程内调用，不走 HTTP）。
+//
+// 2026-09-23 口径修正：**池未启用 / 没配目标（Target<=0）的不参与合计** ——
+// 停用的池不会要人（生产 newbie 池 target=30 但 disabled，原口径把它算成"缺 30"，
+// 会让游荡池误判任务池不缺人、新加的"超编收敛"也提前收工）。
 func (a *API) roampoolDeficit() int {
 	if a.AutoTask == nil {
 		return 0
@@ -83,9 +87,11 @@ func (a *API) roampoolDeficit() int {
 	states := a.AutoTask.States()
 	sum := 0
 	for _, k := range []autotask.Kind{autotask.KindGhost, autotask.KindNewbie} {
-		if st, ok := states[k]; ok {
-			sum += st.Deficit
+		st, ok := states[k]
+		if !ok || !st.Enabled || st.Target <= 0 {
+			continue // 没启用/没配目标：不参与缺口口径
 		}
+		sum += st.Deficit
 	}
 	return sum
 }

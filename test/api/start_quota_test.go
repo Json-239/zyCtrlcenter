@@ -11,9 +11,11 @@ package api_test
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"zyctrlcenter/internal/services/autotask"
+	"zyctrlcenter/internal/services/roampool"
 	"zyctrlcenter/test/testsupport"
 )
 
@@ -107,8 +109,10 @@ func TestGhostSkipBlockedByPoolQuotaInflight(t *testing.T) {
 	}
 }
 
-// 池配了目标但**停用**：手动"启动"也一个都不派（避免"池停了还被直派拉起"）。
-func TestStartAutoGhostPoolDisabledBlocksDispatch(t *testing.T) {
+// 池配了目标但**停用**：手动"启动(自动分配)"**不拦**（用户意图优先，2026-09-23 调整），
+// 但仍按目标截断（超编不该手动再加）——生产 newbie 池正是 target=30 + disabled，
+// 这条口径保证"点启动能派新手链，但不会把池灌爆"。
+func TestStartAutoPoolDisabledStillQuotaForManual(t *testing.T) {
 	env := newTestEnv(t, "")
 	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
 	defer rb.Close()
@@ -121,16 +125,76 @@ func TestStartAutoGhostPoolDisabledBlocksDispatch(t *testing.T) {
 	}
 	env.api.AutoTask.Stop(autotask.KindGhost) // 停用（保留目标 2）
 
+	robots := []any{}
+	accs := []string{}
+	for i := 0; i < 3; i++ {
+		acc := fmt.Sprintf("off%d@xy3.com", i)
+		accs = append(accs, acc)
+		robots = append(robots, map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0})
+	}
 	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
-		"robots": []any{
-			map[string]any{"account": "off1@xy3.com", "level": 45, "online": true, "state": "IDLE", "task_index": 0},
-		}, "_zone": testsupportZone()})
+		"robots": robots, "_zone": testsupportZone()})
 
 	_, body := postJSON(t, env.srv.URL+"/api/start", map[string]any{
-		"auto": true, "accounts": []string{"off1@xy3.com"},
+		"auto": true, "accounts": accs,
 	}, nil)
 	groups, _ := body["groups"].(map[string]any)
-	if n := len(asSlice(groups["ghost_start"])); n != 0 {
-		t.Fatalf("抓鬼池已停用 → 一个都不该派，实派 %d", n)
+	if n := len(asSlice(groups["ghost_start"])); n != 2 {
+		t.Fatalf("池停用不拦手动，但仍按目标 2 截断 → 应派 2 个，实派 %d（msg=%v）", n, body["msg"])
+	}
+}
+
+// 游荡池的"任务池缺口"只统计**已启用**的池（2026-09-23 口径修正）：
+// 停用的池不会要人，把它算成"缺 30"会让超编收敛提前收工（生产 newbie 池 target=30+disabled）。
+func TestRoampoolDeficitSkipsDisabledPools(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	// 测试环境默认不装游荡池 keeper：这里装一个（只为读口径，不 Start）
+	env.api.Roampool = roampool.New(filepath.Join(t.TempDir(), "roampool.json"), env.api.RoampoolDeps())
+
+	if err := env.api.AutoTask.Start(autotask.KindGhost, autotask.Config{
+		Kind: autotask.KindGhost, TargetOnline: 100, IntervalSec: 600, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("启动抓鬼池失败: %v", err)
+	}
+	// newbie 未启用 → 只算抓鬼：100 - 0 = 100
+	if body := getJSON(t, env.srv.URL+"/api/roampool"); body["deficit"] != float64(100) {
+		t.Fatalf("newbie 未启用 → 缺口应为 100（只算抓鬼），实际 %v", body["deficit"])
+	}
+	// 启用 newbie（目标 30）→ 合计 100 + 30 = 130
+	if err := env.api.AutoTask.Start(autotask.KindNewbie, autotask.Config{
+		Kind: autotask.KindNewbie, TargetOnline: 30, IntervalSec: 600, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("启动新手池失败: %v", err)
+	}
+	if body := getJSON(t, env.srv.URL+"/api/roampool"); body["deficit"] != float64(130) {
+		t.Fatalf("newbie 启用后缺口应为 130（100+30），实际 %v", body["deficit"])
+	}
+}
+
+// 自动通道（恢复引擎的池闸 GhostSkipFunc）在池停用时**仍然拦**：
+// "用户手动点启动" 与 "系统自动补发" 的口径不同。
+func TestGhostSkipPoolDisabledBlocksAuto(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallGhostNav(t, env.cfg.ChainDir)
+
+	if err := env.api.AutoTask.Start(autotask.KindGhost, autotask.Config{
+		Kind: autotask.KindGhost, TargetOnline: 2, IntervalSec: 60, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("启动抓鬼池失败: %v", err)
+	}
+	env.api.AutoTask.Stop(autotask.KindGhost)
+
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{
+			map[string]any{"account": "autooff@xy3.com", "level": 45, "online": true, "state": "IDLE", "task_index": 0},
+		}, "_zone": testsupportZone()})
+
+	skip := env.api.GhostSkipFunc()
+	if blocked, _ := skip("ghost", "autooff@xy3.com"); !blocked {
+		t.Fatal("自动通道：抓鬼池已停用 → 闸门应拦下补发")
 	}
 }
