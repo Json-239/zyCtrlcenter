@@ -49,7 +49,7 @@
 | POST | `/api/autotask/start` | `{kind, interval_sec?, jitter_sec?, batch_min?, batch_max?, max_online?, register_enabled?, register_count?, launch_delay_sec?, min_level?, balance_gate?}` | `{ok, state, msg}` 启动/改参数某套策略（不传的字段沿用上次；**可选鉴权**）。`min_level`/`balance_gate` 仅新日常用：`min_level` = 该策略等级门槛（shenbu 默认 40，**覆盖全局 `CTRL_SHARE_DAILY_MIN_LEVEL`**）；`balance_gate` = 神捕余额闸（**可显式传 0 关闭**；>0 时过滤"余额已知且 < 闸值"的号） |
 | POST | `/api/autotask/stop` | `{kind}` | `{ok, state, msg}` 停止（同时撤销"等下发"队列；`kind=shenbu` 时给在跑的号补发 `share_daily_stop` 收工）（**可选鉴权**） |
 | POST | `/api/autotask/run` | `{kind}` | `{ok, rounds[], state, msg}` 立即跑一轮（仍受同时在线上限）（**可选鉴权**） |
-| GET | `/api/daily/overview` | — | `{ok, share_keys[], rows[{account,level,queue[{share_key,kind,done,limit,state}],current,order[]}]}` **分享日常轮转总览（只读）**：`kind` ∈ `ghost/newbie/shenbu/fenghuo`（认不出为空串）；`state` 原样透传机器人上报（大写）；数据源 = 机器人心跳 `daily` 块 + 意图表 + 中控会话记账；老版机器人没有 `daily` 块 → `queue=[]`、`current=""`（空值安全）；轮转顺序（`order`）P2 再填（拟 `fixed/random`） |
+| GET | `/api/daily/overview` | — | `{ok, share_keys[], rows[{account,level,queue[{share_key,kind,done,limit,state,raw_state}],current,order[]}]}` **分享日常轮转总览（只读）**：`kind` ∈ `ghost/newbie/shenbu/fenghuo`（认不出为空串）；`state` = **契约枚举** `pending/running/done/skipped`（中控把机器人相位映射过来，原文在 `raw_state`）；满额收工的号（心跳已无 `daily`）由中控满额表补一条 `state=done` + `marked:true`；数据源 = 心跳 `daily` 块 + 意图表 + 中控会话/满额记账；老版机器人没有 `daily` 块 → `queue=[]`、`current=""`（空值安全）；轮转顺序（`order`）P2 再填（拟 `fixed/random`） |
 | POST | `/api/reghost/cancel` | `{account}` | `{ok, canceled, msg}` 取消该号的"卡死自动重登恢复"（**可选鉴权**） |
 | WS | `/ws` | — | 实时事件推送（见 §4） |
 

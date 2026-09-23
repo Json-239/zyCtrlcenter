@@ -221,9 +221,11 @@ func (r Robot) DailyOf(shareKey string) (DailyEntry, bool) {
 // 用 DailyOf 的 ok 判断（intent.DailyInfo.Known）。
 func (r Robot) DailyFull(shareKey string) bool {
 	e, ok := r.DailyOf(shareKey)
-	if !ok {
-		return false
-	}
+	return ok && DailyEntryFull(e)
+}
+
+// DailyEntryFull 单条进度是否"已满/不可用"（state=DONE 或 limit>0 且 done ≥ limit）。
+func DailyEntryFull(e DailyEntry) bool {
 	if strings.EqualFold(e.State, "DONE") {
 		return true
 	}
@@ -258,6 +260,13 @@ type State struct {
 	// restoreCap 账号 → 当日卡死熔断记录（2026-09-23）。同样独立于 robots 行：
 	//   行会被 Remove 删掉（陈旧清理/下机），熔断标记必须独立存活 + 跨日惰性失效。
 	restoreCap map[string]restoreCap
+	// shareDailyFull "账号|玩法键" → "今天该玩法已满/不可用"的日期串（跨日自动失效）。
+	//
+	// 为什么需要独立表：机器人端**满额后会 request_stop（enabled=false）→ 心跳 daily 变 None**
+	//（client.py: 只有 enabled=true 才上报 daily），中控从此看不到"已满"——不记的话
+	// 候选会反复派、被机器人 done_limit 拒（还会打断该号已转的游荡/抓鬼）。
+	// 写入点：心跳看到 done≥limit（含 state=DONE）的那一刻（event.onStatusReply）。
+	shareDailyFull map[string]string
 
 	mu sync.RWMutex
 
@@ -326,6 +335,47 @@ func (s *State) GhostUnavailableTodayCount() int {
 	defer s.mu.RUnlock()
 	n := 0
 	for _, d := range s.ghostUnavail {
+		if d == today {
+			n++
+		}
+	}
+	return n
+}
+
+// dailyFullKey 分享日常满额表的键（账号 + 玩法键；P0 只有一条链，键设计留多玩法扩展）。
+func dailyFullKey(account, shareKey string) string { return account + "|" + shareKey }
+
+// MarkShareDailyFull 记下"该号今天的这个玩法已满/不可用"（跨日自动失效）。
+func (s *State) MarkShareDailyFull(account, shareKey string) {
+	if account == "" || shareKey == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.shareDailyFull == nil {
+		s.shareDailyFull = map[string]string{}
+	}
+	s.shareDailyFull[dailyFullKey(account, shareKey)] = time.Now().Format("20060102")
+	s.mu.Unlock()
+}
+
+// ShareDailyFullToday 该号今天该玩法是否已满/不可用（跨日自动 false）。
+//
+// 用途：机器人满额后 daily 心跳变 None（见 shareDailyFull 字段注释），候选/补发闸
+// 靠这张表继续拦；总览接口靠它补一条"已满"展示。
+func (s *State) ShareDailyFullToday(account, shareKey string) bool {
+	s.mu.RLock()
+	day, ok := s.shareDailyFull[dailyFullKey(account, shareKey)]
+	s.mu.RUnlock()
+	return ok && day == time.Now().Format("20060102")
+}
+
+// ShareDailyFullTodayCount 今天已标"分享日常满额"的号数（面板/排查用）。
+func (s *State) ShareDailyFullTodayCount() int {
+	today := time.Now().Format("20060102")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, d := range s.shareDailyFull {
 		if d == today {
 			n++
 		}

@@ -170,7 +170,7 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 			}
 			if a.St != nil {
 				if r, ok := a.St.Get(account); ok {
-					if r.DailyFull(a.shareDailyKey()) {
+					if a.shareDailyFullToday(account, r) {
 						return true, "今日大唐神捕已满/不可用（等跨日）"
 					}
 					if a.shareDailyMoneyShort(r) {
@@ -683,11 +683,11 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			if level < a.shareDailyMinLevel() {
 				continue // 等级未知(0)/不足：服务端按票条件拒（≥40），别白跑
 			}
+			if a.shareDailyFullToday(acc, r) {
+				continue // 今日神捕已满/不可用（含"机器人已不再上报 daily"的独立表兜底）
+			}
 			if a.shareDailyMoneyShort(r) {
 				continue // 余额闸（策略配置 balance_gate；余额未知不拦）：传送费不够 → 派了又停
-			}
-			if _, has := r.DailyOf(a.shareDailyKey()); has && r.DailyFull(a.shareDailyKey()) {
-				continue // 今日神捕已满/不可用（等跨日）
 			}
 			if k := kinds[acc]; k != "" && k != intent.KindShenbu {
 				ghostFull := (a.St != nil && a.St.GhostDoneToday(acc)) || ghostDailyFull(r)

@@ -176,6 +176,46 @@ func (a *API) shareDailyMoneyShort(r state.Robot) bool {
 	return gate > 0 && r.Money > 0 && r.Money < int64(gate)
 }
 
+// shareDailyFullToday 该号今日神捕是否已满/不可用：
+//   - ① 心跳 daily 明确满额（done≥limit / state=DONE）；或
+//   - ② 独立满额表命中 —— 机器人满额后会 request_stop，心跳 daily 随之变 None
+//     （client.py 只在 enabled=true 时上报），靠这张表继续拦（跨日自动失效）。
+func (a *API) shareDailyFullToday(acc string, r state.Robot) bool {
+	key := a.shareDailyKey()
+	if a.St != nil && a.St.ShareDailyFullToday(acc, key) {
+		return true
+	}
+	return r.DailyFull(key)
+}
+
+// shareDailyStateEnum 机器人相位 → 契约枚举（pending / running / done / skipped）。
+//
+// 值域（机器人端 share_daily.py 的 STATE_* 常量，2026-09-23 实读）：
+//
+//	IDLE / READY                                            → pending（还没开始/等条件）
+//	ACCEPT / KILL / PATROL / SUBMIT / WAIT / FIGHT           → running（进行中）
+//	DONE                                                     → done（满额收工）
+//	STOPPED / ERROR                                          → skipped（已停/异常中断）
+//	其它未知非空                                             → running（保守：有相位即在跑）
+//
+// 满额优先（不依赖相位）：limit>0 且 done ≥ limit → done。
+func shareDailyStateEnum(e state.DailyEntry) string {
+	if e.Limit > 0 && e.Done >= e.Limit {
+		return "done"
+	}
+	switch strings.ToUpper(strings.TrimSpace(e.State)) {
+	case "":
+		return "pending"
+	case "IDLE", "READY":
+		return "pending"
+	case "DONE":
+		return "done"
+	case "STOPPED", "ERROR", "STOP", "SKIP", "SKIPPED":
+		return "skipped"
+	}
+	return "running"
+}
+
 // shareDailyDoneMap 每号"今日已做次数"（心跳 daily 块；有值才带 —— 重新下发不丢进度，
 // 与抓鬼的 done 同口径）。
 func (a *API) shareDailyDoneMap(accs []string) map[string]int {
@@ -282,30 +322,47 @@ func (a *API) shareDailyKindOf(shareKey string) string {
 // handleDailyOverview 分享日常轮转总览（前端「日常轮转」表数据源；方案 §7 契约）：
 //
 //	GET /api/daily/overview
-//	→ {ok, share_keys[], rows:[{account, level, queue:[{share_key,kind,done,limit,state}], current, order}]}
+//	→ {ok, share_keys[], rows:[{account, level, queue:[{share_key,kind,done,limit,state,raw_state}], current, order}]}
 //
 // queue 项的 `kind` 用策略 kind（ghost/newbie/shenbu/fenghuo，前端按它映射图标/表头；
-// 认不出为空串）；`state` 原样透传机器人上报（大写 DONE/RUNNING 等，前端已兼容）。
-// 数据源 = 机器人心跳 daily 块 + 意图表 + 中控侧会话记账；**轮转顺序（order）P2 再填**
+// 认不出为空串）；`state` 是**契约枚举** `pending/running/done/skipped`（中控把机器人相位
+// 映射过来，见 shareDailyStateEnum），`raw_state` 保留机器人原文（排障用，前端可不解析）。
+// 数据源 = 机器人心跳 daily 块 + 意图表 + 中控侧会话/满额记账；**轮转顺序（order）P2 再填**
 // （值域拟 fixed/random；现在给空数组，前端按"待规划"渲染）。空值安全：老版机器人没有
 // daily 块 → queue=[]、current=""；离线且既无数据也无意图的行不出（不刷屏）。
 func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 	key := a.shareDailyKey()
 	kinds, _ := a.intentKinds()
 	running := a.daily.runningSet(key)
+	dailyLimit := a.chainPayloads().ShareDailyLimit()
 	rows := []any{}
 	if a.St != nil {
 		for _, rb := range a.St.Snapshot() {
 			queue := rb.DailyEntries()
 			onShenbu := kinds[rb.Account] == intent.KindShenbu
-			if !rb.Online && len(queue) == 0 && !onShenbu {
+			shenbuFull := a.St.ShareDailyFullToday(rb.Account, key)
+			if !rb.Online && len(queue) == 0 && !onShenbu && !shenbuFull {
 				continue
 			}
-			q := make([]any, 0, len(queue))
+			q := make([]any, 0, len(queue)+1)
+			hasShenbu := false
 			for _, e := range queue {
+				if e.ShareKey == key {
+					hasShenbu = true
+				}
 				q = append(q, map[string]any{
 					"share_key": e.ShareKey, "kind": a.shareDailyKindOf(e.ShareKey),
-					"done": e.Done, "limit": e.Limit, "state": e.State,
+					"done": e.Done, "limit": e.Limit,
+					"state": shareDailyStateEnum(e), "raw_state": e.State,
+				})
+			}
+			// 满额兜底：机器人满额收工后心跳 daily 变 None（不再上报）→ 用独立满额表补一条
+			// "已满"，前端才能显示 `10/10 ✓`（否则该玩法在总览里"消失"变成未参与）。
+			if shenbuFull && !hasShenbu {
+				q = append(q, map[string]any{
+					"share_key": key, "kind": string(autotask.KindShenbu),
+					"done": dailyLimit, "limit": dailyLimit,
+					"state": "done", "raw_state": "DONE", "marked": true,
 				})
 			}
 			current := ""

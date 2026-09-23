@@ -430,6 +430,7 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 		}
 		level, chainDone := 0, false
 		hatchDone, hatchReason := false, "" // 本次心跳"刚孵出"（false→true）才记一条日志，别每 3 秒刷屏
+		fullMarks := []string{}             // 满额玩法键（闭包内收集，闭包外打标：Update 持写锁，不可重入）
 		var lv levelUpdate
 		h.St.Update(account, func(r *state.Robot) {
 			if zone != "" {
@@ -516,6 +517,15 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			// 形状容错；老版机器人不带 → 保持 nil（判据侧按"未知"保守处理）。
 			if v, ok := st["daily"]; ok {
 				r.Daily = v
+				// 满额/不可用 → 独立表打标（跨日失效）：机器人端满额后会 request_stop，
+				// 心跳 daily 随之变 None（client.py 只在 enabled=true 时上报）——不记的话
+				// 候选会反复派、被 done_limit 拒（还会打断该号已转的游荡/抓鬼）。
+				// ⚠️ 先收集、**闭包外**再落表：Update 持写锁，Mark 也要写锁（不可重入）。
+				for _, e := range r.DailyEntries() {
+					if state.DailyEntryFull(e) {
+						fullMarks = append(fullMarks, e.ShareKey)
+					}
+				}
 			}
 			if v, ok := st["hp"]; ok {
 				r.HP = toIntSlice(v) // [当前, 上限]
@@ -566,6 +576,9 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			level, chainDone = r.Level, r.ChainDone
 		})
 		h.logLevelUpdate(account, zone, lv)
+		for _, k := range fullMarks { // 闭包外落表（见上：避免 Update 写锁重入）
+			h.St.MarkShareDailyFull(account, k)
+		}
 		if hatchDone {
 			msg := "孵化完成（蛋已孵出）"
 			if hatchReason != "" {

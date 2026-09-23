@@ -273,6 +273,115 @@ func TestShenbuCandidateForGhostFullAccount(t *testing.T) {
 	}
 }
 
+// 契约枚举映射：机器人相位（READY/SUBMIT/STOPPED…）→ pending/running/done/skipped，
+// raw_state 保留原文（前端只认 state；排障看 raw_state）。
+func TestDailyOverviewStateEnums(t *testing.T) {
+	env := newTestEnv(t, "")
+	feed := func(acc, phase string, done, limit int) map[string]any {
+		return map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0,
+			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": done, "limit": limit, "state": phase}}
+	}
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{
+			feed("st_ready@xy3.com", "READY", 0, 10),     // 就绪 → pending
+			feed("st_submit@xy3.com", "SUBMIT", 3, 10),   // 交付中 → running
+			feed("st_stopped@xy3.com", "STOPPED", 2, 10), // 已停 → skipped
+			feed("st_done@xy3.com", "SUBMIT", 10, 10),    // 满额优先（不依赖相位）→ done
+		},
+		"_zone": testsupportZone()})
+
+	res := getJSON(t, env.srv.URL+"/api/daily/overview")
+	want := map[string]string{
+		"st_ready@xy3.com": "pending", "st_submit@xy3.com": "running",
+		"st_stopped@xy3.com": "skipped", "st_done@xy3.com": "done",
+	}
+	got := 0
+	for _, it := range asSlice(res["rows"]) {
+		row, _ := it.(map[string]any)
+		acc, _ := row["account"].(string)
+		exp, ok := want[acc]
+		if !ok {
+			continue
+		}
+		got++
+		q := asSlice(row["queue"])
+		if len(q) != 1 {
+			t.Fatalf("%s 应有一条进度: %v", acc, row["queue"])
+		}
+		q0, _ := q[0].(map[string]any)
+		if q0["state"] != exp {
+			t.Fatalf("%s 应映射为 %s，实际 %v（raw=%v）", acc, exp, q0["state"], q0["raw_state"])
+		}
+		if q0["raw_state"] == "" {
+			t.Fatalf("%s 应保留机器人原相位到 raw_state: %v", acc, q0)
+		}
+	}
+	if got != len(want) {
+		t.Fatalf("应覆盖 %d 个号，实际 %d: %v", len(want), got, res["rows"])
+	}
+}
+
+// 满额兜底：机器人满额后 request_stop → 心跳 daily 变 None；中控靠独立满额表继续拦候选，
+// 并在总览里补一条 `10/10 done`（否则该玩法在面板上"消失"）。
+func TestShareDailyFullMarkedAfterStop(t *testing.T) {
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com"
+	base := func(daily any) map[string]any {
+		rb := map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0,
+			"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+				"count_date": time.Now().Format("20060102")}}
+		if daily != nil {
+			rb["daily"] = daily
+		}
+		return rb
+	}
+	// ① 收尾窗口：done=10/10（此时 enabled 仍 true，心跳带 daily）→ 打标
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{base(map[string]any{"share_key": "share_daily_大唐神捕",
+			"done": 10, "limit": 10, "state": "SUBMIT"})},
+		"_zone": testsupportZone()})
+	// ② 满额收工后：机器人不上报 daily（显式 None，与 client.py 的 st["daily"]=None 同形）
+	rb2 := base(nil)
+	rb2["daily"] = nil
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{rb2}, "_zone": testsupportZone()})
+	if r, _ := env.st.Get(acc); r.Daily != nil {
+		t.Fatalf("心跳 daily=None 应清掉运行时 daily（否则下面的兜底断言测的是旧值）: %v", r.Daily)
+	}
+
+	// 候选：满额表兜底 → 不该再进（否则会反复派、被 done_limit 拒，还打断已转游荡的号）
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := res["candidates"].(map[string]any)
+	if cands["shenbu"] != float64(0) {
+		t.Fatalf("满额收工后（心跳无 daily）应靠满额表继续拦住候选: %v", cands)
+	}
+	// 总览：补一条 done 条目（marked=true）
+	ov := getJSON(t, env.srv.URL+"/api/daily/overview")
+	found := false
+	for _, it := range asSlice(ov["rows"]) {
+		row, _ := it.(map[string]any)
+		if row["account"] != acc {
+			continue
+		}
+		for _, qi := range asSlice(row["queue"]) {
+			q0, _ := qi.(map[string]any)
+			if q0["share_key"] != "share_daily_大唐神捕" {
+				continue
+			}
+			found = true
+			if q0["state"] != "done" || q0["done"] != float64(10) || q0["limit"] != float64(10) {
+				t.Fatalf("满额兜底条目应为 10/10 done: %v", q0)
+			}
+			if q0["marked"] != true {
+				t.Fatalf("兜底条目应标 marked=true（来源=中控满额记忆，不是心跳）: %v", q0)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("总览应为满额号补一条神捕条目: %v", ov["rows"])
+	}
+}
+
 // 开关默认关：≥40 号在「自动分配」仍走抓鬼（旧路径），shenbu 分支不可达。
 func TestStartAutoWithoutShareDailyFlagKeepsLegacy(t *testing.T) {
 	env := newTestEnv(t, "")
