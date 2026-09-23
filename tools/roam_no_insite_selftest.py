@@ -149,10 +149,14 @@ def main():
           "def __roam_switch_map(" in rw)
     check("random_walk 定义 __stop_roam_far_snap(吸附超限→停止游荡待命)",
           "def __stop_roam_far_snap(" in rw)
-    check("常量: 试算3次/吸附40格/换图阈值3/失败节流20s/重试冷却5s/吸附上限1024px",
+    check("random_walk 定义 __far_snap_cooling(超限停止后 10 分钟不补发)",
+          "def __far_snap_cooling(" in rw
+          and "and __far_snap_cooling(robot_object, __now_ms())" in rw)
+    check("常量: 试算3次/吸附40格/换图阈值3/失败节流20s/重试冷却5s/吸附上限1200px/补发冷却10min",
           "ROAM_PATH_CHECK_TRIES = 3" in rw and "ROAM_SNAP_RADIUS = 40" in rw
           and "ROAM_FAILS_TO_SWITCH = 3" in rw and "ROAM_FAIL_GAP_MS = 20000" in rw
-          and "ROAM_PICK_RETRY_MS = 5000" in rw and "ROAM_SNAP_MAX_DIST_PX = 1024" in rw)
+          and "ROAM_PICK_RETRY_MS = 5000" in rw and "ROAM_SNAP_MAX_DIST_PX = 1200" in rw
+          and "ROAM_FAR_SNAP_COOLDOWN_MS = 600000" in rw)
     check("吸附距离上限调用处判断(欧氏距离, px): 超限 → 停止游荡",
           "if _d > ROAM_SNAP_MAX_DIST_PX:" in rw
           and "_d = (((snap[0] - cur[0]) ** 2 + (snap[1] - cur[1]) ** 2)) ** 0.5" in rw)
@@ -433,19 +437,29 @@ def main():
         ns["__quest"] = _stub_get_quest
         ns["random"] = __import__("random")
         ns["hashlib"] = __import__("hashlib")
+        ns["time"] = __import__("time")
         ns["robot_path"] = _rp
         ns["diag"] = types.SimpleNamespace(log=lambda m: None)
         # ROAM_* 常量注入(默认参数/函数体都引用它们; 从源码解析实际值, 改常量自检跟着变)
         import re as _re
         for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
             ns[_m.group(1)] = int(_m.group(2))
-        check("图内死点: ROAM_* 常量齐全(7 个)",
-              len([k for k in ns if k.startswith("ROAM_")]) == 7,
+        check("图内死点: ROAM_* 常量齐全(8 个)",
+              len([k for k in ns if k.startswith("ROAM_")]) == 8,
               sorted(k for k in ns if k.startswith("ROAM_")))
 
-        for name in ("__grid_for", "__snap_walkable", "__note_walk_progress",
+        _frag_cws = _extract_class(rw, "CollectWalkState")
+        check("提取 random_walk.CollectWalkState(D 段)", _frag_cws is not None)
+        if _frag_cws:
+            try:
+                exec(_frag_cws, ns)
+            except Exception as e:  # noqa
+                check("exec random_walk.CollectWalkState(D 段)", False, str(e))
+
+        for name in ("__now_ms", "__grid_for", "__snap_walkable", "__note_walk_progress",
                      "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point",
-                     "__write_pose", "__stop_roam_far_snap", "__dither_point",
+                     "__write_pose", "__stop_roam_far_snap", "__far_snap_cooling",
+                     "__dither_point",
                      "__other_bot_positions", "_cos", "_sin", "__random_walk_move",
                      # 2026-09-23d: __connected 抽成模块级公共入口(daily_ghost 巡逻选点共用)
                      "walk_point_connected"):
@@ -606,9 +620,11 @@ def main():
             check("选点: from_pos 为空(选落地点) → 不试算(旧行为)",
                   pt is not None and len(_bp_calls) == _calls2, pt)
 
-        # ---- E. __random_walk_move 端到端: 吸附上限(1024px, 欧氏) ----
-        # 口径(用户 2026-09-23): ≤上限 → 照常吸附救出; >上限 → 不吸附不瞬移 → 停止游荡待命。
+        # ---- E. __random_walk_move 端到端: 吸附上限(1200px, 欧氏) + 超限停止降噪 ----
+        # 口径(用户 2026-09-23, 上限 1024 → 1200): ≤上限 → 照常吸附救出;
+        # >上限 → 不吸附不瞬移 → 停止游荡待命, 且同号 10 分钟内不再被补发(静默跳过)。
         _move = ns.get("__random_walk_move")
+        _cooling = ns.get("__far_snap_cooling")
 
         def _mk_move_ro(mapid, x, y):
             ro = types.SimpleNamespace()
@@ -638,6 +654,46 @@ def main():
             ww.stand_until_ms = 0
             return ww
 
+        # ---- E0. __far_snap_cooling 边界(10 分钟内不补发 / 之后可再派) ----
+        if _cooling is not None:
+            ro0 = _mk_move_ro(FIX_MAP, 100, 100)
+            check("补发冷却: 无时间戳(没触发过) → 不拦", _cooling(ro0, 500000) is False)
+            ro0.m_roam_far_snap_ms = 400000
+            check("补发冷却: 刚触发(<10min) → 拦(不补发)", _cooling(ro0, 400000 + 599999) is True)
+            check("补发冷却: 恰好 10min → 放行(可再派)", _cooling(ro0, 400000 + 600000) is False)
+            check("补发冷却: 已过 11min → 放行(可再派)", _cooling(ro0, 400000 + 660000) is False)
+
+        # ---- E1. dispatch_cmd 层: 冷却期内静默跳过 / 冷却过后不跳过 ----
+        # 注意: 真 dispatch_cmd 要用独立命名空间 exec(共享 ns 里的 dispatch_cmd 是 B 段桩,
+        #       其它用例靠它收集"停止/换图"调用, 不能被真实现覆盖)。
+        ns_d = dict(ns)
+        _frag_dc = _extract_func(rw, "dispatch_cmd")
+        if _frag_dc:
+            try:
+                exec(_frag_dc, ns_d)
+            except Exception as _e:  # noqa
+                check("exec random_walk.dispatch_cmd(独立 ns)", False, str(_e))
+        _disp = ns_d.get("dispatch_cmd")
+        if _disp is not None and _cooling is not None:
+            _now = int(ns["__now_ms"]())
+            ro_c = _mk_move_ro(FIX_MAP, 100, 100)
+            ro_c.m_roam_far_snap_ms = _now		# 刚触发超限停止
+            ro_c.m_collect_walk = None
+            _re1 = _disp(ro_c, {"cmd": "random_walk", "mapid": "random"})
+            check("补发冷却: dispatch_cmd 冷却期内 → 静默跳过(不启动游荡)",
+                  isinstance(_re1, dict) and _re1.get("skipped") == "far_snap_cooldown"
+                  and not getattr(ro_c.m_collect_walk, "enabled", False), _re1)
+            ro_d = _mk_move_ro(FIX_MAP, 100, 100)
+            ro_d.m_roam_far_snap_ms = _now - 700000	# 11 分钟前
+            ro_d.m_collect_walk = None
+            try:
+                _re2 = _disp(ro_d, {"cmd": "random_walk", "mapid": "random"})
+            except Exception as _e:  # 无全链路桩: 只要"没被冷却跳过"即算通过
+                _re2 = {"raised": type(_e).__name__}
+            check("补发冷却: 冷却已过 → 不跳过(继续走启动流程)",
+                  not (isinstance(_re2, dict) and _re2.get("skipped") == "far_snap_cooldown"),
+                  _re2)
+
         if _move is not None:
             _box = [[48, 48], [250, 150]]	# 主区可走范围内
             # ①≤上限: 位置在阻挡格(竖墙 x=5,y=5), 最近可走格 16px → 吸附 + 正常安排走路
@@ -646,9 +702,9 @@ def main():
             ro1 = _mk_move_ro(FIX_MAP, 5 * 16 + 8, 5 * 16 + 8)	# 格(5,5)=墙
             w1 = _mk_move_w(FIX_MAP, _box)
             _move(ro1, _stub_get_quest(ro1), w1, 100000)
-            check("吸附上限: ≤1024px → 照常吸附(写回 m_pose)",
+            check("吸附上限: ≤1200px → 照常吸附(写回 m_pose)",
                   ro1.m_pose[0] == 4 * 16 + 8 and ro1.m_pose[1] == 5 * 16 + 8, ro1.m_pose[:2])
-            check("吸附上限: ≤1024px → 照常安排走路(不停止)",
+            check("吸附上限: ≤1200px → 照常安排走路(不停止)",
                   len(_sched) == 1 and not disp_calls,
                   (_sched[-1]["data"] if _sched else None, disp_calls))
             # ②>上限: 位置远在网格外(欧氏距离 ≈1914px) → 不吸附(位置不动) + 停止游荡
@@ -657,25 +713,38 @@ def main():
             ro2 = _mk_move_ro(FIX_MAP, 1600, 1600)
             w2 = _mk_move_w(FIX_MAP, _box)
             _move(ro2, _stub_get_quest(ro2), w2, 200000)
-            check("吸附上限: >1024px → 不吸附(位置不变, 无瞬移)",
+            check("吸附上限: >1200px → 不吸附(位置不变, 无瞬移)",
                   ro2.m_pose[0] == 1600 and ro2.m_pose[1] == 1600, ro2.m_pose[:2])
-            check("吸附上限: >1024px → 走'停止游荡'路径(不是换图/不是走路)",
+            check("吸附上限: >1200px → 走'停止游荡'路径(不是换图/不是走路)",
                   len(disp_calls) == 1
                   and disp_calls[0].get("cmd") == "random_walk_stop" and not _sched,
                   (disp_calls, _sched))
-            check("吸附上限: >1024px → 有明确 warn 日志(写明距离/上限)",
-                  any("超过上限" in m and "1024px" in m for m in logs), logs[-2:])
-            # ③边界: 恰好在上限内(≤) → 仍吸附(取 1000px 处构造)
+            check("吸附上限: >1200px → 有明确 warn 日志(写明距离/上限)",
+                  any("超过上限" in m and "1200px" in m for m in logs), logs[-2:])
+            check("吸附上限: >1200px → 记下 m_roam_far_snap_ms(冷却起点)",
+                  int(getattr(ro2, "m_roam_far_snap_ms", 0) or 0) > 0
+                  and (_cooling is None or _cooling(ro2, 200000) is True),
+                  getattr(ro2, "m_roam_far_snap_ms", None))
+            # ③历史案例同类: 1063px(>旧上限1024, <新上限1200) → 应照常吸附救出
             del _sched[:]
             del disp_calls[:]
-            ro3 = _mk_move_ro(FIX_MAP, 312 + 700, 184 + 700)	# 距格(19,11)≈990px
+            ro3 = _mk_move_ro(FIX_MAP, 312 + 1100, 184)	# 距格(19,11)=1100px
             w3 = _mk_move_w(FIX_MAP, _box)
-            ro3.m_pose = [312 + 700, 184 + 700, 0]
             _move(ro3, _stub_get_quest(ro3), w3, 300000)
-            check("吸附上限: 990px(<上限) → 仍吸附救出",
+            check("吸附上限: 1100px(旧超限/新上限内) → 照常吸附救出",
                   (ro3.m_pose[0], ro3.m_pose[1]) == (312, 184)
                   and len(_sched) == 1 and not disp_calls,
                   (ro3.m_pose[:2], _sched, disp_calls))
+            # ④边界: 990px(<上限) → 仍吸附
+            del _sched[:]
+            del disp_calls[:]
+            ro4 = _mk_move_ro(FIX_MAP, 312 + 700, 184 + 700)	# 距格(19,11)≈990px
+            w4 = _mk_move_w(FIX_MAP, _box)
+            _move(ro4, _stub_get_quest(ro4), w4, 400000)
+            check("吸附上限: 990px(<上限) → 仍吸附救出",
+                  (ro4.m_pose[0], ro4.m_pose[1]) == (312, 184)
+                  and len(_sched) == 1 and not disp_calls,
+                  (ro4.m_pose[:2], _sched, disp_calls))
 
     nfail = 0
     for name, ok, detail in results:
@@ -683,7 +752,7 @@ def main():
             print("[PASS] %s" % name)
         else:
             nfail += 1
-            print("[FAIL] %s %s" % (name, ("(%s)" % detail) if detail else ""))
+            print("[FAIL] %s %s" % (name, ("(" + str(detail) + ")") if detail else ""))
     print("=== 结果: %s (共 %d 项断言, 失败 %d 项) ===" % (
         "PASS" if nfail == 0 else "FAIL", len(results), nfail))
     return 0 if nfail == 0 else 1
