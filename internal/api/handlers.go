@@ -578,6 +578,12 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	}
 
 	sent, msgs := 0, []string{}
+	// 2026-09-23 文案修复（用户现场: 点"启动"被抓鬼池配额拦下, 面板却提示"下发失败：
+	// 机器人通道未连接"）。sent==0 有三种语义，旧实现一律走 okMsg 兜底 → 误导：
+	//   ① chanFail=true  真·传输失败（无连接/写失败）→ 保留"通道未连接"文案；
+	//   ② 被闸门拦下（池配额/在途去重/等级门槛）→ 回真实原因（assignments 里已带）；
+	//   ③ 没有需要启动的号 → 回"没有需要启动的账号"。
+	chanFail := false
 	if len(toChain) > 0 {
 		cmd := map[string]any{"cmd": "start_chain", "chain_id": defaultChainID}
 		switch {
@@ -605,6 +611,8 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			sent++
 			a.markChainDispatch(toChain) // 2026-09-23 R1：新手链在途记账（配额/候选/去重据此）
 			msgs = append(msgs, fmt.Sprintf("%d 个走新手链(%s)", len(toChain), defaultChainID))
+		} else {
+			chanFail = true // 2026-09-23 文案修复：真·传输失败才允许回"通道未连接"
 		}
 	}
 	if len(toGhost) > 0 {
@@ -626,6 +634,8 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			sent++
 			a.markGhostDispatch(toGhost) // 2026-09-23 P0：在途记账（配额/池闸据此防连续放行）
 			msgs = append(msgs, fmt.Sprintf("%d 个走钟馗抓鬼(%s)", len(toGhost), ghostChainID))
+		} else {
+			chanFail = true // 2026-09-23 文案修复：真·传输失败才允许回"通道未连接"
 		}
 	}
 
@@ -637,14 +647,59 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		msg = "按意图自动分配：" + strings.Join(msgs, "；")
 	}
 	ok := sent > 0
+	if !ok {
+		if chanFail {
+			msg = "下发失败：机器人通道未连接" // 真·传输失败
+		} else if r := assignmentsReasonText(assignments); r != "" {
+			msg = "本次未下发（不是通道问题，是池配额/在途等闸门拦下）：" + r
+		}
+	}
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "start_auto", "zone": a.currentZoneKey(),
-		"accounts": targets, "sent": sent, "assignments": assignments})
+		"accounts": targets, "sent": sent, "assignments": assignments, "channel_fail": chanFail})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": ok, "mode": "auto", "sent": sent, "accounts": len(targets),
 		"groups":      map[string]any{"start_chain": toChain, "ghost_start": toGhost},
 		"assignments": assignments, "chain_id": defaultChainID, "skipped": skipped,
-		"msg": okMsg(ok, msg),
+		"channel_fail": chanFail, "msg": msg,
 	})
+}
+
+// assignmentsReasonText 汇总"被闸门拦下"的原因（去重+计数，最多列 2 条），供面板直接显示。
+//
+// 2026-09-23 新增：配合 startAuto 的文案修复 —— 池配额/在途去重/等级门槛各自在
+// assignments[].reason 里写了人话，这里把它们抬到 msg 上，避免用户只看到一句
+// "下发失败：机器人通道未连接"（假故障）。
+func assignmentsReasonText(assignments []map[string]any) string {
+	counts := map[string]int{}
+	order := make([]string, 0, 4)
+	for _, as := range assignments {
+		r := strings.TrimSpace(toStr(as["reason"]))
+		if r == "" {
+			continue
+		}
+		if _, seen := counts[r]; !seen {
+			order = append(order, r)
+		}
+		counts[r]++
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	for i, r := range order {
+		if i >= 2 {
+			break
+		}
+		if counts[r] > 1 {
+			parts = append(parts, fmt.Sprintf("%s ×%d", r, counts[r]))
+		} else {
+			parts = append(parts, r)
+		}
+	}
+	if len(order) > 2 {
+		parts = append(parts, fmt.Sprintf("… 等 %d 类原因", len(order)))
+	}
+	return strings.Join(parts, "；")
 }
 
 // intentKinds 运行时意图表快照 → (kind, reason) 两个索引（按账号）。
