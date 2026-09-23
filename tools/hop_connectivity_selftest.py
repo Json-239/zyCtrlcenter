@@ -9,13 +9,17 @@
   连通域，见 tools/roam_map_connectivity_scan.py 的 7/43 图）→ 校正后仍无解 → 每次补发
   都"跨图重试→失败→就地游荡"的空转 + 刷屏。
 
-修复（quest_engine.py 2026-09-23f，最小改动）:
+修复（quest_engine.py 2026-09-23f/g，最小改动）:
   - 新增模块级 `__nearest_connected_cell(grid, from_x, from_y, to_x, to_y, max_radius=40)`:
     ①从起点格泛洪(8 邻、不斜穿墙角，与 robot_path.GridPathFinder._astar 同判据)得可达集;
     ②从目标格向外扩环，取第一个"可走且在可达集里"的格 = 能走到的最接近目标的合法位置
     （服务端 detect_skip_range 有 scope，走到附近合法位置也可能触发跳转）。
-  - `__do_walk` 的"A* 无解 → 就近可走格校正"里：path2 仍为 None 时调用它再试一次
-    （不取代旧逻辑；找不到/不连通 → 保持原 NO_LEGAL_ROUTE 报错路径）。
+  - `__do_walk`："A* 无解 → 就近可走格校正"之后加**总兜底层**（`path2 is None` 时跑，
+    与 `>8` 门槛同级 —— 否则"目标格可走"的场景根本进不去，筛选形同虚设）：
+    **只在非任务链启用**（`quest.active=False`：游荡/抓鬼/商店等导航载体），链任务
+    （goto/交付，`active=True`）保持原"立即失败 → NO_LEGAL_ROUTE → 停链报错"语义；
+    半径 40 格内找不到可达格 → 同样保持原报错路径（不为不可达目标长距离空走）。
+  - 异常/数据缺失 → 原路径（不拦）。
 
 用法:
   python tools/hop_connectivity_selftest.py <script 目录 或 quest_engine.py 路径>
@@ -100,9 +104,9 @@ def main():
     # ============================================================ A. 源码形状
     check("quest_engine 定义 __nearest_connected_cell(跳转点连通筛选)",
           "def __nearest_connected_cell(" in qe)
-    check("__do_walk 就近可走格校正里：path2 无解时调用连通筛选(不取代旧逻辑)",
-          "if path2 is None:" in qe
-          and "_alt = __nearest_connected_cell(_g2, from_x, from_y, to_x, to_y)" in qe)
+    check("__do_walk 总兜底位：path2 无解(且非链)时调用连通筛选(不取代旧逻辑)",
+          "_alt = __nearest_connected_cell(_g2, from_x, from_y, to_x, to_y)" in qe
+          and 'if path2 is None and not bool(getattr(quest, "active", False)):' in qe)
     check("连通筛选命中后用新目标重试寻路并改写 _nx/_ny",
           "path2b = __build_path(quest, robot_object.m_mapid," in qe
           and "_nx, _ny = _ax, _ay" in qe)
@@ -124,12 +128,16 @@ def main():
     for _ln in qe.splitlines():
         if _abs_line is None and "if abs(_nx - to_x) + abs(_ny - to_y) > 8:" in _ln:
             _abs_line = _ln
-        if _guard_line is None and _ln.strip() == "if path2 is None:":
+        if _guard_line is None and _ln.strip().startswith("if path2 is None"):
             _guard_line = _ln
     check("连通筛选是独立一层(与 >8 门槛同级, 目标格可走也能进)",
           _abs_line is not None and _guard_line is not None
           and _indent(_abs_line) == _indent(_guard_line),
           (_abs_line, _guard_line))
+    check("连通筛选只在非任务链启用(quest.active=False; 游荡/抓鬼/商店)",
+          'if path2 is None and not bool(getattr(quest, "active", False)):' in qe)
+    check("链任务失败语义保留(active=True → 原 NO_LEGAL_ROUTE 停链报错)",
+          "if quest.active:" in qe and "quest.set_state(quest_state.ST_ERROR)" in qe)
     check("path2 进入门槛前先置 None(门槛不进入时不 NameError)",
           "\t\t\t\t\tpath2 = None" in qe)
 
@@ -186,14 +194,23 @@ def main():
                   finder.find_path(SNAP_POSE[0], SNAP_POSE[1],
                                    TARGET_MAIN[0], TARGET_MAIN[1]) is not None)
 
-            # B5. 超出扩环上限 → None(调用方保持原 NO_LEGAL_ROUTE 路径)
+            # B5. 扩环用尽 → 2026-09-23g 起改为"扫全可达集取像素最近"(不再返回 None):
+            #     扩环只是"找近点"的快路径; 用尽后扫一遍泛洪集 —— 保证不会因半径判定
+            #     又把号钉死(现场 map16 真最近可达点切比雪夫 45 格 > max_radius=40)
             r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], POCKET_POSE[0], POCKET_POSE[1],
                     max_radius=2)
-            check("扩环超上限仍找不到 → None(不硬拉/不绕远)", r is None, r)
+            check("扩环用尽(半径 2) → 扫全可达集取像素最近 (13,5)(不再 None)",
+                  r == (13, 5), r)
+            check("B5 返回格仍与当前位置连通",
+                  r is not None and finder.find_path(
+                      MAIN_POSE[0], MAIN_POSE[1], r[0] * 16 + 8, r[1] * 16 + 8) is not None, r)
 
-            # B6. 网格外目标(超出整个网格) → None
+            # B6. 网格外目标 → 同样扫全可达集, 取离它最近的可达格(网格右下角 (19,11))
             r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], 3000, 3000)
-            check("目标在网格外(整图外) → None", r is None, r)
+            check("目标在网格外 → 扫全可达集取像素最近 (19,11)", r == (19, 11), r)
+            check("B6 返回格仍与当前位置连通",
+                  r is not None and finder.find_path(
+                      MAIN_POSE[0], MAIN_POSE[1], r[0] * 16 + 8, r[1] * 16 + 8) is not None, r)
 
             # B7. 整片不可走 → None
             _all_blocked = _rp.MapGrid(FIX_MAP, {"w": 6, "h": 6, "rows": ["1" * 6] * 6})
@@ -220,6 +237,19 @@ def main():
                         check("真实 map45 现场: 原目标不可达 → 筛选给出'可达的最近格'",
                               _old is None and _c is not None and _new is not None,
                               (_old, _c, _new is not None))
+                        # 现场 map16: 真最近可达点在半径(40)之外 → 扫全可达集仍给出可达点
+                        _g16 = (_ch.get("map_grids") or {}).get("16")
+                        if _g16:
+                            _grid16 = _rp.MapGrid(16, _g16)
+                            _old16 = _rp.GridPathFinder(_grid16).find_path(1766, 2436, 346, 257)
+                            _c16 = ncc(_grid16, 1766, 2436, 346, 257)
+                            _new16 = None
+                            if _c16 is not None:
+                                _new16 = _rp.GridPathFinder(_grid16).find_path(
+                                    1766, 2436, _c16[0] * 16 + 8, _c16[1] * 16 + 8)
+                            check("真实 map16 现场: 真最近可达点在半径外 → 仍给出可达点",
+                                  _old16 is None and _c16 is not None and _new16 is not None,
+                                  (_old16, _c16, _new16 is not None))
                     else:
                         check("真实 map45 现场: 链里有 map45 网格", False, "链数据无 map45")
                 else:
