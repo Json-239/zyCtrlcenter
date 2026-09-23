@@ -101,6 +101,44 @@ m_add = re.search(r'(?ms)^def on_add_task\(robot_object, datalist\):\n.*?(?=^def
 assert m_add, "未提取到 on_add_task"
 add_block = m_add.group(0)
 
+# ⑦ 2026-09-23 交付"无进展"误报修复相关块:
+#    - SUBMIT 状态机内的活性判定/计数/超时自处理块(源码提取做动态用例)
+i_sub = ghost_src.find("\t\tif __submit_nav_busy(quest):\n")
+assert i_sub >= 0, "未提取到 SUBMIT 活性判定块(__submit_nav_busy 调用点; 缩进/写法变了?)"
+_sub_end_marker = "\t\treturn 0\t# SUBMIT 分支终点"
+i_sub_end = ghost_src.find(_sub_end_marker, i_sub)
+assert i_sub_end > 0, "未找到 SUBMIT 分支终点锚点"
+sub_block = ghost_src[i_sub:ghost_src.find("\n", i_sub_end) + 1]
+
+#    - __submit_nav_busy 真实 def
+m_nav = re.search(r'(?ms)^def __submit_nav_busy\(quest\):\n.*?(?=^def )', ghost_src)
+assert m_nav, "未提取到 __submit_nav_busy"
+nav_block = m_nav.group(0)
+
+#    - __set_state 真实 def(进入 SUBMIT 记 submit_since_ms)
+m_sst = re.search(r'(?ms)^def __set_state\(g, state, now_ms=None\):\n.*?(?=^def )', ghost_src)
+assert m_sst, "未提取到 __set_state"
+setstate_block = m_sst.group(0)
+
+#    - on_finish_task / on_load_task(交付推进清零 submit_rounds)
+m_fin = re.search(r'(?ms)^def on_finish_task\(robot_object, datalist\):\n.*?(?=^def )', ghost_src)
+assert m_fin, "未提取到 on_finish_task"
+fin_block = m_fin.group(0)
+m_load = re.search(r'(?ms)^def on_load_task\(robot_object, datalist\):\n.*?(?=^def )', ghost_src)
+assert m_load, "未提取到 on_load_task"
+load_block = m_load.group(0)
+#    - GhostState.__init__ / reset(新会话清零)
+m_init = re.search(r'(?ms)^class GhostState\(object\):\n.*?def reset\(self\):', ghost_src)
+assert m_init, "未提取到 GhostState.__init__"
+init_block = m_init.group(0)
+m_reset = re.search(r'(?ms)^\tdef reset\(self\):\n.*?(?=^\tdef )', ghost_src)
+assert m_reset, "未提取到 GhostState.reset"
+reset_block = m_reset.group(0)
+#    - 通用看门狗块(确认 SUBMIT 分支不落入: 由 sub_block 终点 return 0 保证)
+i_wd = ghost_src.find("\t# 看门狗超时 → 重试")
+assert i_wd > 0, "未提取到通用看门狗块"
+watchdog_block = ghost_src[i_wd:i_wd + 4000]
+
 
 # ================================================================ 静态断言
 # S1: 豁免判据 = 0 选项 + 捉鬼任务号（非 0）
@@ -154,6 +192,48 @@ check("S8 校准扫 GHOST_TASK_MIN~GHOST_TASK_MAX, 无写死 2019510 查表",
 check("S9 启动校准/增量日志改用 __srv_ghost_done",
       ghost_src.count("__srv_ghost_done(") >= 2
       and "__srv_ghost_done(getattr(robot_object" in ghost_src)
+
+# ---------------- 2026-09-23 交付"无进展"误报修复 ----------------
+# S10: 独立硬上限常量存在（与 NAV 跨图豁免同口径 120s）
+check("S10 SUBMIT_NAV_LIMIT_MS = 120000 存在",
+      "SUBMIT_NAV_LIMIT_MS = 120000" in ghost_src)
+
+# S11: 无进展判定不再用跨状态共享的 rounds, 改用独立 submit_rounds
+check("S11 SUBMIT 分支无进展判据改用 submit_rounds(不用 g.rounds >= 2)",
+      "int(getattr(g, \"submit_rounds\", 0)) >= 2" in sub_block
+      and "g.rounds >= 2" not in sub_block)
+
+# S12: 导航活跃豁免在无进展判定之前(顺序: 先豁免, 再判无进展)
+_i_nb = sub_block.find("if __submit_nav_busy(quest):")
+_i_np = sub_block.find("submit_rounds\", 0)) >= 2")
+check("S12 活性豁免块位于无进展判定之前",
+      0 <= _i_nb < _i_np, "nav_busy@%s no_progress@%s" % (_i_nb, _i_np))
+
+# S13: SUBMIT 分支自处理 20s 超时且以 return 0 收尾 —— 不再落入通用看门狗
+#      (通用看门狗会 +rounds 并可能 __stuck, 且不会累计 submit_rounds)
+check("S13 SUBMIT 分支自处理超时(__timeout 在本块) 且终点 return 0 不落入通用看门狗",
+      "__timeout(g)" in sub_block
+      and sub_block.rstrip().endswith("# SUBMIT 分支终点: 不落入通用看门狗(后者会动 rounds)"))
+
+# S14: 交付推进(任务到达/交付完成/重登加载)清零 submit_rounds; __set_state 进入
+#      SUBMIT **不得**清零(否则"两轮超时→无进展"跨 READY 往返永远攒不满)
+check("S14 推进清零: on_add_task/on_finish_task/on_load_task 各清 submit_rounds",
+      "g.submit_rounds = 0" in add_block
+      and "g.submit_rounds = 0" in fin_block
+      and "g.submit_rounds = 0" in load_block)
+check("S14b __set_state 进入 SUBMIT: 记 submit_since_ms, 不清 submit_rounds",
+      "g.submit_since_ms = g.state_since_ms" in setstate_block
+      and "g.submit_rounds = 0" not in setstate_block)
+
+# S15: 新会话(__init__/reset)初始化双双存在
+check("S15 GhostState.__init__ / reset 均初始化 submit_rounds",
+      "self.submit_rounds = 0" in init_block
+      and "self.submit_rounds = 0" in reset_block)
+
+# S16: 通用看门狗块不再需要 SUBMIT 特判(sub_block 已全部 return); 反向保护:
+#      看门狗块不得出现 SUBMIT 的 rounds 判定(避免两处口径打架)
+check("S16 通用看门狗块内无 SUBMIT 专有 rounds 判定",
+      "SUBMIT" not in watchdog_block.replace("SUBMIT_FAIL_LIMIT", ""))
 
 
 # ================================================================ 动态执行
@@ -337,11 +417,239 @@ old_val = s_behind.get("2019510")
 check("⑤-反例 旧实现(写死 2019510)同输入 → None/0(满额号被误判未抓) → 证明修复必要",
       old_val is None and SRV_DONE(s_behind) == 50)
 
+
+# ================================================================ 2026-09-23 交付"无进展"动态用例
+# 现场(2026-09-23): "SUBMIT 交付第 1 次无进展" 7709 次 / 402 号。根因:
+#   旧判据 `g.rounds >= 2` 用的是跨状态共享看门狗计数 —— NAV 追鬼/等刷鬼/FIGHT
+#   等把 rounds 带进 SUBMIT 后, 进入后下一 tick 立即误报(实测 98% 的"第 1 次无进展"
+#   发生时 5 分钟内连一次 SUBMIT 超时都没有)。修复: 独立 submit_rounds +
+#   导航活跃豁免(SUBMIT_NAV_LIMIT_MS 硬上限)。
+class FG(object):
+    def __init__(self):
+        self.state = "SUBMIT"
+        self.state_since_ms = 0
+        self.submit_since_ms = 0
+        self.submit_rounds = 0
+        self.submit_fail = 0
+        self.rounds = 0
+        self.dynamic_npcs = {}
+
+
+class FQ(object):
+    def __init__(self):
+        self.pending = None
+        self.walk_target = None
+        self.dijkstra_route = []
+        self.dijkstra_final = None
+
+
+NOW2 = {"v": 0}
+LOG2 = []
+CALL2 = {"relogin": 0, "goto": 0, "reason": ""}
+
+
+def f_timeout2(g):
+    return (NOW2["v"] - g.state_since_ms) > 20000
+
+
+def f_set_state2(g, s, n=None):
+    if g.state != s:
+        g.state = s
+        g.state_since_ms = n if n is not None else NOW2["v"]
+
+
+def f_log2(ro, lv, msg, *a):
+    LOG2.append(msg % a if a else msg)
+
+
+def f_relogin2(ro, g, reason):
+    CALL2["relogin"] += 1
+    CALL2["reason"] = reason
+    return True
+
+
+def f_goto2(*a, **k):
+    CALL2["goto"] += 1
+
+
+NS2 = {
+    "SUBMIT_NAV_LIMIT_MS": 120000,
+    "SUBMIT_FAIL_LIMIT": 3,
+    "BROKER_NPC_ID": 10146,
+    "__now_ms": lambda: NOW2["v"],
+    "__timeout": f_timeout2,
+    "__log": f_log2,
+    "__set_state": f_set_state2,
+    "__goto": f_goto2,
+    "__need_relogin": f_relogin2,
+}
+exec(compile(nav_block, "<nav_busy>", "exec"), NS2)
+exec(compile(setstate_block, "<set_state>", "exec"), NS2)
+exec(compile(wrap_fn("_submit_tick", sub_block, [
+    "g", "quest", "robot_object", "now_ms", "SUBMIT_NAV_LIMIT_MS", "SUBMIT_FAIL_LIMIT",
+    "BROKER_NPC_ID", "__timeout", "__submit_nav_busy", "__log", "__set_state",
+    "__goto", "__need_relogin"]), "<submit_tick>", "exec"), NS2)
+NAVBUSY2 = NS2["__submit_nav_busy"]
+SETSTATE2 = NS2["__set_state"]
+TICK2 = NS2["_submit_tick"]
+
+
+def run_tick(g, q, now):
+    NOW2["v"] = now
+    LOG2[:] = []
+    CALL2["relogin"] = 0
+    CALL2["goto"] = 0
+    CALL2["reason"] = ""
+    return TICK2(g, q, "robot", now, NS2["SUBMIT_NAV_LIMIT_MS"],
+                 NS2["SUBMIT_FAIL_LIMIT"], NS2["BROKER_NPC_ID"],
+                 f_timeout2, NAVBUSY2, f_log2, f_set_state2, f_goto2, f_relogin2)
+
+
+def has_np():
+    return any("无进展" in m for m in LOG2)
+
+
+# ---------------- D1 ★核心反例: rounds 残留(旧实现立即误报)
+now = 1000000
+g = FG()
+g.rounds = 2                      # 模拟 NAV 追鬼两次超时带进来的脏值(现场 11:02 案例)
+g.state_since_ms = now - 1000
+g.submit_since_ms = now - 1000
+r = run_tick(g, FQ(), now)
+check("D1 rounds 残留(=2)进入 SUBMIT 首个 tick → 不误报无进展(修复后)",
+      r == 0 and g.submit_fail == 0 and g.submit_rounds == 0 and not has_np(),
+      "fail=%s rounds=%s log=%s" % (g.submit_fail, g.submit_rounds, LOG2[:1]))
+check("D1-反例 旧判据(g.rounds >= 2)同输入 → 必报无进展(证明修复必要)",
+      g.rounds >= 2)
+
+# ---------------- D2 rounds 残留 + 20s 到点: 只计 1 轮, 回 READY 重推
+now = 2000000
+g = FG()
+g.rounds = 2
+g.state_since_ms = now - 25000
+g.submit_since_ms = now - 25000
+r = run_tick(g, FQ(), now)
+check("D2 rounds 残留 + 20s 到点 → submit_rounds=1/回 READY/仍不报无进展",
+      r == 0 and g.submit_rounds == 1 and g.state == "READY"
+      and g.submit_fail == 0 and not has_np()
+      and any("SUBMIT 超时, 第 1 次重试" in m for m in LOG2),
+      "state=%s rounds=%s" % (g.state, g.submit_rounds))
+
+# ---------------- D3 导航活跃豁免(走位途中不判无进展)
+now = 3000000
+g = FG()
+g.submit_rounds = 2
+g.state_since_ms = now - 30000
+g.submit_since_ms = now - 30000
+q = FQ()
+q.walk_target = (100, 200)
+r = run_tick(g, q, now)
+check("D3 导航活跃(walk_target) + 已两轮 → 豁免: 不报无进展, 刷新看门狗计时",
+      r == 0 and g.submit_fail == 0 and g.submit_rounds == 2
+      and g.state_since_ms == now and not has_np())
+
+# ---------------- D4 硬上限: 导航活跃超 120s → 回原无进展兜底(并清导航重推)
+now = 4000000
+g = FG()
+g.submit_rounds = 2
+g.state_since_ms = now - 30000
+g.submit_since_ms = now - 130000
+q = FQ()
+q.walk_target = (100, 200)
+r = run_tick(g, q, now)
+check("D4 导航活跃但超 120s 硬上限 → 报第 1 次无进展, 清导航重推(goto)",
+      r == 0 and g.submit_fail == 1 and g.submit_rounds == 0
+      and q.walk_target is None and CALL2["goto"] == 1
+      and any("SUBMIT 交付第 1 次无进展" in m for m in LOG2),
+      "fail=%s goto=%d" % (g.submit_fail, CALL2["goto"]))
+
+# ---------------- D5 真卡死(导航已停 + 两轮) → 兜底保留
+now = 5000000
+g = FG()
+g.submit_rounds = 2
+g.state_since_ms = now - 30000
+g.submit_since_ms = now - 60000
+r = run_tick(g, FQ(), now)
+check("D5 导航已停 + 两轮计数 → 报第 1 次无进展(原兜底未被削弱)",
+      g.submit_fail == 1 and any("第 1 次无进展" in m for m in LOG2))
+
+# ---------------- D6 20s 超时自处理: submit_rounds+1 回 READY(原节奏)
+now = 6000000
+g = FG()
+g.state_since_ms = now - 21000
+g.submit_since_ms = now - 21000
+r = run_tick(g, FQ(), now)
+check("D6 20s 超时 → submit_rounds=1/回 READY/日志'第 1 次重试'/不报无进展",
+      g.submit_rounds == 1 and g.state == "READY" and g.submit_fail == 0
+      and not has_np()
+      and any("抓鬼状态 SUBMIT 超时, 第 1 次重试" in m for m in LOG2))
+
+# ---------------- D7 重登通道保留(submit_fail 达上限)
+now = 7000000
+g = FG()
+g.submit_rounds = 2
+g.submit_fail = 2
+g.state_since_ms = now - 30000
+g.submit_since_ms = now - 60000
+r = run_tick(g, FQ(), now)
+check("D7 submit_fail 达 SUBMIT_FAIL_LIMIT → __need_relogin(重登通道保留)",
+      CALL2["relogin"] == 1 and g.submit_fail == 3
+      and "连续 3 次无进展" in CALL2["reason"])
+
+# ---------------- D8 __set_state 真行为: 记 submit_since_ms, 不清 submit_rounds
+g = FG()
+g.state = "READY"
+g.state_since_ms = 0
+g.submit_rounds = 1
+NOW2["v"] = 8000000
+SETSTATE2(g, "SUBMIT", 8000000)
+check("D8 __set_state 进入 SUBMIT: submit_since_ms=进入时刻, submit_rounds 保留(不清)",
+      g.submit_since_ms == 8000000 and g.submit_rounds == 1 and g.state == "SUBMIT")
+
+
+# ---------------- D9 __submit_nav_busy 判据(含设计约束: pending 不算活跃)
+def _nb(pending=None, walk=None, route=None, final=None):
+    q = FQ()
+    q.pending = pending
+    q.walk_target = walk
+    q.dijkstra_route = route or []
+    q.dijkstra_final = final
+    return NAVBUSY2(q)
+
+
+check("D9 判据: walk_target/dijkstra_route/dijkstra_final 命中; pending 不命中(点后等对话严判); None→False",
+      _nb(walk=(1, 2)) is True and _nb(route=[{"a": 1}]) is True
+      and _nb(final={"npc_id": 10146}) is True
+      and _nb(pending={"type": "click"}) is False
+      and _nb() is False and NAVBUSY2(None) is False)
+
+
+# ---------------- D10 跨 READY 往返两轮超时 → "第 1 次无进展"依然可达(计数不被抹)
+now = 9000000
+g = FG()
+g.state_since_ms = now - 21000
+g.submit_since_ms = now - 21000
+q = FQ()
+run_tick(g, q, now)                        # 第 1 轮超时 → submit_rounds=1, READY
+NOW2["v"] = now + 100
+SETSTATE2(g, "SUBMIT", now + 100)          # READY 立即回 SUBMIT(生产同序)
+g.state_since_ms = now + 100
+NOW2["v"] = now + 21100
+run_tick(g, q, now + 21100)                # 第 2 轮超时 → submit_rounds=2, READY
+NOW2["v"] = now + 21200
+SETSTATE2(g, "SUBMIT", now + 21200)
+g.state_since_ms = now + 21200
+LOG2[:] = []
+run_tick(g, q, now + 21200)                # 下一 tick → 报无进展
+check("D10 跨 READY 往返两轮超时 → 第 1 次无进展可达(计数未被 __set_state 抹掉)",
+      g.submit_fail == 1 and any("第 1 次无进展" in m for m in LOG2),
+      "fail=%s log=%s" % (g.submit_fail, LOG2[:1]))
+
 # ================================================================ 结果
 print()
 print("自检目标: %s" % script_dir)
 print("  %s sha1=%s" % (os.path.basename(ghost_path),
                         hashlib.sha1(ghost_src.encode("utf-8")).hexdigest()[:12]))
-total = 9 + 11
+total = 17 + 22
 print("结果：%d 项，失败 %d 项" % (total, fails))
 sys.exit(1 if fails else 0)
