@@ -456,6 +456,12 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			if v, ok := st["reserve"]; ok {
 				r.Reserve = int64(toInt(v))
 			}
+			// 今日已领双倍经验日期（机器人 pre_daily 上报，YYYYMMDD；未领=空串）：
+			// 心跳**全量覆盖** —— 机器人端以落盘状态为准，跨日会自然变空/换新日期。
+			// 调度侧用 r.DoubleClaimedToday() 做"领双号优先抓鬼"（见 state.Robot 注释）。
+			if v, ok := st["double_claim_date"]; ok {
+				r.DoubleClaimDate = toStr(v)
+			}
 			if v, ok := st["role_id"]; ok {
 				r.RoleID = toInt(v)
 			}

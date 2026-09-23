@@ -21,12 +21,18 @@
 import hashlib
 import os
 import sys
+import tempfile
 import types
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+# 2026-09-23 状态落盘后, 本自检必须**隔离状态目录**: 否则用例会把 done_date 写进
+# 生产 script/state/ 且同账号跨用例互相影响(全链路用例写完 → 后面用例"今日已处理"
+# 直接跳过)。临时目录 + 每用例独立账号(见下面各 FakeRobot 的 m_account)。
+os.environ["ZCC_PRE_DAILY_STATE_DIR"] = tempfile.mkdtemp(prefix="zcc_pre_daily_selftest_")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRE = os.path.normpath(os.path.join(
@@ -363,7 +369,7 @@ check("T10 全链路: 用卡→导航→等对话→点双倍→点一小时→�
 
 # T11 额度为 0 短路: 提示对话 → 记 info + 今日不再尝试(不刷屏) + 点关闭项收尾
 QUEST.__init__()
-ro2 = FakeRobot()
+ro2 = FakeRobot(m_account=["pre_t11@xy3.com"])
 st2 = pre_daily._get_state(ro2)
 pre_daily.claim_double_exp(ro2)
 st2["phase"] = "dialog"
@@ -381,7 +387,7 @@ check("T11 额度为0短路: 记 info/标记今日不再尝试/点关闭项收�
 
 # T12 文本缺失(文案变化): 记 warn + 放弃 + 点关闭项(不阻塞)
 QUEST.__init__()
-ro3 = FakeRobot()
+ro3 = FakeRobot(m_account=["pre_t12@xy3.com"])
 st3 = pre_daily._get_state(ro3)
 pre_daily.claim_double_exp(ro3)
 st3["phase"] = "dialog"
@@ -394,7 +400,7 @@ check("T12 文案变化: 无可点领取项 → 放弃(不阻塞)+点关闭项+�
 
 # T13 导航失败不阻塞: 无跨图路径 → 放弃并记 warn(不写 quest 错误/不抛)
 QUEST.__init__()
-ro4 = FakeRobot(m_mapid=24)	# 当前图 24, 目标 12 → 走跨图预检
+ro4 = FakeRobot(m_mapid=24, m_account=["pre_t13@xy3.com"])	# 当前图 24, 目标 12 → 走跨图预检
 st4 = pre_daily._get_state(ro4)
 pre_daily.claim_double_exp(ro4)
 FAKE_QE.route_ret = None
@@ -410,7 +416,7 @@ check("T13 导航失败(无跨图路径)不阻塞: 放弃+不调 __teleport_clic
 
 # T14 整体超时看门狗: 到点放弃(返回 True), 不卡抓鬼
 QUEST.__init__()
-ro5 = FakeRobot()
+ro5 = FakeRobot(m_account=["pre_t14@xy3.com"])
 st5 = pre_daily._get_state(ro5)
 pre_daily.claim_double_exp(ro5)
 st5["start_ms"] = pre_daily._now_ms() - pre_daily.TOTAL_TIMEOUT_MS - 1
@@ -420,7 +426,7 @@ check("T14 整体超时看门狗: 到点放弃并返回 True", t5 is True and st
 
 # T15 重复 ghost_start(重置→重发)不重启: 不重复用卡; 超时残留才允许推翻
 QUEST.__init__()
-ro6 = FakeRobot()
+ro6 = FakeRobot(m_account=["pre_t15@xy3.com"])
 st6 = pre_daily._get_state(ro6)
 del FAKE_AS.card_calls[:]
 c1 = pre_daily.claim_double_exp(ro6)

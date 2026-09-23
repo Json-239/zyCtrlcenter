@@ -44,6 +44,10 @@ func (a *API) RoampoolDeps() roampool.Deps {
 //   · 等级不到抓鬼门槛（ghostGate）：任务池同样跳过。
 // 这两类回收给任务池只是空转（90s 后 auto_roam 又派游荡，实测单号 20+ 次往返），
 // 让它们留在游荡池继续游荡（有产出）。
+//
+// 2026-09-23 有领双的必须优先抓鬼（用户口径）：**今日已领双倍**的号不在这里拦 ——
+// 正相反，roampool.PickReclaim 会把它们**置顶优先回收**去抓鬼（双倍有时长）；同时
+// PickExcess 不会把已领双倍的抓鬼号转游荡。这里仍按上面两条客观资格判定。
 func (a *API) roamReclaimEligible(r state.Robot) bool {
 	if a.St != nil && a.St.GhostDoneToday(r.Account) {
 		return false

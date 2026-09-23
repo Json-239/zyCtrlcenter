@@ -44,6 +44,10 @@ type Robot struct {
 	Money   int64 `json:"money,omitempty"`
 	Deposit int64 `json:"deposit,omitempty"`
 	Reserve int64 `json:"reserve,omitempty"`
+	// DoubleClaimDate 今日已成功领取双倍经验的日期（机器人端 pre_daily 上报，YYYYMMDD；
+	// 未领=空）。双倍**有时长**（1/2/4 小时）且每周总量受限 —— 2026-09-23 用户口径
+	// "有领双的必须优先抓鬼"：调度侧据此把该号抓鬼候选置顶、超编回收/派游荡时避开。
+	DoubleClaimDate string         `json:"double_claim_date,omitempty"`
 	RoleID        int            `json:"role_id,omitempty"`
 	Ghost         map[string]any `json:"ghost,omitempty"`
 	// FightStats 今日战斗统计（机器人上报：total/wild/ghost/dur_ms/in_fight；上大屏用）。
@@ -84,6 +88,19 @@ type Robot struct {
 	ErrMsg    string  `json:"err_msg,omitempty"`
 	LastTask  int     `json:"last_task,omitempty"`
 	LastSeen  float64 `json:"last_seen"`
+}
+
+// DoubleClaimedToday 今日是否**已成功领取**双倍经验（机器人心跳 double_claim_date = YYYYMMDD）。
+//
+// 2026-09-23 用户口径："有领双的必须优先抓鬼" —— 双倍有时长，领了不马上用就是浪费。
+// 调度侧据此：抓鬼候选置顶（autotask Priority）、超编回收/派游荡避开（roampool）。
+// 跨日自动失效：机器人端按本地日期上报，中控与机器人同机同时区，口径一致；
+// 缺字段/旧版上报（空串）→ false，保持旧行为。
+func (r Robot) DoubleClaimedToday() bool {
+	if r.DoubleClaimDate == "" {
+		return false
+	}
+	return r.DoubleClaimDate == time.Now().Format("20060102")
 }
 
 // GhostActive 是否有**活跃**抓鬼会话（机器人上报的 ghost.enabled=true；字段存在但已停

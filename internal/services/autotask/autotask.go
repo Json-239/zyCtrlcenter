@@ -63,6 +63,9 @@ type Candidate struct {
 	Online  bool   `json:"online"` // 已在线 → 只需下发任务（不用 add）
 	Level   int    `json:"level,omitempty"`
 	Reason  string `json:"reason,omitempty"` // 为什么挑它（面板显示）
+	// Priority 该候选本轮**优先挑**（2026-09-23 领双号优先抓鬼）：只要它还是候选，
+	// 就先于普通候选被选中（数量不够才用普通候选补足）。随机洗牌仍在同优先级内生效。
+	Priority bool `json:"priority,omitempty"`
 }
 
 // Config 一个策略的配置（面板 start 时传入；运行中可再次 Start 覆盖）。
@@ -380,18 +383,23 @@ func (r *Runner) tickKind(kind Kind, now time.Time) *Round {
 	if n > len(cands) {
 		n = len(cands)
 	}
-	picked := pickRandom(cands, n, r.d.Rand)
+	picked := pickBatch(cands, n, r.d.Rand)
 
 	needOnline := make([]string, 0, len(picked))
 	all := make([]string, 0, len(picked))
+	prioN := 0
 	for _, c := range picked {
 		all = append(all, c.Account)
+		if c.Priority {
+			prioN++ // 今日领双 → 优先抓鬼（面板日志可见）
+		}
 		if !c.Online {
 			needOnline = append(needOnline, c.Account)
 		}
 	}
 	st.picked += len(picked)
-	st.lastMsg = fmt.Sprintf("本轮挑中 %d 个（在跑 %d%s）：%s", len(picked), cur, targetTxt(cfg), strings.Join(all, ", "))
+	st.lastMsg = fmt.Sprintf("本轮挑中 %d 个（在跑 %d%s）：%s%s", len(picked), cur, targetTxt(cfg),
+		strings.Join(all, ", "), prioTxt(prioN))
 	st.nextAt = now.Add(r.interval(cfg))
 	delay := time.Duration(cfg.LaunchDelaySec) * time.Second
 	if cfg.LaunchDelaySec == 0 {
@@ -411,7 +419,8 @@ func (r *Runner) tickKind(kind Kind, now time.Time) *Round {
 			}
 		}
 		rd := Round{At: now, Picked: all, Online: needOnline,
-			Msg: fmt.Sprintf("挑中 %d 个（上线 %d/%d），%s 后下发任务", len(all), sent, len(needOnline), delay)}
+			Msg: fmt.Sprintf("挑中 %d 个（上线 %d/%d），%s 后下发任务%s",
+				len(all), sent, len(needOnline), delay, prioTxt(prioN))}
 		r.record(kind, rd)
 		return &rd
 	}
@@ -420,9 +429,17 @@ func (r *Runner) tickKind(kind Kind, now time.Time) *Round {
 	if r.d.Launch != nil {
 		ok = r.d.Launch(kind, all)
 	}
-	rd := Round{At: now, Picked: all, Msg: launchMsg(kind, all, ok)}
+	rd := Round{At: now, Picked: all, Msg: launchMsg(kind, all, ok) + prioTxt(prioN)}
 	r.record(kind, rd)
 	return &rd
+}
+
+// prioTxt 轮次文案后缀：本轮含"今日领双优先"的号时标注（面板可追溯"领双号优先抓鬼"）。
+func prioTxt(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("（含今日领双优先 %d 个）", n)
 }
 
 func (r *Runner) interval(cfg Config) time.Duration {
@@ -465,6 +482,35 @@ func launchMsg(kind Kind, accs []string, ok bool) string {
 		return fmt.Sprintf("下发%s任务失败（机器人通道未连接）: %s", kind.Label(), strings.Join(accs, ", "))
 	}
 	return fmt.Sprintf("已下发%s任务: %s", kind.Label(), strings.Join(accs, ", "))
+}
+
+// pickBatch 批量挑 n 个：**Priority 候选先挑**，不够再用普通候选随机补足。
+//
+// 2026-09-23 领双号优先抓鬼（用户口径"有领双的必须优先抓鬼"）：双倍有时长，领了要尽快
+// 消耗掉；壳层把"今日已领双倍"的抓鬼候选标 Priority，这里保证它们不被随机洗牌挤掉。
+// 结果按账号升序（稳定，便于日志/测试对照）。
+func pickBatch(cands []Candidate, n int, rnd func(int) int) []Candidate {
+	if n <= 0 || len(cands) == 0 {
+		return nil
+	}
+	prio := make([]Candidate, 0, len(cands))
+	rest := make([]Candidate, 0, len(cands))
+	for _, c := range cands {
+		if c.Priority {
+			prio = append(prio, c)
+		} else {
+			rest = append(rest, c)
+		}
+	}
+	out := make([]Candidate, 0, n)
+	if len(prio) > 0 {
+		out = append(out, pickRandom(prio, n, rnd)...)
+	}
+	if len(out) < n && len(rest) > 0 {
+		out = append(out, pickRandom(rest, n-len(out), rnd)...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
+	return out
 }
 
 // pickRandom 随机取 n 个（不改原切片；rand 注入便于测试）。

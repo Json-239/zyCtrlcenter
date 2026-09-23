@@ -431,6 +431,9 @@ func MapLoads(robots []state.Robot, maps []int) []MapLoad {
 // PickReclaim 从**游荡中**的号里挑 n 个回收：优先挑"所在图**我们号最多**"的那些，
 // 顺带纠偏分布（图人数并列时按账号升序，结果稳定、便于测试）。
 //
+// 2026-09-23 有领双的必须优先抓鬼（用户口径）：**今日已领双倍**的游荡号置顶 —— 双倍
+// 有时长，先把它们回收进任务池去抓鬼，别让加成耗在游荡上。
+//
 // 人数不足 n 就有几个给几个；n<=0 / 没有游荡号 → nil。
 //
 // 2026-09-22 P0 修复（三池交互分析）：eligible 非 nil 时**只挑"回收后真能进任务池"的号**。
@@ -445,6 +448,7 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 	type cand struct {
 		account string
 		count   int
+		prio    bool
 	}
 	cands := make([]cand, 0, len(robots))
 	for _, r := range robots {
@@ -454,12 +458,16 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 		if eligible != nil && !eligible(r) {
 			continue // 2026-09-22 P0：回收后进不了任务池的号不回收（详见函数头注释）
 		}
-		cands = append(cands, cand{account: r.Account, count: load[r.MapID]})
+		cands = append(cands, cand{account: r.Account, count: load[r.MapID],
+			prio: r.DoubleClaimedToday()})
 	}
 	if len(cands) == 0 {
 		return nil
 	}
 	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].prio != cands[j].prio {
+			return cands[i].prio // 2026-09-23 今日领双 → 优先回收去抓鬼
+		}
 		if cands[i].count != cands[j].count {
 			return cands[i].count > cands[j].count // 人多的图先回收
 		}
@@ -498,6 +506,9 @@ func PickIdle(robots []state.Robot, n int) []string {
 // 空闲号走 PickIdle 的正常补位；战斗中/交付中/对话中/导航中的号**一律不碰**。
 // 按账号升序输出（结果稳定，便于测试与日志对照）。
 //
+// 2026-09-23 有领双的必须优先抓鬼（用户口径）：**今日已领双倍**的号一律不转游荡 ——
+// 双倍有时长，把它从抓鬼拉去游荡等于把加成浪费掉（等它把双倍用完/跨日失效后自然可再转）。
+//
 // 为什么不用"所在图人数多"排序：超编收敛关心的是"能不能安全中断"，与图负载无关；
 // 已经超编的号分散在各图，按账号稳定挑即可（每轮 ≤ MaxStep，不会一次搬空）。
 func PickExcess(robots []state.Robot, n int) []string {
@@ -508,6 +519,9 @@ func PickExcess(robots []state.Robot, n int) []string {
 	for _, r := range robots {
 		if !r.GhostActive() || !Interruptible(r) {
 			continue
+		}
+		if r.DoubleClaimedToday() {
+			continue // 2026-09-23 今日领双 → 不转游荡（留着抓鬼，双倍有时长）
 		}
 		cands = append(cands, r.Account)
 	}
@@ -703,7 +717,7 @@ func (k *Keeper) Tick(now time.Time) bool {
 			k.fail("回收", err)
 			return false
 		}
-		k.note(fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，按图人数从多到少）：%s",
+		k.note(fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少）：%s",
 			len(sent), deficit, strings.Join(sent, ",")))
 		return true
 	}

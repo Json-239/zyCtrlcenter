@@ -81,6 +81,17 @@ function fmtMoney(v) {
   return String(Math.round(n))
 }
 
+// 2026-09-23 「双」标记（选号列表）：今日已领双倍经验 —— 机器人心跳 double_claim_date
+//   （YYYYMMDD，机器人端 pre_daily 落盘状态，重启不丢）。
+//   机器人端只在"领取日期 == 当天"时上报该值，跨日心跳自然变空 → 这里**非空即今日**，
+//   不再按浏览器本地日期二次判定（面板可能与机器人不同机/跨时区，二次判定会误标）。
+function hasDouble(row) { return !!row?.double_claim_date }
+function doubleTitle(row) {
+  const d = String(row?.double_claim_date || '')
+  const txt = d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : d
+  return `今日（${txt}）已领双倍经验 · 优先抓鬼（双倍有时长，别派去游荡）`
+}
+
 // 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense)
 async function roamStart(kind, accs, targetMap) {
   const d = detail.value
@@ -803,6 +814,15 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             </el-table-column>
             <el-table-column label="等级" width="66">
               <template #default="{ row }">Lv{{ row.level ?? '--' }}</template>
+            </el-table-column>
+            <!-- 2026-09-23 「双」：今日已领双倍经验（机器人心跳 double_claim_date）。
+                 双倍有时长 → 该号应优先抓鬼（中控调度已把它置顶、不派游荡）。 -->
+            <el-table-column label="双" width="46" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="hasDouble(row)" size="small" type="warning" effect="dark"
+                        :title="doubleTitle(row)">双</el-tag>
+                <span v-else class="muted">—</span>
+              </template>
             </el-table-column>
             <!-- 2026-09-23 货币详情：银两(money) / 储备金(reserve)，数据来自机器人心跳
                  （机器人端 90353 全量 + 90073 增量解析，见 msghandle.match_role_data_handle）。

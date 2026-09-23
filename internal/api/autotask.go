@@ -439,8 +439,15 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			if ghostDailyFull(r) {
 				continue // 今日已抓满（重登也会被服务端拒）
 			}
+			// 2026-09-23 有领双的必须优先抓鬼（用户口径）：今日已领双倍 → Priority，
+			//   由 autotask.pickBatch 保证先于普通候选被挑中（双倍有时长，领了要尽快用）。
+			dbl := r.DoubleClaimedToday()
+			reason := fmt.Sprintf("抓鬼（%d 级）", level)
+			if dbl {
+				reason = fmt.Sprintf("抓鬼（%d 级·今日领双优先）", level)
+			}
 			out = append(out, autotask.Candidate{Account: acc, Online: hasLive && r.Online, Level: level,
-				Reason: fmt.Sprintf("抓鬼（%d 级）", level)})
+				Priority: dbl, Reason: reason})
 
 		case autotask.KindHatch:
 			// 孵化：**在线 + 抓鬼已满 + 有蛋**（口径见 hatchCandidates——
