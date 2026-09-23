@@ -322,6 +322,8 @@ func (h *Handler) onHello(ev map[string]any) {
 	if cleared > 0 {
 		h.Log.Printf("[EVENT] 机器人重启握手(hello)：已把 %d 个号标记离线 → 水位器/自动任务将重新推号", cleared)
 	}
+	// 2026-09-23 技能策略配置：机器人（重）连上即补发一份（重启不丢）
+	h.PushSkillConfig()
 }
 
 func (h *Handler) onRobotOnline(ev map[string]any) {

@@ -193,6 +193,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/robots/clear_removed", a.requireToken(a.handleRobotsClearRemoved)) // 清空"已移除"名单（池子被吃空时一键恢复候选池）
 	mux.HandleFunc("POST /api/robot/restart", a.requireToken(a.handleRobotRestart))
 	mux.HandleFunc("POST /api/robot/reload_scripts", a.requireToken(a.handleReloadScripts)) // 脚本热更（importlib.reload，免重启机器人）
+	// 2026-09-23 技能策略配置（模块地图·战斗卡）：前端可配，保存即下发
+	mux.HandleFunc("GET /api/skill_config", a.handleSkillConfigGet)
+	mux.HandleFunc("POST /api/skill_config", a.requireToken(a.handleSkillConfigPost))
 	mux.HandleFunc("/ws", a.handleWS)
 }
 
