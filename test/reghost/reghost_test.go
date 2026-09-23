@@ -20,6 +20,10 @@ type fake struct {
 	addOK    bool
 	launchOK bool
 	stuck    int // 当日卡死次数（churn 防护用）
+	// 2026-09-23 熔断（capped）：
+	capped   bool      // Capped() 查询结果（独立熔断表是否有效）
+	capCalls int       // Cap() 登记次数
+	capUntil time.Time // Cap() 返回的失效时刻（零值 → 用本地推算的次日 0 点）
 }
 
 func (f *fake) deps() reghost.Deps {
@@ -30,6 +34,8 @@ func (f *fake) deps() reghost.Deps {
 		Add:            func(string) bool { f.added++; f.online = true; return f.addOK },
 		Launch:         func(string) bool { f.launched++; return f.launchOK },
 		Stuck:          func(string) int { return f.stuck },
+		Cap:            func(string, string) time.Time { f.capCalls++; f.capped = true; return f.capUntil },
+		Capped:         func(string) bool { return f.capped },
 		LaunchDelaySec: 8,
 		OfflineWaitSec: 60,
 		OnlineWaitSec:  90,
@@ -141,8 +147,9 @@ func TestFailureStopsAfterMaxAttempts(t *testing.T) {
 	}
 }
 
-// 2026-09-21 churn 防护：当日卡死 ≥3 次 → 不再自动重登（记 failed 供面板看），
-// 免得"卡死→重登→补发→又卡"无限循环；差一次（2 次）仍正常重登。
+// 2026-09-21 churn 防护 / 2026-09-23 升级为显式熔断：当日卡死 ≥3 次 → 不再自动重登，
+// 状态记 capped（明确"熔断到次日"+原因+失效时刻，面板可读），并登记独立熔断表；
+// 差一次（2 次）仍正常重登。
 func TestChurnGuardSkipsReloginAfterLimit(t *testing.T) {
 	f := newFake()
 	f.online = true
@@ -150,15 +157,30 @@ func TestChurnGuardSkipsReloginAfterLimit(t *testing.T) {
 	r := reghost.New(f.deps())
 
 	r.Request("acc@x.com", "钟馗菜单无可动作项(仅说明/离开)")
-	if f.removed != 0 {
-		t.Fatalf("当日卡死已达上限不该再下线重登: removed=%d", f.removed)
+	if f.removed != 0 || f.added != 0 || f.launched != 0 {
+		t.Fatalf("触顶后不该有任何动作（不再空转）: removed=%d added=%d launched=%d",
+			f.removed, f.added, f.launched)
+	}
+	if f.capCalls != 1 {
+		t.Fatalf("触顶应登记熔断表（Cap 回调）: capCalls=%d", f.capCalls)
 	}
 	st := r.Status()
-	if len(st) != 1 || st[0].Phase != reghost.PhaseFailed {
-		t.Fatalf("应记 failed（面板能看到为什么没救它）: %+v", st)
+	if len(st) != 1 || st[0].Phase != reghost.PhaseCapped {
+		t.Fatalf("应记 capped（面板能看到为什么没救它/什么时候恢复）: %+v", st)
 	}
-	if !strings.Contains(st[0].LastMsg, "当日卡死") {
-		t.Fatalf("说明文案应含「当日卡死」: %+v", st[0])
+	if !strings.Contains(st[0].LastMsg, "当日卡死") || !strings.Contains(st[0].LastMsg, "熔断") {
+		t.Fatalf("说明文案应含「当日卡死」「熔断」: %+v", st[0])
+	}
+	wantUntil := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC) // fake now=2026-09-21 12:00 UTC → 次日 0 点
+	if !st[0].CapUntil.Equal(wantUntil) {
+		t.Fatalf("熔断应到次日 0 点: got=%v want=%v", st[0].CapUntil, wantUntil)
+	}
+
+	// 机器人连点重复上报：幂等（不再重复登记/不产生动作）
+	r.Request("acc@x.com", "又卡了")
+	if f.capCalls != 1 || f.removed != 0 || f.added != 0 || f.launched != 0 {
+		t.Fatalf("重复上报应幂等: capCalls=%d removed=%d added=%d launched=%d",
+			f.capCalls, f.removed, f.added, f.launched)
 	}
 
 	// 未达上限（2 次）→ 仍要正常重登
@@ -169,5 +191,83 @@ func TestChurnGuardSkipsReloginAfterLimit(t *testing.T) {
 	r2.Request("acc@x.com", "钟馗对话 7 轮超 30 秒未关闭")
 	if f2.removed != 1 {
 		t.Fatalf("未达上限应正常下线重登: removed=%d", f2.removed)
+	}
+	if f2.capCalls != 0 {
+		t.Fatalf("未达上限不该登记熔断: capCalls=%d", f2.capCalls)
+	}
+}
+
+// 已熔断的号再报卡死（入口闸）：即便当日计数因行删除/中控重启归零，只要熔断表还在就不重登；
+// 熔断期间 Tick 也不产生任何动作（不空转）。
+func TestCappedEntryGuardSkipsRelogin(t *testing.T) {
+	f := newFake()
+	f.online = true
+	f.stuck = 0     // 计数丢了（robot 行被删/重启后）
+	f.capped = true // 但独立熔断表还在
+	r := reghost.New(f.deps())
+
+	r.Request("acc@x.com", "换图推送迟迟未到")
+	if f.removed != 0 || f.added != 0 || f.launched != 0 {
+		t.Fatalf("已熔断不该重登: removed=%d added=%d launched=%d", f.removed, f.added, f.launched)
+	}
+	st := r.Status()
+	if len(st) != 1 || st[0].Phase != reghost.PhaseCapped {
+		t.Fatalf("应显示 capped: %+v", st)
+	}
+	if f.capCalls != 0 {
+		t.Fatalf("已熔断不该重复登记熔断表（幂等）: capCalls=%d", f.capCalls)
+	}
+
+	// 熔断期间（相位 capped）Tick 推进：没有任何动作；跨日前条目保留
+	f.online = false
+	r.Tick(f.now.Add(time.Hour))
+	if f.added != 0 || f.removed != 0 || f.launched != 0 {
+		t.Fatalf("熔断期间不该有任何动作: removed=%d added=%d launched=%d",
+			f.removed, f.added, f.launched)
+	}
+	if len(r.Status()) != 1 {
+		t.Fatalf("未到期前应保留 capped 状态（面板可见）: %+v", r.Status())
+	}
+}
+
+// 熔断到期（跨日 0 点）→ 条目自动清除；新的一天计数归零 → 卡死事件恢复正常重登。
+func TestCappedExpiresNextDay(t *testing.T) {
+	f := newFake()
+	f.online = true
+	f.stuck = reghost.ChurnLimit
+	r := reghost.New(f.deps())
+	r.Request("acc@x.com", "触顶")
+	if st := r.Status(); len(st) != 1 || st[0].Phase != reghost.PhaseCapped {
+		t.Fatalf("应先进入 capped: %+v", st)
+	}
+
+	// 跨日：Tick 到次日 0 点后 → 条目自动清除（无需人工）
+	r.Tick(time.Date(2026, 9, 22, 0, 0, 1, 0, time.UTC))
+	if len(r.Status()) != 0 {
+		t.Fatalf("跨日应自动清除熔断条目: %+v", r.Status())
+	}
+
+	// 新的一天：计数归零、熔断表失效 → 卡死事件正常走"下线→重登"
+	f.now = time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	f.stuck = 0
+	f.capped = false
+	r.Request("acc@x.com", "新的一天又卡")
+	st := r.Status()
+	if len(st) != 1 || st[0].Phase != reghost.PhaseWaitingOffline || f.removed != 1 {
+		t.Fatalf("跨日后应恢复正常重登: %+v removed=%d", st, f.removed)
+	}
+}
+
+// Cap 回调返回壳层给的失效时刻（独立熔断表口径）时，状态里用它，而不是本地推算值。
+func TestCappedUsesShellUntil(t *testing.T) {
+	f := newFake()
+	f.stuck = reghost.ChurnLimit
+	custom := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	f.capUntil = custom
+	r := reghost.New(f.deps())
+	r.Request("acc@x.com", "触顶")
+	st := r.Status()
+	if len(st) != 1 || !st[0].CapUntil.Equal(custom) {
+		t.Fatalf("应以壳层给的失效时刻为准: %+v", st)
 	}
 }

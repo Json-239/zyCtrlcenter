@@ -32,6 +32,15 @@ type Robot struct {
 	// 与 GhostDoneToday 同款：由 Snapshot() 从 paused 表填入，**不存 robot 行**
 	// （行会被 Remove 删掉，标记必须独立存活）。
 	Paused bool `json:"paused,omitempty"`
+	// RestoreCapped 当日卡死熔断（2026-09-23）：当日卡死 ≥ ChurnLimit 次后，该号到
+	// **次日 0 点**前不再自动重登/补发/被自动任务拉起（等次日自动恢复或手动解除）。
+	// 与 GhostDoneToday/Paused 同款：Snapshot() 从 restoreCap 表填入，**不存 robot 行**
+	// （行会被 Remove 删掉；独立存活才能挡住"删行→计数归零→同日又重登 3 次"）。
+	RestoreCapped bool `json:"restore_capped,omitempty"`
+	// CapUntil 熔断失效时刻（RFC3339 本地时间；RestoreCapped=true 时有意义）。
+	CapUntil string `json:"cap_until,omitempty"`
+	// CapReason 触顶原因（机器人给的原文，面板显示"为什么被熔断"）。
+	CapReason string `json:"cap_reason,omitempty"`
 	RoleName  string `json:"role_name,omitempty"`
 	Level     int    `json:"level"`
 	// LevelPending / LevelPendingN 等级"大幅回退"待确认（连续 LevelPendingN 次上报同一新值才真切换，
@@ -164,6 +173,9 @@ type State struct {
 	// paused 账号 → 人工暂停（2026-09-23 R3）。独立于 robots 行：行会被 Remove 删掉，
 	//   暂停意图必须留着（下线再上线仍保持暂停，直到用户显式「启动/补发/上线」）。
 	paused map[string]bool
+	// restoreCap 账号 → 当日卡死熔断记录（2026-09-23）。同样独立于 robots 行：
+	//   行会被 Remove 删掉（陈旧清理/下机），熔断标记必须独立存活 + 跨日惰性失效。
+	restoreCap map[string]restoreCap
 
 	mu sync.RWMutex
 
@@ -175,13 +187,25 @@ type State struct {
 	connAddr      string
 }
 
+// restoreCap 一条"当日卡死熔断"记录（2026-09-23）。
+//
+// 语义：该号当日卡死次数触顶（reghost.ChurnLimit）→ 到 Until 前不再自动重登/补发/
+// 被自动任务拉起。Until = 触顶日的**次日 0 点**（服务端按 0 点切日，所有"当日"标记
+// 同口径）；跨日惰性失效（不跑后台清理线程）。
+type restoreCap struct {
+	Until  time.Time // 失效时刻（次日 00:00 本地时间）
+	Reason string    // 触顶原因（机器人给的原文）
+	At     time.Time // 触顶时刻
+}
+
 // New 创建空状态。
 func New() *State {
 	return &State{
-		robots:  make(map[string]*Robot),
-		removed: make(map[string]bool),
-		paused:  make(map[string]bool),
-		curServ: make(map[string]string),
+		robots:     make(map[string]*Robot),
+		removed:    make(map[string]bool),
+		paused:     make(map[string]bool),
+		restoreCap: make(map[string]restoreCap),
+		curServ:    make(map[string]string),
 	}
 }
 
@@ -271,7 +295,8 @@ func (s *State) Remove(account string) {
 func (s *State) Snapshot() []Robot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	today := time.Now().Format("20060102")
+	now := time.Now()
+	today := now.Format("20060102")
 	out := make([]Robot, 0, len(s.robots))
 	for _, r := range s.robots {
 		cp := *r
@@ -279,6 +304,12 @@ func (s *State) Snapshot() []Robot {
 		cp.GhostDoneToday = s.ghostUnavail[cp.Account] == today
 		// 人工暂停（R3）：同样在同一把锁内查，保证与行数据一致
 		cp.Paused = s.paused[cp.Account]
+		// 当日卡死熔断（2026-09-23）：独立表 → 面板字段（跨日自动不填）
+		if c, ok := s.restoreCap[cp.Account]; ok && now.Before(c.Until) {
+			cp.RestoreCapped = true
+			cp.CapUntil = c.Until.Format(time.RFC3339)
+			cp.CapReason = c.Reason
+		}
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
@@ -549,6 +580,123 @@ func (s *State) PausedList() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ---------------------------------------------------------------- restoreCap（卡死熔断）
+
+// MarkRestoreCapped 登记"当日卡死熔断"（reghost 触顶时调）：该号到**次日 0 点**前不再
+// 自动重登/补发/被自动任务拉起；跨日惰性失效（与 GhostDoneToday 同款）。返回失效时刻。
+//
+// 为什么要独立表（2026-09-23）：原先触顶只依赖 robots 行里的 StuckCount，而行会被
+// Remove 删掉（陈旧清理/下机）→ 计数归零 → 同一天又给 3 次重登机会。独立表让熔断语义
+// 跨过行删除存续；中控重启（内存清零）或手动「解除熔断」可提前结束。
+//
+// 幂等：已存在且未过期 → 保留首次记录（不覆盖 Until/Reason，重复的上报不刷屏）。
+func (s *State) MarkRestoreCapped(account, reason string) time.Time {
+	if account == "" {
+		return time.Time{}
+	}
+	now := time.Now()
+	until := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.restoreCap == nil {
+		s.restoreCap = map[string]restoreCap{}
+	}
+	if c, ok := s.restoreCap[account]; ok && now.Before(c.Until) {
+		return c.Until
+	}
+	s.restoreCap[account] = restoreCap{Until: until, Reason: reason, At: now}
+	return until
+}
+
+// IsRestoreCapped 该号现在是否处于卡死熔断（顺手清掉过期记录 —— 跨日自动解除）。
+func (s *State) IsRestoreCapped(account string) bool {
+	if account == "" {
+		return false
+	}
+	_, _, ok := s.RestoreCapInfo(account)
+	return ok
+}
+
+// RestoreCapInfo 返回该号熔断详情（面板/接口用；未熔断 ok=false）。
+func (s *State) RestoreCapInfo(account string) (until time.Time, reason string, ok bool) {
+	if account == "" {
+		return time.Time{}, "", false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.restoreCap[account]
+	if !ok {
+		return time.Time{}, "", false
+	}
+	if !now.Before(c.Until) {
+		delete(s.restoreCap, account) // 跨日惰性失效
+		return time.Time{}, "", false
+	}
+	return c.Until, c.Reason, true
+}
+
+// RestoreCappedList 当前处于熔断的账号清单（升序；含失效时刻与原因）。
+// 面板/状态接口用它一眼看到"哪些号今天不救了、什么时候恢复"。
+func (s *State) RestoreCappedList() []map[string]any {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]map[string]any, 0, len(s.restoreCap))
+	for a, c := range s.restoreCap {
+		if !now.Before(c.Until) {
+			delete(s.restoreCap, a) // 跨日惰性失效
+			continue
+		}
+		out = append(out, map[string]any{
+			"account": a, "cap_until": c.Until.Format(time.RFC3339), "cap_reason": c.Reason,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["account"].(string) < out[j]["account"].(string) })
+	return out
+}
+
+// ClearRestoreCapped 解除该号熔断（手动解除/到点外部清理用）；返回原本是否处于熔断。
+func (s *State) ClearRestoreCapped(account string) bool {
+	if account == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.restoreCap[account]
+	delete(s.restoreCap, account)
+	return ok
+}
+
+// ClearAllRestoreCapped 解除全部熔断，返回被解除的账号（升序）。
+func (s *State) ClearAllRestoreCapped() []string {
+	s.mu.Lock()
+	out := make([]string, 0, len(s.restoreCap))
+	for a := range s.restoreCap {
+		out = append(out, a)
+	}
+	s.restoreCap = make(map[string]restoreCap)
+	s.mu.Unlock()
+	sort.Strings(out)
+	return out
+}
+
+// ClearStuckToday 清零该号 robot 行内的"当日卡死计数"（StuckCount/StuckDay）。
+//
+// 解除熔断时一并调（reghost 触顶判定 / restorer 补发闸 / autotask 候选过滤都读它）：
+// 不清的话，即使熔断表被解除，这些判据仍会按旧计数拦着该号（"解除了还是不起作用"）。
+// 行不存在（已被删）则无事 —— 计数本来就不在。
+func (s *State) ClearStuckToday(account string) {
+	if account == "" {
+		return
+	}
+	s.mu.Lock()
+	if r, ok := s.robots[account]; ok {
+		r.StuckCount, r.StuckDay = 0, ""
+	}
+	s.mu.Unlock()
 }
 
 // ---------------------------------------------------------------- 连接/服务器

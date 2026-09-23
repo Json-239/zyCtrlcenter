@@ -13,6 +13,8 @@
 //	  → waiting_online（已重新 add，等它登录/上报）
 //	  → waiting_launch（上线了，等到 NextAt）
 //	  → done / failed（连续失败到上限 → 交人工）
+//	另有 capped（2026-09-23）：当日卡死 ≥ ChurnLimit → **熔断到次日**（不再自动重登，
+//	  面板显示明确原因与恢复时刻；到期/中控重启/手动解除后自动清零）。
 package reghost
 
 import (
@@ -44,8 +46,11 @@ const (
 	PhaseWaitingOffline Phase = "waiting_offline"
 	PhaseWaitingOnline  Phase = "waiting_online"
 	PhaseWaitingLaunch  Phase = "waiting_launch"
-	PhaseDone           Phase = "done"
-	PhaseFailed         Phase = "failed"
+	// PhaseCapped 当日卡死触顶 → 熔断到次日（2026-09-23）：
+	// 明确的中性语义 —— 不是"恢复失败"（failed），而是"今天不再救、等跨日"。
+	PhaseCapped Phase = "capped"
+	PhaseDone   Phase = "done"
+	PhaseFailed Phase = "failed"
 )
 
 // Status 一个号的恢复状态（面板显示）。
@@ -58,6 +63,8 @@ type Status struct {
 	Since     time.Time `json:"since"`
 	NextAt    time.Time `json:"next_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// CapUntil 熔断失效时刻（Phase=capped 时有意义）：到点自动清除，跨日后可再重登。
+	CapUntil time.Time `json:"cap_until,omitempty"`
 }
 
 // Deps 依赖（壳层提供真实动作；测试注入假的）。
@@ -71,6 +78,12 @@ type Deps struct {
 	// Stuck 该号"当日卡死次数"（churn 防护：≥ ChurnLimit 不再自动重登）。
 	// nil = 不检查（老行为）。
 	Stuck func(account string) int
+	// Cap 触顶登记（2026-09-23）：壳层写"独立熔断表"（跨 robot 行删除存续、跨日惰性失效），
+	// 返回熔断失效时刻。nil = 不登记（老行为：只在内存里记一条 capped 状态）。
+	Cap func(account, reason string) time.Time
+	// Capped 该号是否**已处于熔断**（入口闸）：即便 Stuck 计数因行被删/重启丢失，
+	// 只要熔断表还在就不重登。nil = 不检查。
+	Capped func(account string) bool
 
 	LaunchDelaySec int
 	OfflineWaitSec int
@@ -129,27 +142,30 @@ func (r *Runner) Request(account, reason string) {
 		return
 	}
 	now := r.d.Now()
+	// 2026-09-23：已熔断（独立表，跨 robot 行删除存续）→ 幂等记一条 capped 状态并静默返回。
+	// 机器人连点上报时不会刷日志 —— 首次触顶的日志在下面触顶分支打。
+	if r.d.Capped != nil && r.d.Capped(account) {
+		r.markCapped(account, reason, now, false, true)
+		return
+	}
+	// 2026-09-21 churn 防护：当日卡死 ≥ ChurnLimit 次（反复卡又反复重登）→ 不再自动重登。
+	// 2026-09-23：触顶语义升级为**显式熔断**（capped）—— 状态与恢复时刻对面板可见，
+	// 并写入壳层的独立熔断表（restorer/autotask 据此停止补发与候选，跨行删除仍有效）。
+	// 注意：判定放在**冷却去重之前** —— 第 3 次卡死时即便上一轮重登还在途，也立即熔断
+	// （否则请求被冷却吞掉 → 计数虚挂 3 却没有任何熔断记录，调度侧静默拦死无法解释）。
+	if r.d.Stuck != nil && r.d.Stuck(account) >= ChurnLimit {
+		r.markCapped(account, reason, now, true, false)
+		return
+	}
 	r.mu.Lock()
 	if e, ok := r.m[account]; ok {
 		// 冷却期内（或已经在跑）不重复登记 —— 机器人会连点 15 次才报一次错，
 		// 但多个入口（error / ghost_offline）可能各报一次。
-		if e.st.Phase != PhaseDone && e.st.Phase != PhaseFailed && now.Sub(e.st.Since) < time.Duration(r.d.CooldownSec)*time.Second {
+		if e.st.Phase != PhaseDone && e.st.Phase != PhaseFailed && e.st.Phase != PhaseCapped &&
+			now.Sub(e.st.Since) < time.Duration(r.d.CooldownSec)*time.Second {
 			r.mu.Unlock()
 			return
 		}
-	}
-	// 2026-09-21 churn 防护：当日卡死 ≥ ChurnLimit 次（反复卡又反复重登）→ 不再自动重登。
-	// 记一条 failed 状态供面板看到"为什么没救它"，等人工处理 / 跨日自动清零。
-	// 判据与 autotaskCandidates 一致（那里是"不再自动拉起"，这里是"不再自动重登"）。
-	if r.d.Stuck != nil && r.d.Stuck(account) >= ChurnLimit {
-		r.m[account] = &entry{st: Status{
-			Account: account, Phase: PhaseFailed, Reason: reason,
-			Since: now, UpdatedAt: now,
-			LastMsg: fmt.Sprintf("当日卡死已达 %d 次，不再自动重登（等人工/跨日清零）", ChurnLimit),
-		}}
-		r.mu.Unlock()
-		r.d.Log("[REGHOST] %s 跳过重登：当日卡死已达上限 %d 次（%s）", account, ChurnLimit, reason)
-		return
 	}
 	r.m[account] = &entry{st: Status{
 		Account: account, Phase: PhaseWaitingOffline, Reason: reason,
@@ -168,6 +184,43 @@ func (r *Runner) Request(account, reason string) {
 		}
 		r.mu.Unlock()
 	}
+}
+
+// markCapped 记"当日卡死触顶 → 熔断到次日"：明确状态（面板可见原因与恢复时刻）+ 登记
+// 独立熔断表（壳层提供 Cap；nil 时用本地推算的次日 0 点兜底）。
+//
+// register=false：该号已在熔断表里（Capped 命中）→ 只补记内存状态，不重复登记表；
+// quiet=true：重复上报的去重写（不刷日志）。首次触顶（phase 从非 capped 变 capped）才打日志。
+// 熔断期间**不执行任何动作**（不 Remove/Add/Launch）—— 这正是"不再空转"的落点。
+func (r *Runner) markCapped(account, reason string, now time.Time, register, quiet bool) {
+	until := nextDay0(now)
+	if register && r.d.Cap != nil {
+		if u := r.d.Cap(account, reason); !u.IsZero() {
+			until = u
+		}
+	}
+	r.mu.Lock()
+	prev, existed := r.m[account]
+	if !register && existed && prev.st.Phase == PhaseCapped && !prev.st.CapUntil.IsZero() {
+		until = prev.st.CapUntil // 已有条目：保留原失效时刻（熔断表里的权威值）
+	}
+	first := !existed || prev.st.Phase != PhaseCapped
+	r.m[account] = &entry{st: Status{
+		Account: account, Phase: PhaseCapped, Reason: reason,
+		Since: now, UpdatedAt: now, CapUntil: until,
+		LastMsg: fmt.Sprintf("当日卡死已达上限 %d 次：熔断到 %s 自动恢复（面板可手动解除，期间不自动重登/补发）",
+			ChurnLimit, until.Format("01-02 15:04")),
+	}}
+	r.mu.Unlock()
+	if first && !quiet {
+		r.d.Log("[REGHOST] %s 跳过重登：当日卡死已达上限 %d 次（%s）；已熔断到 %s，期间不再自动重登/补发",
+			account, ChurnLimit, reason, until.Format("2006-01-02 15:04"))
+	}
+}
+
+// nextDay0 次日本地 0 点（"当日"标记的统一失效时刻；服务端按 0 点切日）。
+func nextDay0(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
 }
 
 // Cancel 手动停止/下机时清除（对齐参考实现：停了就不许自动拉起）。
@@ -223,6 +276,7 @@ func (r *Runner) step(account string, now time.Time) (Status, bool) {
 	nextAt := e.st.NextAt
 	attempts := e.st.Attempts
 	since := e.st.Since
+	capUntil := e.st.CapUntil
 	r.mu.Unlock()
 
 	online := false
@@ -274,6 +328,18 @@ func (r *Runner) step(account string, now time.Time) (Status, bool) {
 			s.LastMsg = "已重登并补发任务（恢复完成）"
 			s.UpdatedAt = now
 		})
+
+	case PhaseCapped:
+		// 熔断到次日（2026-09-23）：期间不做任何动作 —— 等跨日/中控重启/面板手动解除。
+		// 到点自动清除条目（跨日后当日卡死计数也归零，下次卡死可正常走重登）。
+		if !now.Before(capUntil) {
+			r.mu.Lock()
+			if e := r.m[account]; e != nil && e.st.Phase == PhaseCapped && !now.Before(e.st.CapUntil) {
+				delete(r.m, account)
+			}
+			r.mu.Unlock()
+		}
+		return Status{}, false
 
 	case PhaseDone, PhaseFailed:
 		// 保留 10 分钟供面板确认，之后自动清掉

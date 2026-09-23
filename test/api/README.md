@@ -10,6 +10,7 @@
 | `api_test.go` | 入口/状态/链文件驱动/下发内容/机器人管理/日志/协议映射/鉴权/404 |
 | `start_auto_test.go` / `start_ghost_test.go` | 按意图自动分配 / **抓鬼带导航载荷、缺数据硬失败、拒绝导航数据、条件不匹配 warnings** |
 | `restore_test.go` | 补发接口（手动触发、跳过在跑、**合并下发**） |
+| `capped_test.go` | **卡死熔断（capped）**：触顶停手（第 3 次零命令）+ 面板字段（`restore_capped/cap_until/cap_reason`、顶层名单、reghost `capped` 相位）+ 不进候选 + 全表补发回带 `capped_skipped` + 指定账号补发=解除 + `POST /api/reghost/resume` |
 | `modules_test.go` | **模块地图接口**（注册表口径 + 最近一次测试报告） |
 | `chainplan_test.go` / `intents_test.go` / `create_test.go` / `verify_test.go` / `verify_job_test.go` | 模块视图 / 意图表 / 建号 / 验证 |
 | `create_throttle_test.go` | **注册自适应限速**（112 降速 / 连续成功回升 / 抖动 / 请求只能更保守）+ 建号响应 `throttle` 统计 |
@@ -93,6 +94,9 @@
 | `TestAccountsCreateThrottleSlowsDownOn112` | 假服注册固定回 112 | 有效并发 8→4→2（连续两次）；结果带 `errid=112`，提示点明风控 |
 | `TestRandomWalkDirectedMapsGate` | 定向派发不带 maps / 带白名单（2026-09-23 P0-a） | 命令**补** `maps=[目标图]`（机器人端不再误判"给定选图全被排除"）；显式白名单原样保留 |
 | `TestRoampoolInflightParams` | POST /api/roampool 写 `inflight_ttl_sec`/`backoff_sec`（2026-09-23 P1） | 可写可读；非法档位（0 秒）拒绝且不改动已有参数；`inflight_pending`/`idle_streak` 暴露 |
+| `TestStuckCapAtChurnLimitStopsRelogin` | 当日卡死 3 次（事件链） | 前 2 次正常下线重登；第 3 次**零命令**（熔断）；`/api/status` 行带 `restore_capped/cap_until/cap_reason` + 顶层 `restore_capped[]`；`/api/autotask.reghost[]` 出现 `capped` 相位 |
+| `TestCappedSkipsDispatchAndManualRestoreUncaps` | 熔断号的候选/补发闸（有对照号） | 熔断号不进候选；全表补发被拦且回带 `capped_skipped`；**指定账号补发 = 解除 + 补发**（回带 `uncapped`、机器人实收 ghost_start） |
+| `TestRegHostResumeEndpoint` | POST /api/reghost/resume | 未熔断回带 `not_capped`；指定解除/全量解除；解除后 `/api/status` 不再带标记 |
 
 ## 已知限制
 - WS 端到端推送未在此覆盖（握手/帧由 `test/wsutil` 覆盖，广播口径由 `test/event` 覆盖）。

@@ -66,7 +66,8 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"current_keys":            map[string]any{"server": serverKey, "zone": zoneKey},
 		"zone_counts":             a.St.ZoneCounts(),
 		"removed":                 a.St.RemovedList(),
-		"paused":                  a.St.PausedList(), // 2026-09-23 R3：人工暂停名单（停止按钮打标）
+		"paused":                  a.St.PausedList(),        // 2026-09-23 R3：人工暂停名单（停止按钮打标）
+		"restore_capped":          a.St.RestoreCappedList(), // 2026-09-23 卡死熔断名单（触顶→等次日；解除走 /api/reghost/resume）
 		"robot_connected":         a.Ctrl.Connected(),
 		"ctrl_addr":               a.Ctrl.Addr(),
 		"ctrl_zone":               a.Ctrl.Tag(),
@@ -181,6 +182,14 @@ func (a *API) handleIntentsRestore(w http.ResponseWriter, r *http.Request) {
 	} else {
 		a.resumeAccounts(nil)
 	}
+	// 2026-09-23 卡死熔断：**指定账号**的「立即补发」= 用户要救它 → 一并解除该号熔断
+	// （清熔断表 + robot 行内当日卡死计数，否则 Skip 闸仍按旧计数拦下，观感"解除了也不动"）。
+	// 全表补发**不**批量解除：熔断号多（今天 50 个），一次点击全放开会把 churn 循环全部重启；
+	// 要批量解除走 /api/reghost/resume，单个解除指定 account 即可。
+	uncapped := []string{}
+	if only != "" {
+		uncapped, _ = a.uncapAccounts([]string{only})
+	}
 	acts := a.Restorer.TickForce(time.Now(), true)
 
 	// 先按账号过滤（每个号单独点「补发」时只处理它），再合并 —— 顺序反了会把别的号也带出去
@@ -224,8 +233,18 @@ func (a *API) handleIntentsRestore(w http.ResponseWriter, r *http.Request) {
 	if skippedGroups > 0 {
 		msg = "部分号未补发：载荷不可用（" + itoa(skippedGroups) + " 批），详情见 actions[].msg"
 	}
+	// 全表补发时回带"被当日卡死熔断拦下"的名单（不静默 —— 否则用户以为漏发/失效）：
+	// 想解除就指定账号补发（自动解除），或调 /api/reghost/resume。
+	cappedSkipped := []map[string]any{}
+	if only == "" && a.St != nil {
+		cappedSkipped = a.St.RestoreCappedList()
+		if len(cappedSkipped) > 0 {
+			msg += "；其中 " + itoa(len(cappedSkipped)) + " 个号已因当日卡死熔断（见 capped_skipped；可指定 account 补发以解除，或调 /api/reghost/resume）"
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "sent": sentAccounts, "commands": commands, "skipped": skipped,
+		"uncapped": uncapped, "capped_skipped": cappedSkipped,
 		"actions": actions, "msg": msg,
 	})
 }

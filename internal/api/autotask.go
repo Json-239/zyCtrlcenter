@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,17 @@ func (a *API) ReghostDeps() reghost.Deps {
 		Log: func(format string, args ...any) { a.Log.Printf(format, args...) },
 		// churn 防护：当日卡死 ≥3 次 → 不再自动重登（与 autotaskCandidates 同口径）。
 		Stuck: a.stuckCountToday,
+		// 2026-09-23：触顶 → 写"独立熔断表"（跨 robot 行删除存续、跨日惰性失效）——
+		// 面板据此显示 restore_capped/cap_until/cap_reason，调度侧据此停止补发/候选。
+		Cap: func(acc, reason string) time.Time {
+			if a.St == nil {
+				return time.Time{}
+			}
+			return a.St.MarkRestoreCapped(acc, reason)
+		},
+		Capped: func(acc string) bool {
+			return a.St != nil && a.St.IsRestoreCapped(acc)
+		},
 	}
 }
 
@@ -139,6 +151,15 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	return func(kind, account string) (bool, string) {
 		if a.St != nil && a.St.IsPaused(account) {
 			return true, "人工暂停（面板点过「停止」；再点「启动/立即补发/上线」即解除）"
+		}
+		// 2026-09-23 卡死熔断闸：当日卡死触顶的号 → 不再自动补发（**对所有 kind**，
+		// 与人工暂停同层）。独立熔断表不受 robot 行删除影响；跨日自动失效，
+		// 或由面板「解除熔断」/「立即补发该号」提前解除（壳层清表 + 清当日计数）。
+		if a.St != nil {
+			if until, _, capped := a.St.RestoreCapInfo(account); capped {
+				return true, "当日卡死已熔断（" + until.Format("01-02 15:04") +
+					" 自动恢复；面板「解除熔断」或「立即补发该号」可提前解除）"
+			}
 		}
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
@@ -511,6 +532,11 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 		// 2026-09-23 R3（操作健壮性审计）：人工暂停（面板点过「停止/停链」）→ 不自动拉起。
 		// 再次「启动 / 立即补发 / 上线」会清标（壳层负责），不在这里静默过期。
 		if a.St != nil && a.St.IsPaused(acc) {
+			continue
+		}
+		// 2026-09-23 卡死熔断：当日卡死触顶（restore_capped）→ 今天不再当任何池的候选
+		// （独立熔断表，跨行删除存续；跨日自动失效 / 面板手动解除后自然回到候选）。
+		if a.St != nil && a.St.IsRestoreCapped(acc) {
 			continue
 		}
 		// 2026-09-23 R2/R1：刚派发、命令还没生效的号不算候选 ——
@@ -1038,6 +1064,76 @@ func (a *API) handleRegHostCancel(w http.ResponseWriter, r *http.Request) {
 		msg = acc + " 没有待恢复记录"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "canceled": ok, "msg": msg})
+}
+
+// handleRegHostResume 解除"当日卡死熔断"（2026-09-23）：让 capped 号提前回到自动通道。
+//
+//	POST /api/reghost/resume
+//	{} 或 {"account": "a@x.com"}   （省略 account = 全部解除）
+//
+// 语义：熔断本来跨日 0 点自动失效；这里是**提前解除**（等于告诉系统"今天还愿意再给它
+// 3 次重登机会"）。解除后：
+//   - 清独立熔断表 + robot 行内当日卡死计数 + reghost 内存条目；
+//   - 该号回到正常自动通道（下一轮 autotask/restorer 按意图拉起；若仍卡 ERROR 则按
+//     既有口径不补发 —— 等它自己恢复或人工「上线/重登」）。
+func (a *API) handleRegHostResume(w http.ResponseWriter, r *http.Request) {
+	acc := strings.TrimSpace(toStr(readBody(r)["account"]))
+	var resumed, notCapped []string
+	if acc != "" {
+		resumed, notCapped = a.uncapAccounts([]string{acc})
+	} else if a.St != nil {
+		snap := a.St.RestoreCappedList()
+		accs := make([]string, 0, len(snap))
+		for _, it := range snap {
+			if s, _ := it["account"].(string); s != "" {
+				accs = append(accs, s)
+			}
+		}
+		resumed, notCapped = a.uncapAccounts(accs)
+	}
+	msg := fmt.Sprintf("已解除 %d 个号的卡死熔断（回到自动通道；跨日 0 点本会自动解除）", len(resumed))
+	if acc != "" && len(resumed) == 0 {
+		msg = acc + " 未处于卡死熔断（无需解除）"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "resumed": resumed, "count": len(resumed), "not_capped": notCapped, "msg": msg,
+	})
+}
+
+// uncapAccounts 解除一批号的"当日卡死熔断"（手动解除入口；2026-09-23）：
+//   - 清独立熔断表（提前结束"等次日"）；
+//   - 清 robot 行内当日卡死计数（不清的话 restorer 补发闸 / autotask 候选过滤仍按旧计数拦着）；
+//   - 取消 reghost 内存里的 capped 条目（面板"待恢复"列表立刻清干净，不必等跨日）。
+//
+// 返回 (实际解除的号, 未处于熔断的号)，均升序。幂等：重复调用不报错。
+// "有熔断痕迹"= 熔断表有条目 **或** 行内当日卡死计数 ≥ ChurnLimit（中控重启后表空、
+// 计数仍在的半态 —— 用户点解除时必须一并清掉，否则"解除无效"）。
+func (a *API) uncapAccounts(accs []string) (resumed, notCapped []string) {
+	resumed, notCapped = []string{}, []string{}
+	for _, acc := range accs {
+		if acc == "" {
+			continue
+		}
+		was := false
+		if a.St != nil {
+			was = a.St.ClearRestoreCapped(acc)
+			if a.stuckCountToday(acc) >= reghost.ChurnLimit {
+				was = true
+			}
+			a.St.ClearStuckToday(acc)
+		}
+		if a.Reghost != nil {
+			a.Reghost.Cancel(acc)
+		}
+		if was {
+			resumed = append(resumed, acc)
+		} else {
+			notCapped = append(notCapped, acc)
+		}
+	}
+	sort.Strings(resumed)
+	sort.Strings(notCapped)
+	return
 }
 
 // pickInt 取请求值（<=0/-1 表示"没传，用原值"）。

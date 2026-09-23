@@ -43,6 +43,7 @@
 //	GET  /api/roampool        游荡池 keeper 状态（在游荡/空闲/任务池缺口/最近动作）
 //	POST /api/roampool        设置游荡池参数（enabled/target/interval_sec/max_step/minutes/balance/maps…，可选鉴权）
 //	POST /api/reghost/cancel  取消某个号的卡死自动重登恢复（可选鉴权）
+//	POST /api/reghost/resume  解除"当日卡死熔断"（单个/全部；让 capped 号提前回到自动通道，可选鉴权）
 //	GET  /api/waterline       在线水位保持器状态（当前/目标/差值/来源/待下线；面板少一次请求）
 //	POST /api/waterline       设置水位参数（enabled/target/dead_zone/max_step/interval_sec 等，可选鉴权）
 //	GET  /ws                  实时事件推送（WebSocket）
@@ -182,6 +183,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/roampool", a.handleRoampoolGet)
 	mux.HandleFunc("POST /api/roampool", a.requireToken(a.handleRoampoolPost))
 	mux.HandleFunc("POST /api/reghost/cancel", a.requireToken(a.handleRegHostCancel))
+	mux.HandleFunc("POST /api/reghost/resume", a.requireToken(a.handleRegHostResume))
 	// 在线水位保持器（当前区在线人数维持在目标附近：不足补号/超出压号；默认关）
 	mux.HandleFunc("GET /api/livecount", a.handleLiveCountGet)
 	mux.HandleFunc("POST /api/livecount", a.requireToken(a.handleLiveCountSet))
