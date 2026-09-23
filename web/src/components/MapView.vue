@@ -71,6 +71,16 @@ const detailWalk = computed(() => detail.value?.walk || null)
 const TAG_TYPE = { ok: 'success', warn: 'warning', danger: 'danger', info: 'primary', dim: 'info' }
 function stateType(s) { return TAG_TYPE[stateTagClass(s)] || 'info' }
 
+// 2026-09-23 货币缩写（选号列表「银两 / 储备」列）：0/缺省 → '-'；
+//   1234567 → '123.5万'；123456789 → '1.2亿'；<1万 原样。
+function fmtMoney(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return '-'
+  if (n >= 1e8) return (n / 1e8).toFixed(1) + '亿'
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + '万'
+  return String(Math.round(n))
+}
+
 // 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense)
 async function roamStart(kind, accs, targetMap) {
   const d = detail.value
@@ -793,6 +803,18 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             </el-table-column>
             <el-table-column label="等级" width="66">
               <template #default="{ row }">Lv{{ row.level ?? '--' }}</template>
+            </el-table-column>
+            <!-- 2026-09-23 货币详情：银两(money) / 储备金(reserve)，数据来自机器人心跳
+                 （机器人端 90353 全量 + 90073 增量解析，见 msghandle.match_role_data_handle）。
+                 0/缺省显示 '-'；完整数值见悬浮提示。 -->
+            <el-table-column label="银两 / 储备" width="140">
+              <template #default="{ row }">
+                <span class="mono ok-text"
+                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.money) }}</span>
+                <span class="muted"> / </span>
+                <span class="mono warn-text"
+                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.reserve) }}</span>
+              </template>
             </el-table-column>
             <el-table-column label="游荡" width="80">
               <template #default="{ row }">

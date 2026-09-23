@@ -445,6 +445,17 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			if v, ok := st["fpp"]; ok {
 				r.Fpp = toInt(v)
 			}
+			// 货币详情（机器人端 90353 全量 / 90073 增量解析成 m_money/m_desposit/m_reserve，
+			// 心跳携带）：money=银两 / deposit=钱庄存款 / reserve=储备金。MapView 选号列表用。
+			if v, ok := st["money"]; ok {
+				r.Money = int64(toInt(v))
+			}
+			if v, ok := st["deposit"]; ok {
+				r.Deposit = int64(toInt(v))
+			}
+			if v, ok := st["reserve"]; ok {
+				r.Reserve = int64(toInt(v))
+			}
 			if v, ok := st["role_id"]; ok {
 				r.RoleID = toInt(v)
 			}

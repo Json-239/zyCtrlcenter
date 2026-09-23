@@ -38,6 +38,12 @@ type Robot struct {
 	Pos           []int          `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
 	PosGrid       []int          `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
 	Fpp           int            `json:"fpp,omitempty"`
+	// Money / Deposit / Reserve 货币详情（机器人经 90353 全量 / 90073 增量解析后心跳上报）：
+	// Money=银两(服务端 keys.MONEY=9560) / Deposit=钱庄存款(9561) / Reserve=储备金(9617)。
+	// MapView「选择机器人」列表显示用；0 值不序列化（前端显示"-"）。
+	Money   int64 `json:"money,omitempty"`
+	Deposit int64 `json:"deposit,omitempty"`
+	Reserve int64 `json:"reserve,omitempty"`
 	RoleID        int            `json:"role_id,omitempty"`
 	Ghost         map[string]any `json:"ghost,omitempty"`
 	// FightStats 今日战斗统计（机器人上报：total/wild/ghost/dur_ms/in_fight；上大屏用）。
