@@ -182,6 +182,10 @@ def main():
     disp_calls = []
     ns["__log"] = lambda ro, lvl, msg: logs.append(msg)
     ns["dispatch_cmd"] = lambda ro, cmd: disp_calls.append(cmd)
+    # ROAM_* 常量(从源码解析实际值: 默认参数/函数体都引用它们, 改常量自检跟着变)
+    import re as _re
+    for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
+        ns[_m.group(1)] = int(_m.group(2))
     # config stub: 模拟生产值(白名单不含 24, 排除图 [24])
     cfg = types.ModuleType("config")
     cfg.robot_roam_exclude_maps = [24]
@@ -444,8 +448,8 @@ def main():
         import re as _re
         for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
             ns[_m.group(1)] = int(_m.group(2))
-        check("图内死点: ROAM_* 常量齐全(8 个)",
-              len([k for k in ns if k.startswith("ROAM_")]) == 8,
+        check("图内死点: ROAM_* 常量齐全(9 个)",
+              len([k for k in ns if k.startswith("ROAM_")]) == 9,
               sorted(k for k in ns if k.startswith("ROAM_")))
 
         _frag_cws = _extract_class(rw, "CollectWalkState")
@@ -458,7 +462,8 @@ def main():
 
         for name in ("__now_ms", "__grid_for", "__snap_walkable", "__note_walk_progress",
                      "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point",
-                     "__write_pose", "__stop_roam_far_snap", "__far_snap_cooling",
+                     "__write_pose", "__stop_roam_far_snap", "__stop_roam_navfail",
+                     "__far_snap_cooling", "__fallback_in_place",
                      "__dither_point",
                      "__other_bot_positions", "_cos", "_sin", "__random_walk_move",
                      # 2026-09-23d: __connected 抽成模块级公共入口(daily_ghost 巡逻选点共用)
@@ -693,6 +698,54 @@ def main():
             check("补发冷却: 冷却已过 → 不跳过(继续走启动流程)",
                   not (isinstance(_re2, dict) and _re2.get("skipped") == "far_snap_cooldown"),
                   _re2)
+
+        # ---- F. 跨图导航连续失败 → 停止游荡 + 复用补发冷却(2026-09-23f) ----
+        # 场景: 号困在"入口/出口跳转点不在同一连通域"的图里(如 map45), 每次补发都
+        # "跨图重试→失败→就地游荡"无效重试 + 刷屏 → 连续 3 次就停止待命 + 10 分钟不补发。
+        _fb = ns.get("__fallback_in_place")
+        check("跨图失败: 常量 ROAM_NAV_FAILS_TO_STOP=3", ns.get("ROAM_NAV_FAILS_TO_STOP") == 3)
+        check("跨图失败: __stop_roam_navfail 走'停止游荡+共用冷却'实现",
+              "robot_object.m_roam_far_snap_ms = __now_ms()" in
+              (_extract_func(rw, "__stop_roam_navfail") or ""))
+        check("跨图失败: tick 到过目标图即清零计数(w.nav_fail = 0)",
+              "w.nav_fail = 0\t# 2026-09-23f 到过目标图=跨图成功" in rw)
+        if _cooling is not None:
+            check("跨图失败: CollectWalkState 默认 nav_fail=0",
+                  ns.get("CollectWalkState") is not None
+                  and ns["CollectWalkState"]().nav_fail == 0)
+        if _fb is not None and _cooling is not None:
+            ro_f = _mk_move_ro(FIX_MAP, 100, 100)
+            w_f = _mk_move_w(FIX_MAP, [[48, 48], [250, 150]])
+            w_f.nav_fail = 0
+            w_f.state = "nav"
+            ro_f.m_mapid = 11		# 困在 11 图: 三次跨图都失败(目标图 != 当前图)
+            del disp_calls[:]
+            r1 = _fb(ro_f, w_f)
+            check("跨图失败: 第 1 次失败 → 就地游荡(不停止)",
+                  r1 is False and w_f.nav_fail == 1 and w_f.mapid == 11
+                  and not disp_calls and not getattr(ro_f, "m_roam_far_snap_ms", 0),
+                  (r1, w_f.nav_fail, disp_calls))
+            w_f.mapid = 22		# 再试去别的图, 失败
+            r2 = _fb(ro_f, w_f)
+            check("跨图失败: 第 2 次失败 → 仍未达阈值(不停止)",
+                  r2 is False and w_f.nav_fail == 2 and not disp_calls, (r2, w_f.nav_fail))
+            w_f.mapid = 33
+            r3 = _fb(ro_f, w_f)
+            check("跨图失败: 第 3 次连续失败 → 停止游荡 + 冷却起点",
+                  r3 is True and w_f.nav_fail == 3
+                  and len(disp_calls) == 1
+                  and disp_calls[0].get("cmd") == "random_walk_stop"
+                  and int(getattr(ro_f, "m_roam_far_snap_ms", 0) or 0) > 0,
+                  (r3, disp_calls, getattr(ro_f, "m_roam_far_snap_ms", None)))
+            _now_f = int(getattr(ro_f, "m_roam_far_snap_ms", 0) or 0)
+            _cd = int(ns.get("ROAM_FAR_SNAP_COOLDOWN_MS") or 600000)
+            check("跨图失败: 停止后 10 分钟内不再补发(共用冷却)",
+                  _cooling(ro_f, _now_f + 1000) is True
+                  and _cooling(ro_f, _now_f + _cd) is False
+                  and _cooling(ro_f, _now_f + _cd + 60000) is False,
+                  _now_f)
+            check("跨图失败: 新游荡会话(dispatch)重置计数(源码接线)",
+                  "跨图连续失败计数(新游荡会话重新累计)" in rw)
 
         if _move is not None:
             _box = [[48, 48], [250, 150]]	# 主区可走范围内
