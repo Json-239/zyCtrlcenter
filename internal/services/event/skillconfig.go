@@ -19,9 +19,13 @@ type SkillConfig struct {
 	Scenes map[string]bool `json:"scenes"`
 	// Guardian 守护(召唤兽)策略：attack=默认普通攻击（当前唯一实现）。
 	Guardian string `json:"guardian"`
-	// Strategy 种族 → 选技能模式：best_damage(最优伤害) / special_random(特殊技能随机) /
-	// random(可用随机)；key 另含 "default" 兜底。未识别的模式按 random 处理。
-	Strategy map[string]string `json:"strategy"`
+	// Strategy 种族[×性别] → 选技能模式：best_damage(最优伤害) / magic_random(指定系别随机) /
+	// special_random(特殊技能随机) / random(可用随机)。
+	//   · key 依次尝试 "种族:性别"（如 immortal:male）→ "种族"（不分性别的通用档）→ "default" 兜底；
+	//   · 值两种形态：字符串（模式）或对象 {"mode": "...", "magics": ["雷系","风系"]}
+	//     —— magics 只对 magic_random 有意义（机器人端无匹配系别时回落 random）；
+	//   · 未识别的模式按 random 处理。
+	Strategy map[string]any `json:"strategy"`
 	// Special 特殊技能池（默认 901 初露锋芒 / 902 一石二鸟 —— 每号都有的新手伤害技）。
 	Special []int `json:"special"`
 }
@@ -32,11 +36,11 @@ func DefaultSkillConfig() SkillConfig {
 		Enabled:  true,
 		Scenes:   map[string]bool{"ghost": true, "wild": true, "story": false},
 		Guardian: "attack",
-		Strategy: map[string]string{
-			"immortal": "best_damage",     // 仙族：门派纯伤害技最优
-			"human":    "special_random",  // 人族：特殊技能随机
-			"demon":    "special_random",  // 魔族：特殊技能随机
-			"default":  "random",          // 兜底
+		Strategy: map[string]any{
+			"immortal": "best_damage",    // 仙族：门派纯伤害技最优
+			"human":    "special_random", // 人族：特殊技能随机
+			"demon":    "special_random", // 魔族：特殊技能随机
+			"default":  "random",         // 兜底
 		},
 		Special: []int{901, 902},
 	}
