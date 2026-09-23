@@ -270,37 +270,81 @@ def main():
             except Exception as _e2:
                 check("真实网格抽查(可选)未抛异常", False, str(_e2))
 
-    # ============================================================ B9. 起点校正半径(2026-09-23h map49)
+    # ============================================================ B9. 起点校正增强(2026-09-23h)
     # 现场: map49 进图到达点 (1160,856) = 阻挡格, 距最近可走格 11 格 > nearest_walkable
     #   默认 radius=8 → 旧代码不校正/不写回 → A* 从阻挡起点直接 NO_LEGAL_ROUTE
-    #   ("地图 49 无可行路径")。修法: 起点校正块加 max_radius=40(640px, 与游荡吸附口径一致)。
-    check("起点校正带 radius=40(2026-09-23h map49)",
-          "nearest_walkable(_g0, from_x, from_y, max_radius=40)" in qe)
-    try:
-        import json as _json49
-        _repo49 = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
-        _cfp49 = os.path.join(_repo49, "data", "chains", "zhongkui_nav.json")
-        if _rp is not None and os.path.exists(_cfp49):
-            _g49 = (_json49.load(open(_cfp49, encoding="utf-8")).get("map_grids") or {}).get("49")
-            if _g49:
-                _grid49 = _rp.MapGrid(49, _g49)
-                _r8 = _rp.nearest_walkable(_grid49, 1160, 856, max_radius=8)
-                _r40 = _rp.nearest_walkable(_grid49, 1160, 856, max_radius=40)
-                check("map49 现场: radius=8 → None(旧代码不校正、直接刷屏)", _r8 is None, _r8)
-                _px40 = None if _r40 is None else (_r40[0] * 16 + 8, _r40[1] * 16 + 8)
-                _ok40 = False
-                if _px40 is not None:
-                    _ok40 = _rp.GridPathFinder(_grid49).find_path(
-                        _px40[0], _px40[1], 1753, 918) is not None
-                check("map49 现场: radius=40 → (83,53)/(1336,856) 且到目标可达",
-                      _r40 == (83, 53) and _px40 == (1336, 856) and _ok40,
-                      (_r40, _px40, _ok40))
-            else:
-                check("map49 现场用例: 链数据含 map49(可选)", True, "跳过(无 map49)")
-        else:
-            check("map49 现场用例: 有链数据(可选)", True, "跳过(无链数据)")
-    except Exception as _e3:
-        check("map49 现场用例未抛异常", False, str(_e3))
+    #   ("地图 49 无可行路径")。定稿修法 __walk_start_fix_cell:
+    #   ①先按旧行为 radius=8 搜(行为不变); ②找不到→夹回网格再扩到 40 格(640px)搜(越界格
+    #   恒=阻挡, 环形搜索命中不了; 与 random_walk.__snap_walkable 同法); ③校正距离超上限
+    #   (同 ROAM_SNAP_MAX_DIST_PX 口径, 缺省 1024) → 不写回=不瞬移(map24 越界点夹回后
+    #   最近可走格 2026px, 属位置本身异常, 交上层游荡吸附/抓鬼重登)。
+    check("quest_engine 定义 __walk_start_fix_cell(夹回+40格+距离上限)",
+          "def __walk_start_fix_cell(" in qe)
+    check("__do_walk 起点校正块改调 helper(不再直调 nearest_walkable radius=40)",
+          "_fix0 = __walk_start_fix_cell(_g0, from_x, from_y)" in qe
+          and "nearest_walkable(_g0, from_x, from_y, max_radius=40)" not in qe)
+    check("写回机制保持原样(helper 返回校正点才 set_pose; 起点未阻挡不触发)",
+          "_fix0 = None" in qe
+          and '__set_pose(robot_object, _nx0, _ny0, "walk_start_fix")' in qe)
+    ns_fix = {"robot_path": _rp, "math": __import__("math")} if _rp is not None else {}
+    frag_fix = _extract_func(qe, "__walk_start_fix_cell")
+    check("提取 quest_engine.__walk_start_fix_cell", frag_fix is not None)
+    if frag_fix:
+        try:
+            exec(frag_fix, ns_fix)
+        except Exception as e:  # noqa
+            check("exec quest_engine.__walk_start_fix_cell", False, str(e))
+    fixc = ns_fix.get("__walk_start_fix_cell")
+    if _rp is not None and fixc is not None:
+        # 夹具网格(20x12): 夹回逻辑 + 旧 radius=8 行为两个用例
+        _fg = _rp.MapGrid(FIX_MAP, FIX_GRID)
+        # 夹回分支: (800,88) 格(50,5) 远在网格外 → 直接搜(radius=8)必然 None
+        #   → 夹回(19,5)(口袋右墙, 阻挡) → 扩到 40 格 → 最近可走格 (18,5)=(296,88)
+        r = fixc(_fg, 800, 88)
+        check("越界远点: 直接搜不到 → 夹回后取最近可走格 (18,5)/(296,88)(网格内可走)",
+              _rp.nearest_walkable(_fg, 800, 88) is None and r == (296, 88)
+              and not _fg.blocked(*_fg.to_grid(r[0], r[1])), r)
+        r = fixc(_fg, WALL_POSE[0], WALL_POSE[1])	# 墙格(5,5) → radius=8 就近(4,5)
+        check("旧 radius=8 就近行为保留: 阻挡格(88,88) → (72,88)", r == (72, 88), r)
+        # 真实网格用例(离线只读, 有链数据才测)
+        try:
+            import json as _json_h
+            _repo_h = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+            _cfp_h = os.path.join(_repo_h, "data", "chains", "zhongkui_nav.json")
+            _ch = _json_h.load(open(_cfp_h, encoding="utf-8")) if os.path.exists(_cfp_h) else None
+        except Exception:
+            _ch = None
+        _g49 = ((_ch or {}).get("map_grids") or {}).get("49")
+        if _g49:
+            _grid49 = _rp.MapGrid(49, _g49)
+            check("map49 前提: 到达点(1160,856) radius=8 → None(旧代码不校正、直接刷屏)",
+                  _rp.nearest_walkable(_grid49, 1160, 856, max_radius=8) is None)
+            r = fixc(_grid49, 1160, 856)
+            _d = None if r is None else int((((r[0] - 1160) ** 2 + (r[1] - 856) ** 2)) ** 0.5)
+            check("map49 现场: helper → (1336,856)(176px ≤ 上限) 且到目标(1753,918)可达",
+                  r == (1336, 856) and _d == 176
+                  and _rp.GridPathFinder(_grid49).find_path(r[0], r[1], 1753, 918) is not None,
+                  (r, _d))
+            check("map49 现场: 上限压到 100px → 不校正(返回 None, 不写回)",
+                  fixc(_grid49, 1160, 856, max_dist_px=100) is None)
+        _g24 = ((_ch or {}).get("map_grids") or {}).get("24")
+        if _g24:
+            _grid24 = _rp.MapGrid(24, _g24)
+            _gx24, _gy24 = _grid24.to_grid(4712, 2776)
+            _cx24 = min(max(_gx24, 0), max(_grid24.w - 1, 0))
+            _cy24 = min(max(_gy24, 0), max(_grid24.h - 1, 0))
+            _px24, _py24 = _grid24.to_coord(_cx24, _cy24)
+            _n24 = _rp.nearest_walkable(_grid24, _px24, _py24, max_radius=40)
+            _d24 = None
+            if _n24 is not None:
+                _d24 = int((((_n24[0] * 16 + 8) - 4712) ** 2
+                            + ((_n24[1] * 16 + 8) - 2776) ** 2) ** 0.5)
+            check("map24 现场: 越界格(294,173)→夹回→最近可走格 %spx(>上限1024) → 不写回" % (
+                _d24,),
+                  _gx24 == 294 and _n24 is not None and _d24 is not None and _d24 > 1024
+                  and fixc(_grid24, 4712, 2776) is None, (_gx24, _d24))
+        if _ch is None:
+            check("起点校正真实网格用例(可选): 有链数据", True, "跳过(无链数据)")
 
     # ============================================================ C. "免费 hop 有效性"机制
     # (2026-09-23g, 用户口径: 免费跳点走不到 → 优先改走 NPC 跳转)
