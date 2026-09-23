@@ -339,6 +339,37 @@ func TestDailyOverviewStateEnums(t *testing.T) {
 	}
 }
 
+// queue 固定次序（gp-2 约定，中控侧保序、前端不排序）：ghost → newbie → shenbu → fenghuo，
+// 与心跳数组给的顺序无关（同权重 stable）。
+func TestDailyOverviewQueueOrder(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": "ord@xy3.com", "level": 45, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"daily": []any{
+				map[string]any{"share_key": "share_daily_宫廷10", "done": 2, "limit": 20, "state": "KILL"},
+				map[string]any{"share_key": "share_daily_大唐神捕", "done": 1, "limit": 10, "state": "KILL"},
+			}}},
+		"_zone": testsupportZone()})
+
+	res := getJSON(t, env.srv.URL+"/api/daily/overview")
+	rows := asSlice(res["rows"])
+	if len(rows) != 1 {
+		t.Fatalf("应出一行: %v", res["rows"])
+	}
+	row, _ := rows[0].(map[string]any)
+	q := asSlice(row["queue"])
+	if len(q) != 2 {
+		t.Fatalf("应有两条进度: %v", row["queue"])
+	}
+	k0, _ := q[0].(map[string]any)
+	k1, _ := q[1].(map[string]any)
+	if k0["kind"] != "shenbu" || k1["kind"] != "fenghuo" {
+		t.Fatalf("queue 应按 ghost→newbie→shenbu→fenghuo 固定次序（与心跳数组顺序无关），实际 %v → %v",
+			k0["kind"], k1["kind"])
+	}
+}
+
 // shenbuCandN 当前 shenbu 候选数（多个用例共用）。
 func shenbuCandN(t *testing.T, env *testEnv) float64 {
 	t.Helper()

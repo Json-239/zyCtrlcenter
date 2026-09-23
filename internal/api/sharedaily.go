@@ -312,6 +312,24 @@ func (a *API) shareDailyKindOf(shareKey string) string {
 	return shareDailyKindByKey[shareKey]
 }
 
+// shareDailyKindRank queue 条目的固定显示次序（gp-2 2026-09-23 约定）：
+// ghost → newbie → shenbu → fenghuo，未知/空排最后（与"跑满一条转下一条"的直觉一致）。
+func shareDailyKindRank(item any) int {
+	m, _ := item.(map[string]any)
+	kind, _ := m["kind"].(string)
+	switch kind {
+	case string(autotask.KindGhost):
+		return 0
+	case string(autotask.KindNewbie):
+		return 1
+	case string(autotask.KindShenbu):
+		return 2
+	case "fenghuo":
+		return 3
+	}
+	return 9
+}
+
 // handleDailyOverview 分享日常轮转总览（前端「日常轮转」表数据源；方案 §7 契约）：
 //
 //	GET /api/daily/overview
@@ -370,6 +388,11 @@ func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 					"state": "pending", "raw_state": "", "marked": true,
 				})
 			}
+			// 固定次序（gp-2 2026-09-23 约定，前端不做排序）：ghost → newbie → shenbu →
+			// fenghuo，未知/空排最后；同权重保持原顺序（stable）。P2 有 `order` 后按 order 插。
+			sort.SliceStable(q, func(i, j int) bool {
+				return shareDailyKindRank(q[i]) < shareDailyKindRank(q[j])
+			})
 			current := ""
 			if onShenbu || running[rb.Account] || hasShenbu {
 				current = key
