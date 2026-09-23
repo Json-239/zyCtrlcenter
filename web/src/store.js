@@ -338,8 +338,8 @@ export async function switchZone(key) {
 
 export const STATE_LABELS = {
   WAIT_TASK: '等任务', NAV: '导航', CLICK: '点击', DIALOG: '对话', FIGHT: '战斗',
-  SHOP: '商店', ALLOC: '加点', WAIT_NEXT: '等下一任务', DONE: '完成', ERROR: '出错',
-  IDLE: '空闲', ONLINE: '在线', OFFLINE: '离线',
+  SHOP: '商店', ALLOC: '加点', WAIT_NEXT: '等下一任务', SUBMIT: '交任务中', WAIT_GHOST: '等刷鬼',
+  DONE: '完成', ERROR: '出错', READY: '就绪', IDLE: '空闲', ONLINE: '在线', OFFLINE: '离线',
 }
 
 // 状态短语：像人说话（悬停气泡/详情用）
@@ -352,8 +352,11 @@ export const STATE_PHRASES = {
   SHOP: '正在逛商店',
   ALLOC: '正在加点',
   WAIT_NEXT: '等下一个任务',
+  SUBMIT: '正在交任务（抓鬼·交付）',
+  WAIT_GHOST: '在钟馗处等鬼刷出来',
   DONE: '这一轮跑完了',
   ERROR: '卡住了，需要看看',
+  READY: '已就绪，等派活',
   IDLE: '发着呆，等指令',
   ONLINE: '刚上线',
   OFFLINE: '掉线了',
