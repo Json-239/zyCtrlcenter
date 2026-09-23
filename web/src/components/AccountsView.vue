@@ -40,6 +40,30 @@ const err = ref('')
 const selected = ref(new Set())
 
 const filter = reactive({ zone: '', keyword: '', usable: false, onlyOnline: false, includeLive: false, pool: '' })
+// 号池分区下拉：以接口 pool_split 为准 + 实际行里出现过的池值补齐（老版接口无 pool_split 时兜底）。
+// 防御式：中控不返回的池就不显示，不硬编码假项（2026-09-23 分享日常接入，方案 §4.4）。
+// 注：2026-09-23 本文件被两个 agent 并发改到过（两套 poolOptions 重名）——此处已合并为单一实现。
+const POOL_LABEL = {
+  newbie: '新手池（未毕业）', ghost: '抓鬼池（已毕业）', unknown: '未知（等级未上报）',
+  shenbu: '神捕池（大唐神捕）', fenghuo: '烽火池（烽火大唐）',
+}
+const POOL_RANK = { newbie: 0, ghost: 1, unknown: 9 }
+const poolSplit = ref({})    // 接口 pool_split：各池数量（全量，不受当前筛选影响）
+const extraPools = ref([])   // 实际行里出现过、但 pool_split 未列的池值
+const poolOptions = computed(() => {
+  const keys = Array.from(new Set([...Object.keys(poolSplit.value || {}), ...extraPools.value]))
+  const all = keys.length ? keys : ['newbie', 'ghost', 'unknown']
+  return all.slice()
+    .sort((a, b) => (POOL_RANK[a] ?? 5) - (POOL_RANK[b] ?? 5) || a.localeCompare(b))
+    .map((k) => ({ value: k, label: POOL_LABEL[k] || k }))
+})
+function notePools(list) {
+  for (const r of list || []) {
+    if (r.pool && !(r.pool in (poolSplit.value || {})) && !extraPools.value.includes(r.pool)) {
+      extraPools.value = [...extraPools.value, r.pool]
+    }
+  }
+}
 const batch = reactive({ limit: 1, chunk: 1, interval_ms: 1500, only_usable: true, force: false })
 const addForm = reactive({ text: '', password: '', zone: '' })
 
@@ -102,6 +126,8 @@ async function load(resetPage = false) {
     rows.value = d.accounts || []
     stats.value = d.stats || {}
     meta.value = d.meta || {}
+    poolSplit.value = d.pool_split || {} // 号池分区数量（动态生成下拉选项；老版接口无此字段时回落三项）
+    notePools(rows.value) // 池分区下拉按实际出现过的池值动态补（见 POOL_LABEL 注释）
     pageInfo.value.hasMore = rows.value.length >= pageInfo.value.pageSize
     err.value = ''
   } catch (e) {
@@ -577,9 +603,7 @@ const headline = computed(() => {
                  placeholder="池分区：全部"
                  title="号池分区：新手池 = 未毕业；抓鬼池 = 已毕业（≥31 级或链完成）">
         <el-option value="" label="池分区：全部" />
-        <el-option value="newbie" label="新手池（未毕业）" />
-        <el-option value="ghost" label="抓鬼池（已毕业）" />
-        <el-option value="unknown" label="未知（等级未上报）" />
+        <el-option v-for="p in poolOptions" :key="p.value" :value="p.value" :label="p.label" />
       </el-select>
       <span class="spacer" />
       <el-button size="small" type="primary" plain @click="ui.addOpen = true">

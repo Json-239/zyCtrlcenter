@@ -66,6 +66,9 @@ const filters = [
   { key: 'task', label: '干活中', title: '在线且在忙：任务链推进（含交任务 SUBMIT）/ 抓鬼会话活跃 / 游荡(含孵化) / 战斗中 —— 与地图页「任务中」桶、Go 侧 waterline.Busy 同口径' },
   { key: 'ghost', label: '👻抓鬼', title: '有活跃抓鬼会话（机器人上报 ghost.enabled === true；enabled=false 的历史会话不算）' },
   { key: 'newbie', label: '🆕新手' },  // 意图表 kind === 'newbie'
+  // 2026-09-23 分享日常（方案 §4.4）：意图表 kind === 'shenbu' / 'fenghuo'
+  { key: 'shenbu', label: '🕵️神捕', title: '意图表 kind === shenbu：等级 ≥40 且大唐神捕今日未满' },
+  { key: 'fenghuo', label: '🔥烽火', title: '意图表 kind === fenghuo：等级 ≥40 且烽火大唐今日未满（P1 接入）' },
   // 2026-09-22 游荡：机器人上报的 walk.enabled === true，或孵化会话进行中（与 MapView 绿环、Go r.Walking() 同一口径）
   { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true，或孵化会话进行中）' },
   { key: 'idle', label: '发呆', title: '在线、没在干活、也不是异常（ERROR），且未收工（DONE）—— 与地图页「空闲」桶、Go 侧 roampool.Idle 同源（DONE 是本页额外的排除口径）' },
@@ -102,7 +105,7 @@ function recentErrTitle(r) {
 
 // 一次遍历算完所有筛选计数（原来每个筛选各扫一遍全表）
 const countsByFilter = computed(() => {
-  const c = { all: 0, online: 0, task: 0, ghost: 0, newbie: 0, walk: 0, idle: 0, error: 0, offline: 0 }
+  const c = { all: 0, online: 0, task: 0, ghost: 0, newbie: 0, shenbu: 0, fenghuo: 0, walk: 0, idle: 0, error: 0, offline: 0 }
   const kinds = intentKind.value
   for (const r of robots.value) {
     c.all++
@@ -111,6 +114,8 @@ const countsByFilter = computed(() => {
     if (isBusyOn(r)) c.task++
     if (isGhosting(r)) c.ghost++
     if (kinds[r.account] === 'newbie') c.newbie++
+    if (kinds[r.account] === 'shenbu') c.shenbu++
+    if (kinds[r.account] === 'fenghuo') c.fenghuo++
     if (isWalkingOn(r)) c.walk++
     if (isIdleRow(r)) c.idle++  // 非忙 + 非异常 + 未收工：SUBMIT/ERROR 都不会再掉进「发呆」（见 isIdleRow）
     if (isStuck(r)) c.error++   // 卡住 = ERROR 态（不是 err_code 非空，见 isStuck 注释）
@@ -127,6 +132,8 @@ const filtered = computed(() => robots.value.filter((r) => {
     case 'ghost': return isGhosting(r)
     case 'walk': return isWalkingOn(r)
     case 'newbie': return intentKind.value[r.account] === 'newbie'
+    case 'shenbu': return intentKind.value[r.account] === 'shenbu'
+    case 'fenghuo': return intentKind.value[r.account] === 'fenghuo'
     case 'idle': return isIdleRow(r)
     case 'error': return isStuck(r)
     default: return true
@@ -383,7 +390,7 @@ async function onlinePicked() {
 
 // ---------------- 意图 / 恢复（P1：面板看"该跑哪条链"与补发状态）----------------
 
-const KIND_LABEL = { newbie: '新手链', zhuaogui: '捉鬼链', ghost: '抓鬼', idle: '空闲' }
+const KIND_LABEL = { newbie: '新手链', zhuaogui: '捉鬼链', ghost: '抓鬼', shenbu: '🕵️ 大唐神捕', fenghuo: '🔥 烽火大唐', idle: '空闲' }
 const intents = reactive({
   open: false, loading: false, err: '', data: null, rows: [], timer: 0, busy: '',
 })
@@ -410,10 +417,11 @@ const intentKind = computed(() => {
   return m
 })
 
-// 意图数据何时拉：面板打开（看表）或筛选中了「🆕新手」（列表要按 kind 过滤）。
+// 意图数据何时拉：面板打开（看表）或筛选中了「按意图的类别」（🆕新手 / 🕵️神捕 / 🔥烽火 —— 列表要按 kind 过滤）。
 // 复用同一个 timer，不新增独立轮询。
+const INTENT_FILTERS = ['newbie', 'shenbu', 'fenghuo']
 function syncIntentsPoll() {
-  const want = intents.open || filter.value === 'newbie'
+  const want = intents.open || INTENT_FILTERS.includes(filter.value)
   if (want && !intents.timer) {
     loadIntents()
     intents.timer = setInterval(loadIntents, 5000)
@@ -432,7 +440,7 @@ onUnmounted(() => clearInterval(intents.timer))
 
 function kindLabel(k) { return KIND_LABEL[k] || k || '--' }
 function kindClass(k) {
-  return { newbie: 'ok', zhuaogui: 'warn', ghost: 'danger', idle: 'dim' }[k] || 'dim'
+  return { newbie: 'ok', zhuaogui: 'warn', ghost: 'danger', shenbu: 'warn', fenghuo: 'info', idle: 'dim' }[k] || 'dim'
 }
 function recoverText(rc) {
   if (!rc) return '未尝试'

@@ -130,14 +130,16 @@ async function loadOverview(force = false) {
   }
 }
 
-// 契约：{ok, share_keys[], rows:[{account, level, current, order, queue:[{share_key, done, limit, state}]}]}
-// （中控侧 internal/api/sharedaily.go:handleDailyOverview；share_key 是**玩法全长键**
-//   如 `share_daily_大唐神捕`（不是 kind 短名 shenbu），所以中文映射同时认短名与子串）
+// 契约定稿（2026-09-23 team-lead 与中控对齐）：queue 项标识用 **kind**（ghost/newbie/shenbu/fenghuo），
+// 若中控同时附 share_key 原始值则忽略；state 枚举 = pending / running / done / skipped
+// （done → ✓；其余映射中文，未识别值原样显示）。
 const overviewRows = computed(() => {
   const rows = overview.value?.rows
   return Array.isArray(rows) ? rows : []
 })
 const KEY_CN = { ghost: '抓鬼', zhuaogui: '抓鬼', newbie: '新手链', shenbu: '神捕', fenghuo: '烽火' }
+// queue 项标识：优先 kind（定稿口径），兼容旧版/心跳原样透传的 share_key（如 share_daily_大唐神捕）
+function qKey(q) { return q.kind || q.share_key || '' }
 function keyCN(k) {
   if (!k) return '--'
   if (KEY_CN[k]) return KEY_CN[k]
@@ -152,19 +154,22 @@ function qFinished(q) {
   if (s === 'done' || s === 'finished' || s === 'completed') return true
   return (q.limit || 0) > 0 && (q.done || 0) >= q.limit
 }
-// 队列单项文案：完成 → "抓鬼 50/50 ✓"；进行中/等待 → 附状态；未开始 → 仅计数
+// 队列单项文案：完成 → "抓鬼 50/50 ✓"；进行中/未开始/已跳过 → 附状态；未识别状态原样
 function qText(q) {
-  const base = `${keyCN(q.share_key)} ${q.done || 0}/${q.limit || 0}`
+  const base = `${keyCN(qKey(q))} ${q.done || 0}/${q.limit || 0}`
   if (qFinished(q)) return `${base} ✓`
   const s = String(q.state || '').toLowerCase()
-  const cn = { running: '进行中', idle: '空闲', waiting: '等待中', paused: '已暂停', pending: '未开始' }[s]
-  return cn ? `${base}（${cn}）` : base
+  const cn = { running: '进行中', pending: '未开始', skipped: '已跳过', idle: '空闲', waiting: '等待中', paused: '已暂停' }[s]
+  return cn ? `${base}（${cn}）` : (q.state ? `${base}（${q.state}）` : base)
 }
 function qTagType(q) {
   if (qFinished(q)) return 'success'
-  return String(q.state || '').toLowerCase() === 'running' ? 'warning' : 'info'
+  const s = String(q.state || '').toLowerCase()
+  if (s === 'running') return 'warning'
+  if (s === 'skipped') return 'danger'
+  return 'info'
 }
-// 顺序：中控 P2 前给空值（[]）→ "待规划"；字符串 fixed/random → 固定/随机；字符串数组 → 中文串起来
+// 顺序：中控 P2 前给空值（[] / ""）→ "待规划"；字符串 fixed/random → 固定/随机；字符串数组 → 中文串起来
 function orderCN(o) {
   if (Array.isArray(o)) {
     const items = o.filter((x) => typeof x === 'string')
