@@ -12,14 +12,18 @@
 | 文件 | 覆盖场景 |
 |---|---|
 | `roampool_test.go` | 纯函数边界（在游荡/空闲判据、回收优先级、挑空闲、均匀分配）+ 一轮决策（禁用/回收优先/限幅/无游荡号/按图补位/随机图/达标/单图失败/白名单交集）+ 参数默认值·落盘·环境变量覆盖·范围校验 |
+| `inflight_test.go` | 2026-09-23 派发节流降噪：在途记账（生效即清/离线即清/占位不虚高/不阻塞回收与超编）+ 退避 60→120→300s + 三类日志节流（达标/空转/动作聚合）+ 空转退避档位 |
 
 ## 前置条件
-- 全部用**假依赖**（`Deps` 注入）：假机器人快照、假缺口、假图列表、假下发/停止（只记下发内容）。
+- 全部用**假依赖**（`Deps` 注入）：假机器人快照、假缺口、假图列表、假下发/停止（只记下发内容）、**假时钟**（P1 在途/退避用例用）。
   **不联网、不起进程、不碰真实 `data/`**（仅用 `t.TempDir()` 验证参数落盘）。
 - 输入是构造的结构体/数字（不是报文），依据是 2026-09-22 拍板口径：
   在线总数 200 = 抓鬼池 100 + 新手池 0 + 游荡池（余量，目标 100 左右）；任务缺人**立刻回收**；游荡**按图均匀**。
 - 空闲判据复用 `waterline.Busy`（与在线水位保持器同一口径，避免两套判据打架）；
   孵化的号**不算游荡池**（它是自动任务自己拉起的有时长会话，回收会打断孵化）。
+- 2026-09-23 P1（派发节流降噪）口径：派发即记「在途」，生效判据 = 机器人上报
+  `walk.enabled=true`（秒级）；退避 60→120→300s（末档上限），在途占位 = min(退避窗口, TTL=120s)，
+  离线/生效即清。日志节流窗口：达标 600s 心跳、空转 300s 同键、动作 60s 聚合（均不改 `lastAct`）。
 
 ## 运行方式
 - 单项：`go test ./test/roampool/ -run TestPickReclaimPrefersCrowdedMap -v`
@@ -53,6 +57,16 @@
 | `TestConfigSaveLoadRoundTrip` | 设置参数 → 新建 Keeper 读回 | enabled/target/maps/balance 原样读回 |
 | `TestConfigEnvOverridesFile` | `CTRL_ROAMPOOL_*` 覆盖文件 | env 优先；`EnvPinned` 报告被固定的字段 |
 | `TestConfigValidateRejectsOutOfRange` | target<0 / 间隔过小 / max_step=0 / minutes<0 / 图号非法 | 一律拒绝且不生效（内存参数不变） |
+| `TestInflightClearedWhenWalkingStarts` | 派发 2 个 → 5s 后再跑（在途占位=目标）→ 机器人上报 walk.enabled | 不重复派、文案达标；生效后在途清空、running=3 |
+| `TestInflightBackoffEscalation` | 单号反复不生效，按 +30/+61/+120/+182/+300/+400/+484s 逐点 Tick | 只在窗口外派（0/61/182/484），档位封顶 3、末窗 300s |
+| `TestInflightClearedOnOffline` | 派发后掉线 → 重新上线 | 离线即清；再派从第 1 档重新起算 |
+| `TestInflightDoesNotBlockReclaimOrExcess` | 在途记录存在 + 缺口>0 / 超编-5 | 回收照常（w1）；在途空闲号不重复派、超编号 g1 照常转游荡 |
+| `TestLogGoalThrottled` | 12 轮达标（120s）+ 翻转回未达标再达标 | 达标行只 1 条；翻转后立刻再 1 条；`lastAct` 每轮都更新 |
+| `TestLogNoopThrottledByBucket` | 同档位空转 10 轮；再跨空闲档（2→6） | 同键只 1 条；跨档再 1 条 |
+| `TestLogActionsAggregated` | 5 轮补位（10s 间隔）+ 窗口到期再补 | 60s 内只 1 条；第 2 条带"近60s 另：补位 4 次/4 个"前缀 |
+| `TestIdleStreakBacksOffOnlyWhenNothingActionable` | 达标空转 4 轮 → 有缺口+有游荡号 → 有缺口但无号 | 累积 4 → 动作后归零 → 再累积 1 |
+| `TestRoampoolInflightParams`（test/api） | POST /api/roampool 写 inflight_ttl_sec/backoff_sec；非法 0 秒 | 可写可读；非法拒绝且不改动已有参数 |
+| `TestRandomWalkDirectedMapsGate`（test/api） | 定向派发不带 maps / 带白名单 | 命令补 `maps=[目标图]`；显式白名单原样保留 |
 
 ## 已知限制
 - 只对**当前区**生效（壳层传入的机器人快照已按当前区过滤）。

@@ -91,6 +91,8 @@
 | `TestCreateThrottlePaceTakesConservativeSide` | 请求并发/间隔与限速器不同 | 并发取 `min`、间隔取 `max`（请求只能更保守）+ 抖动边界（±2s，不落负） |
 | `TestAccountsCreateResponseCarriesThrottle` | 建号成功一次 | 响应 `throttle`：状态并发=上限 8、实际并发=请求 2、`total_ok=1`、无 112 |
 | `TestAccountsCreateThrottleSlowsDownOn112` | 假服注册固定回 112 | 有效并发 8→4→2（连续两次）；结果带 `errid=112`，提示点明风控 |
+| `TestRandomWalkDirectedMapsGate` | 定向派发不带 maps / 带白名单（2026-09-23 P0-a） | 命令**补** `maps=[目标图]`（机器人端不再误判"给定选图全被排除"）；显式白名单原样保留 |
+| `TestRoampoolInflightParams` | POST /api/roampool 写 `inflight_ttl_sec`/`backoff_sec`（2026-09-23 P1） | 可写可读；非法档位（0 秒）拒绝且不改动已有参数；`inflight_pending`/`idle_streak` 暴露 |
 
 ## 已知限制
 - WS 端到端推送未在此覆盖（握手/帧由 `test/wsutil` 覆盖，广播口径由 `test/event` 覆盖）。

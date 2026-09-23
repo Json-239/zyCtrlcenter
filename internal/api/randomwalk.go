@@ -200,6 +200,15 @@ func (a *API) DispatchRoamEx(req RoamReq) RoamResult {
 				res.MapID, req.Maps)
 			return res
 		}
+		// 2026-09-23 P0-a（派发节流降噪）：定向派发**显式带上 maps=[目标图]**。
+		// 机器人端把"没带 maps 的定向派发"误判成"给定选图全被排除"直接拒收
+		// （random_walk.py 的游荡排除图闸：`not raw_maps and not is_random(mapid)` → 拒绝），
+		// 现场 keeper 每 10s 派一批、90% 被拒（同日 3342 次），号永远进不了游荡。
+		// maps=[目标图] 是等价声明（"指定图必须含于白名单"本就成立，面板"分配到所选图"
+		// 路径也带 maps）→ 两条路径同构，机器人端不再误判。
+		if len(req.Maps) == 0 {
+			req.Maps = []int{res.MapID}
+		}
 	}
 	accounts := normAccounts(req.Accounts)
 	if len(accounts) == 0 {

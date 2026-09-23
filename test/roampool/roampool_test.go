@@ -287,6 +287,7 @@ type fakeDeps struct {
 	robots  []state.Robot
 	deficit int
 	maps    []int
+	now     time.Time // 假时钟（零值 = time.Now）；P1 在途/退避用例用它控制 Status 的判定时刻
 
 	disp        []dispatchCall
 	stopped     [][]string
@@ -299,6 +300,12 @@ func (f *fakeDeps) deps() roampool.Deps {
 		Robots:  func() []state.Robot { return f.robots },
 		Deficit: func() int { return f.deficit },
 		Maps:    func() []int { return f.maps },
+		Now: func() time.Time {
+			if f.now.IsZero() {
+				return time.Now()
+			}
+			return f.now
+		},
 		Dispatch: func(accounts []string, mapid any, mode string, minutes int) (int, error) {
 			f.disp = append(f.disp, dispatchCall{accounts: accounts, mapid: mapid, mode: mode, minutes: minutes})
 			if id, ok := mapid.(int); ok {

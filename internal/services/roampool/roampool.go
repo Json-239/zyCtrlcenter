@@ -44,7 +44,33 @@ const (
 	DefaultMinutes     = 0   // 游荡限时（分钟；0=不限）
 	DefaultBalance     = true
 	DefaultReclaim     = true
+
+	// DefaultInflightTTLSec 「已派发、还没生效」的判定窗口（秒；2026-09-23 P1 派发节流）。
+	// 生效判据是 Roaming（机器人收到命令即置 walk.enabled=true，实测秒级）——窗口只作用于
+	// "派了没生效"的失败路径：TTL 内算「在途占位」（不再叠派），到期未生效才算失败并退避升级。
+	DefaultInflightTTLSec = 120
+	MinInflightTTLSec     = 10
+	MaxInflightTTLSec     = 3600
+	MaxBackoffSec         = 3600
+
+	// 日志降噪窗口（2026-09-23，纯日志、不改行为；背景：平稳窗 ROAMPOOL 358 行/时、
+	// Tick 360 轮/时，其中 no-op+达标占 52%）：
+	//   - 达标行：状态翻转时立刻打一条 + 稳定期心跳一条（goalLogSec）；
+	//   - 空转（no-op）行：同一「类型+缺口档+空闲档」noopLogSec 内只打一条；
+	//   - 动作行（回收/补位）：actionLogSec 聚合一条（窗口内首条原样，后续累计成前缀）。
+	goalLogSec   = 600 // 达标心跳间隔（秒）
+	noopLogSec   = 300 // 空转行同键节流窗口（秒）
+	actionLogSec = 60  // 动作行聚合窗口（秒）
+
+	// idleBackoffMax 空转退避上限：连续"无动作且无活可干"的轮次把轮询间隔 ×2 拉长到它为止
+	// （一有动作/有可动作候选立刻回到 interval_sec → 缺口回填延迟不受影响）。
+	idleBackoffMax = 60 * time.Second
 )
+
+// defaultBackoffSec 默认退避档位（秒）：60s → 120s → 300s（上限）。
+// 为什么是这个序列：机器人收到命令到上报 walk.enabled 是秒级，第一次失败多半是"拒收/走不到"，
+// 60s 足够等到状态收敛；再失败就是真问题，用 120/300 把重派压到可接受频率（现场 10s 一轮 → 300s）。
+func defaultBackoffSec() []int { return []int{60, 120, 300} }
 
 // 参数范围（Validate 的校验口径，与 POST /api/roampool 一致）。
 const (
@@ -79,6 +105,11 @@ type Config struct {
 	ReclaimOnDeficit bool   `json:"reclaim_on_deficit"` // 任务池缺人时立刻回收游荡号
 	Maps             []int  `json:"maps,omitempty"`     // 可选白名单（空 = 用链数据里有网格的图）
 	Mode             string `json:"mode,omitempty"`     // 游荡档位（机器人端 ROAM_PROFILES；空=默认档）
+
+	// InflightTTLSec 「已派发、还没生效」的判定窗口（秒；2026-09-23 P1 派发节流）。
+	InflightTTLSec int `json:"inflight_ttl_sec"`
+	// BackoffSec 连续"派发没生效"的退避档位（秒）：第 N 次失败用第 N 档，超出取最后一档（=上限）。
+	BackoffSec []int `json:"backoff_sec,omitempty"`
 }
 
 // DefaultConfig 默认参数：**enabled=false**，必须人工开（不会自己动生产）。
@@ -91,6 +122,8 @@ func DefaultConfig() Config {
 		Minutes:          DefaultMinutes,
 		Balance:          DefaultBalance,
 		ReclaimOnDeficit: DefaultReclaim,
+		InflightTTLSec:   DefaultInflightTTLSec,
+		BackoffSec:       defaultBackoffSec(),
 	}
 }
 
@@ -124,6 +157,17 @@ func (c Config) Normalize() Config {
 	if len(c.Maps) > 0 {
 		c.Maps = normMaps(c.Maps)
 	}
+	// 2026-09-23 P1：在途/退避参数夹取（0/负/超范围都回到合法值，脏配置不会引发异常动作）。
+	if c.InflightTTLSec <= 0 {
+		c.InflightTTLSec = DefaultInflightTTLSec
+	}
+	if c.InflightTTLSec < MinInflightTTLSec {
+		c.InflightTTLSec = MinInflightTTLSec
+	}
+	if c.InflightTTLSec > MaxInflightTTLSec {
+		c.InflightTTLSec = MaxInflightTTLSec
+	}
+	c.BackoffSec = normBackoff(c.BackoffSec)
 	return c
 }
 
@@ -142,6 +186,14 @@ func (c Config) Validate() error {
 	for _, m := range c.Maps {
 		if m <= 0 {
 			return fmt.Errorf("maps 里有非法图号 %d（应为正整数）", m)
+		}
+	}
+	if c.InflightTTLSec < MinInflightTTLSec || c.InflightTTLSec > MaxInflightTTLSec {
+		return fmt.Errorf("inflight_ttl_sec 必须在 %d~%d 之间", MinInflightTTLSec, MaxInflightTTLSec)
+	}
+	for _, v := range c.BackoffSec {
+		if v <= 0 || v > MaxBackoffSec {
+			return fmt.Errorf("backoff_sec 里的 %d 非法（每个档位 1~%d 秒）", v, MaxBackoffSec)
 		}
 	}
 	return nil
@@ -197,6 +249,37 @@ type MapLoad struct {
 	Count int
 }
 
+// Inflight 一条"已派发、还没生效"的游荡派发记录（2026-09-23 P1 派发节流/退避）。
+//
+// 为什么要记：keeper 只把 walk.enabled=true 算"在游荡"，命令发出到机器人上报之间（或**根本没生效**
+// ——机器人拒收/走不到目标图）不记账 → 每轮（现场 interval_sec=10）重挑同一批号重复派。
+// 现场实测：60 派/分、54 拒/分、同一号同图 10s 一轮（机器人端 `游荡排除图: 给定选图全被排除`），
+// 号永远进不了游荡、事件流刷屏。
+//
+// 判据与生命周期：
+//   - 派发即记（markDispatch）；**生效 = Roaming(r)（walk.enabled=true）→ 立刻清除**；
+//     机器人离线/状态行被清理 → 清除（这号不在池子里了）；
+//   - Until 之前不再派这个号（退避 60→120→300s，末档为上限）；连续未生效时每次重派 +1 档，
+//     真正生效（walk.enabled）后再派从第 1 档重新起算；
+//   - Pending = 还算「在途占位」（Until 未到 **且** 距上次派发 < TTL）：占位计入目标缺口，
+//     避免"上一批还在路上又派一批"；占位窗口取两者小者（结果已知就释放，300s 档位最多占 120s）。
+type Inflight struct {
+	Account string    `json:"account"`
+	MapID   int       `json:"mapid"`   // 最近一次派发的目标图（0 = 随机图）
+	At      time.Time `json:"at"`      // 最近一次派发时间
+	Fails   int       `json:"fails"`   // 连续"派发未生效"次数（= 退避档位）
+	Until   time.Time `json:"until"`   // 退避截止：在此之前不再派这个号
+	Pending bool      `json:"pending"` // 是否还算「在途占位」（见上：Until 内且 < TTL）
+}
+
+// roamAttempt 在途记账的内部形态（Inflight 是它的对外快照）。
+type roamAttempt struct {
+	mapID int
+	at    time.Time
+	fails int
+	until time.Time
+}
+
 // Deps 依赖（壳层提供真实世界；测试注入假的）。
 type Deps struct {
 	// Robots 当前区机器人的状态快照（判"在游荡/空闲"、算各图人数用）。
@@ -213,7 +296,9 @@ type Deps struct {
 	Dispatch func(accounts []string, mapid any, mode string, minutes int) (int, error)
 	// Stop 停止游荡（回收）：返回实际下发成功的号数（失败返回 err）。
 	Stop func(accounts []string) (int, error)
-	Log  func(format string, args ...any)
+	// Now 时钟（Status 计算"在途/退避"用；nil = time.Now）。
+	Now func() time.Time
+	Log func(format string, args ...any)
 }
 
 // Status 保持器状态（面板 / GET /api/roampool 展示）。
@@ -227,12 +312,21 @@ type Status struct {
 	ReclaimOnDeficit bool   `json:"reclaim_on_deficit"`
 	Maps             []int  `json:"maps,omitempty"`
 	Mode             string `json:"mode,omitempty"`
+	InflightTTLSec   int    `json:"inflight_ttl_sec"`
+	BackoffSec       []int  `json:"backoff_sec,omitempty"`
 	// Running 当前在游荡的号数；Idle 当前空闲（无任务/无抓鬼/未游荡/非战斗）在线号数；
 	// Deficit 任务池缺口（正=缺人）；Assignable 本轮最多可调整的号数（min(max_step, …)）。
 	Running  int `json:"running"`
 	Idle     int `json:"idle"`
 	Deficit  int `json:"deficit"`
 	MapCount int `json:"map_count"` // 可用游荡图张数（白名单 ∩ 有网格）
+	// InflightPending 在途占位（已派发、TTL 内还没生效的号数；计目标缺口时占位）；
+	// Inflight 在途/退避明细（面板可见：这些号这轮为什么没被再派）。
+	InflightPending int        `json:"inflight_pending"`
+	Inflight        []Inflight `json:"inflight,omitempty"`
+	// IdleStreak 连续空转轮数（2026-09-23 降噪）：>0 时轮询间隔按 ×2 拉长（上限 60s）；
+	// 有动作/有可动作候选立刻归零 —— 面板据此解释"为什么最近没动作"。
+	IdleStreak int `json:"idle_streak"`
 	// EnvPinned 被环境变量固定的字段名（面板据此处提示"这些改了也不生效"）。
 	EnvPinned  []string `json:"env_pinned,omitempty"`
 	LastAction string   `json:"last_action"` // 最近一次动作/判决说明
@@ -250,6 +344,20 @@ type Keeper struct {
 	lastRun time.Time
 	lastAct string
 	lastErr string
+
+	// inflight 在途/退避记账（2026-09-23 P1）：account → 最近一次派发与退避窗口。
+	inflight map[string]*roamAttempt
+
+	// —— 日志降噪状态（2026-09-23，纯日志；lastAct 不受影响）——
+	throttle   map[string]time.Time // 空转行：键 → 上次真正写日志的时间
+	goalState  bool                 // 上一轮是否"达标"（翻转时立刻打一条）
+	goalLogAt  time.Time            // 达标行上次真正写日志的时间（心跳）
+	actLogAt   time.Time            // 动作行上次真正写日志的时间（聚合窗口）
+	actDispN   int                  // 聚合窗口内被抑制的"补位"次数/号数
+	actDispAcc int
+	actRecN    int
+	actRecAcc  int
+	idleStreak int // 连续"无动作且无活可干"的轮数（空转退避用）
 }
 
 // New 创建保持器（path 通常为 <数据目录>/roampool.json；不自动读盘，由 Load 负责）。
@@ -257,7 +365,11 @@ func New(path string, d Deps) *Keeper {
 	if d.Log == nil {
 		d.Log = func(string, ...any) {}
 	}
-	return &Keeper{path: path, d: d, cfg: DefaultConfig()}
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+	return &Keeper{path: path, d: d, cfg: DefaultConfig(),
+		inflight: map[string]*roamAttempt{}, throttle: map[string]time.Time{}}
 }
 
 // Path 配置文件路径。
@@ -285,8 +397,9 @@ func (k *Keeper) Load() error {
 	k.mu.Lock()
 	k.cfg = cfg
 	k.mu.Unlock()
-	k.logf("[ROAMPOOL] 已恢复参数：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v",
-		cfg.Enabled, cfg.Target, cfg.IntervalSec, cfg.MaxStep, cfg.Minutes, cfg.Balance, cfg.ReclaimOnDeficit, cfg.Maps)
+	k.logf("[ROAMPOOL] 已恢复参数：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 在途TTL=%ds 退避=%v",
+		cfg.Enabled, cfg.Target, cfg.IntervalSec, cfg.MaxStep, cfg.Minutes, cfg.Balance, cfg.ReclaimOnDeficit, cfg.Maps,
+		cfg.InflightTTLSec, cfg.BackoffSec)
 	if len(pinned) > 0 {
 		k.logf("[ROAMPOOL] 环境变量覆盖了：%s（优先级：env > 文件 > 默认）", strings.Join(pinned, ","))
 	}
@@ -338,8 +451,9 @@ func (k *Keeper) SetConfig(c Config) error {
 	k.cfg = c
 	k.mu.Unlock()
 	k.save()
-	k.logf("[ROAMPOOL] 参数已更新：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 档位=%q",
-		c.Enabled, c.Target, c.IntervalSec, c.MaxStep, c.Minutes, c.Balance, c.ReclaimOnDeficit, c.Maps, c.Mode)
+	k.logf("[ROAMPOOL] 参数已更新：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 档位=%q 在途TTL=%ds 退避=%v",
+		c.Enabled, c.Target, c.IntervalSec, c.MaxStep, c.Minutes, c.Balance, c.ReclaimOnDeficit, c.Maps, c.Mode,
+		c.InflightTTLSec, c.BackoffSec)
 	return nil
 }
 
@@ -674,6 +788,7 @@ func (k *Keeper) Status() Status {
 	robots := k.robots()
 	cfg := k.Config()
 	mapCount := len(k.roamMaps(false)) // 与 Tick 同口径（白名单 ∩ 有网格的图；不记日志，别刷）
+	now := k.now()
 	running, idle := 0, 0
 	for _, r := range robots {
 		if Roaming(r) {
@@ -683,13 +798,16 @@ func (k *Keeper) Status() Status {
 			idle++
 		}
 	}
+	inflight, pending := k.inflightView(now, cfg)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return Status{
 		Enabled: cfg.Enabled, Target: cfg.Target, IntervalSec: cfg.IntervalSec, MaxStep: cfg.MaxStep,
 		Minutes: cfg.Minutes, Balance: cfg.Balance, ReclaimOnDeficit: cfg.ReclaimOnDeficit,
 		Maps: cfg.Maps, Mode: cfg.Mode,
+		InflightTTLSec: cfg.InflightTTLSec, BackoffSec: cfg.BackoffSec,
 		Running: running, Idle: idle, Deficit: k.deficit(), MapCount: mapCount,
+		InflightPending: pending, Inflight: inflight, IdleStreak: k.idleStreak,
 		EnvPinned:  EnvPinned(),
 		LastAction: k.lastAct, LastRunTS: tsOf(k.lastRun), LastErr: k.lastErr,
 	}
@@ -700,13 +818,18 @@ func (k *Keeper) Status() Status {
 //
 // 判决顺序（用户口径：任务链路优先，游荡吃余量）：
 //  1. 回收优先：任务池缺口 > 0 且 reclaim_on_deficit → 回收 min(缺口, max_step, 在游荡) 个游荡号，本轮结束；
-//  2. 补位：否则在游荡 < target → 取 min(缺额, max_step, 空闲数) 个空闲号，按图均匀派出去。
+//  2. 补位：否则在游荡（含在途占位）< target → 取 min(缺额, max_step, 空闲数) 个空闲号，按图均匀派出去。
+//
+// 2026-09-23 P1（派发节流降噪）：派出去的号记「在途」——TTL（inflight_ttl_sec，默认 120s）内没等到
+// walk.enabled=true 就不再派它；连续未生效按 backoff_sec（默认 60→120→300s）退避；在途数计入目标缺口，
+// 避免"上一批还在路上又派一批"。背景：现场 60 派/分、54 拒/分、同号同图 10s 一轮（详见 Inflight 注释）。
 func (k *Keeper) Tick(now time.Time) bool {
 	cfg := k.Config()
 	if !cfg.Enabled {
 		return false
 	}
 	robots := k.robots()
+	k.syncInflight(robots) // 先保鲜：已生效（walk.enabled）/已离线的从在途账里清除
 	running, idleN := 0, 0
 	for _, r := range robots {
 		if Roaming(r) {
@@ -716,6 +839,7 @@ func (k *Keeper) Tick(now time.Time) bool {
 			idleN++
 		}
 	}
+	pending := k.inflightPending(now, cfg) // 在途占位（TTL 内、还没生效的）
 	k.mu.Lock()
 	k.lastRun = now
 	k.mu.Unlock()
@@ -724,45 +848,51 @@ func (k *Keeper) Tick(now time.Time) bool {
 	// ① 回收优先：任务池缺人 → 把游荡号还给任务池（本轮不再补位，名额让给任务池）
 	if deficit > 0 && cfg.ReclaimOnDeficit {
 		n := minInt(deficit, cfg.MaxStep, running)
-		if n <= 0 {
-			k.note(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running))
-			return false
-		}
 		picked := PickReclaim(robots, n, k.d.ReclaimEligible)
 		if len(picked) == 0 {
-			k.note(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running))
+			k.noop(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running),
+				"noreclaim|d"+notch(deficit)+"|i"+notch(idleN), now)
+			k.markRound(false)
 			return false
 		}
 		sent, err := k.doStop(picked)
 		if err != nil {
 			k.fail("回收", err)
+			k.markRound(true) // 出错要按正常节奏重试
 			return false
 		}
-		k.note(fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少）：%s",
-			len(sent), deficit, strings.Join(sent, ",")))
+		k.noteAction(actionReclaim, len(sent),
+			fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少）：%s",
+				len(sent), deficit, strings.Join(sent, ",")), now)
+		k.markRound(true)
 		return true
 	}
 
-	// ② 补位：在游荡 < 目标 → 优先空闲号；不够且任务池**超编**时，从"可中断的超编号"里补
+	// ② 补位：在游荡 + 在途 < 目标 → 优先空闲号；不够且任务池**超编**时，从"可中断的超编号"里补
 	//    （2026-09-23 P1 超编温和收敛：把多余的抓鬼号转成游荡 → 任务池回到目标附近、
 	//    游荡池回补；每轮 ≤ MaxStep，绝不打断战斗/交付/对话/跨图导航中的号）。
-	if running >= cfg.Target {
-		k.note(fmt.Sprintf("游荡池达标（在游荡 %d / 目标 %d，空闲 %d，缺口 %d）", running, cfg.Target, idleN, deficit))
+	if running+pending >= cfg.Target {
+		k.noteGoal(fmt.Sprintf("游荡池达标（在游荡 %d + 在途 %d / 目标 %d，空闲 %d，缺口 %d）",
+			running, pending, cfg.Target, idleN, deficit), now)
+		k.markRound(false)
 		return false
 	}
-	want := minInt(cfg.Target-running, cfg.MaxStep)
-	idle := PickIdle(robots, want)
+	want := minInt(cfg.Target-running-pending, cfg.MaxStep)
+	pool := k.pickableRobots(robots, now) // P1：剔掉在途/退避窗口内的号（别再重复派）
+	idle := PickIdle(pool, want)
 	excess := 0
 	if len(idle) < want && deficit < 0 {
 		// 任务池超编（deficit<0）才有"多余的号"可收；不足部分从可中断的在抓鬼号里补。
-		if extra := PickExcess(robots, want-len(idle)); len(extra) > 0 {
+		if extra := PickExcess(pool, want-len(idle)); len(extra) > 0 {
 			excess = len(extra)
 			idle = append(idle, extra...)
 		}
 	}
 	if len(idle) == 0 {
-		k.note(fmt.Sprintf("游荡池差 %d 个，但没有空闲号/可中断的超编号可派（在游荡 %d / 目标 %d，空闲 %d，任务池缺口 %d）",
-			cfg.Target-running, running, cfg.Target, idleN, deficit))
+		k.noop(fmt.Sprintf("游荡池差 %d 个，但没有空闲号/可中断的超编号可派（在游荡 %d + 在途 %d / 目标 %d，空闲 %d，任务池缺口 %d）",
+			cfg.Target-running-pending, running, pending, cfg.Target, idleN, deficit),
+			"nofill|d"+notch(deficit)+"|i"+notch(idleN), now)
+		k.markRound(false)
 		return false
 	}
 	excessNote := ""
@@ -773,15 +903,20 @@ func (k *Keeper) Tick(now time.Time) bool {
 		sent, err := k.doDispatch(idle, "random")
 		if err != nil {
 			k.fail("补位", err)
+			k.markRound(true)
 			return false
 		}
-		k.note(fmt.Sprintf("补位 %d 个（随机图，每号自抽，在游荡 %d / 目标 %d）：%s%s",
-			len(sent), running, cfg.Target, strings.Join(sent, ","), excessNote))
+		k.noteAction(actionDispatch, len(sent),
+			fmt.Sprintf("补位 %d 个（随机图，每号自抽，在游荡 %d / 目标 %d）：%s%s",
+				len(sent), running, cfg.Target, strings.Join(sent, ","), excessNote), now)
+		k.markDispatch(sent, "random", now, cfg) // P1：在途记账（等 walk.enabled 确认生效）
+		k.markRound(true)
 		return true
 	}
 	maps := k.roamMaps(true)
 	if len(maps) == 0 {
-		k.note("没有可用的游荡图（链数据里没有带网格的图 / 白名单与网格没有交集）")
+		k.noop("没有可用的游荡图（链数据里没有带网格的图 / 白名单与网格没有交集）", "nomaps", now)
+		k.markRound(false)
 		return false
 	}
 	groups := BalanceAssign(idle, MapLoads(robots, maps), len(idle))
@@ -794,15 +929,22 @@ func (k *Keeper) Tick(now time.Time) bool {
 			continue
 		}
 		sent[m] = got
+		k.markDispatch(got, m, now, cfg) // P1：在途记账（记下目标图，退避按"同号"统一算）
 	}
 	if len(sent) == 0 {
+		k.markRound(true)
 		return false
 	}
-	k.note(fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d）%s", countAssigned(sent), assignText(sent), running, cfg.Target, excessNote))
+	k.noteAction(actionDispatch, countAssigned(sent),
+		fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d）%s",
+			countAssigned(sent), assignText(sent), running, cfg.Target, excessNote), now)
+	k.markRound(true)
 	return true
 }
 
 // Start 周期跑（ctx 结束即退出）。1 秒粒度轮询：interval_sec 改小了下一轮立刻生效。
+// 空转（连续无动作、无活可干）时把间隔 ×2 拉长到 idleBackoffMax（60s）——降噪用；
+// 一有动作/可动作候选立刻回到 interval_sec。
 func (k *Keeper) Start(ctx context.Context) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -817,7 +959,7 @@ func (k *Keeper) Start(ctx context.Context) {
 				last = time.Time{} // 关掉再开：立刻跑一轮，不用等一个间隔
 				continue
 			}
-			if !last.IsZero() && now.Sub(last) < time.Duration(cfg.IntervalSec)*time.Second {
+			if !last.IsZero() && now.Sub(last) < k.effectiveInterval(cfg) {
 				continue
 			}
 			last = now
@@ -874,14 +1016,263 @@ func (k *Keeper) doStop(accounts []string) ([]string, error) {
 }
 
 // ---------------------------------------------------------------- 小工具
+//
+// 日志降噪（2026-09-23）：三类行各有节流 ——
+//   - noop()：空转说明行，同"类型+缺口档+空闲档"noopLogSec 内只打一条；
+//   - noteGoal()：达标行，状态翻转时立刻打 + 稳定期心跳一条（goalLogSec）；
+//   - noteAction()：动作行，actionLogSec 聚合一条（窗口内首条原样，后续累计成"近Ns 另：…"前缀）。
+// **三者都照常更新 k.lastAct**（面板 UI 状态不丢，只是日志行被节流）。
 
-// note 记"最近一次动作/说明"（只保留最近一条，供面板看）并写日志。
-func (k *Keeper) note(msg string) {
+// actionKind 动作行种类（聚合计数用；拼日志时也用它的中文名）。
+type actionKind string
+
+const (
+	actionDispatch actionKind = "补位"
+	actionReclaim  actionKind = "回收"
+)
+
+// noop 空转说明行（无动作、无活可干）：同键 noopLogSec 内只真正写一条日志；
+// lastAct 每轮都更新（面板显示"最近一次判决说明"不受影响）。
+func (k *Keeper) noop(msg, key string, now time.Time) {
 	k.mu.Lock()
-	k.lastAct = msg
-	k.lastErr = ""
+	k.lastAct, k.lastErr = msg, ""
+	k.goalState = false // 非达标
+	last, ok := k.throttle[key]
+	fire := !ok || now.Sub(last) >= noopLogSec*time.Second
+	if fire {
+		k.throttle[key] = now
+	}
 	k.mu.Unlock()
-	k.logf("[ROAMPOOL] %s", msg)
+	if fire {
+		k.logf("[ROAMPOOL] %s", msg)
+	}
+}
+
+// noteGoal 达标行：状态翻转（非达标 → 达标）时立刻写一条；稳定期每 goalLogSec 心跳一条。
+func (k *Keeper) noteGoal(msg string, now time.Time) {
+	k.mu.Lock()
+	flip := !k.goalState
+	k.goalState = true
+	fire := flip || k.goalLogAt.IsZero() || now.Sub(k.goalLogAt) >= goalLogSec*time.Second
+	if fire {
+		k.goalLogAt = now
+	}
+	k.lastAct, k.lastErr = msg, ""
+	k.mu.Unlock()
+	if fire {
+		k.logf("[ROAMPOOL] %s", msg)
+	}
+}
+
+// noteAction 动作行（补位/回收）聚合写日志：窗口内第一条原样打；之后的被抑制并累计，
+// 到下一条真正写日志时带上"近Ns 另：补位 x 次/y 个、回收 z 次/w 个"前缀（被抑制的量不静默）；
+// lastAct 每次都更新（面板状态不丢）。
+func (k *Keeper) noteAction(kind actionKind, n int, msg string, now time.Time) {
+	k.mu.Lock()
+	if kind == actionReclaim {
+		k.actRecN++
+		k.actRecAcc += n
+	} else {
+		k.actDispN++
+		k.actDispAcc += n
+	}
+	fire := k.actLogAt.IsZero() || now.Sub(k.actLogAt) >= actionLogSec*time.Second
+	prefix := ""
+	if fire {
+		// 前缀只报"本行之前被抑制的"量（本行马上就原样打出来，不重复计）。
+		supD, supDA, supR, supRA := k.actDispN, k.actDispAcc, k.actRecN, k.actRecAcc
+		if kind == actionReclaim {
+			supR, supRA = supR-1, supRA-n
+		} else {
+			supD, supDA = supD-1, supDA-n
+		}
+		if supD > 0 || supR > 0 {
+			prefix = fmt.Sprintf("近%ds 另：补位 %d 次/%d 个、回收 %d 次/%d 个；", actionLogSec, supD, supDA, supR, supRA)
+		}
+		k.actLogAt = now
+		k.actDispN, k.actDispAcc, k.actRecN, k.actRecAcc = 0, 0, 0, 0
+	}
+	k.lastAct, k.lastErr = msg, ""
+	k.goalState = false
+	k.mu.Unlock()
+	if fire {
+		k.logf("[ROAMPOOL] %s%s", prefix, msg)
+	}
+}
+
+// markRound 记一轮"有没有活可干/干过活"（空转退避用）：acted=true（有动作、有可动作候选、
+// 或出错要按正常节奏重试）→ 退避清零；false（真空转）→ 退避档位 +1（上限见 effectiveInterval）。
+func (k *Keeper) markRound(acted bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if acted {
+		k.idleStreak = 0
+		return
+	}
+	if k.idleStreak < 8 {
+		k.idleStreak++
+	}
+}
+
+// effectiveInterval 本轮该等多久（空转退避，2026-09-23 降噪）：
+// 连续空转 → interval×2、×4… 上限 idleBackoffMax（60s）；一有动作/可动作候选立刻回到 interval_sec。
+func (k *Keeper) effectiveInterval(cfg Config) time.Duration {
+	base := time.Duration(cfg.IntervalSec) * time.Second
+	k.mu.Lock()
+	streak := k.idleStreak
+	k.mu.Unlock()
+	d := base
+	for i := 0; i < streak && d < idleBackoffMax; i++ {
+		d *= 2
+	}
+	if d > idleBackoffMax {
+		d = idleBackoffMax
+	}
+	if d < base {
+		d = base
+	}
+	return d
+}
+
+// ---------------------------------------------------------------- 在途/退避（P1，2026-09-23）
+
+// now 当前时间（Deps.Now 注入；New 已保证非 nil）。
+func (k *Keeper) now() time.Time { return k.d.Now() }
+
+// syncInflight 在途账保鲜（每轮先跑）：已生效（walk.enabled=true）/已离线的清除。
+// 「已判失败但还在退避窗口内」的记录**保留**（until 管着"不再派"，TTL 只管"算不算在途占位"）。
+func (k *Keeper) syncInflight(robots []state.Robot) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.inflight) == 0 {
+		return
+	}
+	live := make(map[string]state.Robot, len(robots))
+	for _, r := range robots {
+		if r.Account != "" {
+			live[r.Account] = r
+		}
+	}
+	for acc, a := range k.inflight {
+		r, ok := live[acc]
+		if !ok || !r.Online {
+			delete(k.inflight, acc) // 这号不在池子里了（离线/状态行被清理）
+			continue
+		}
+		if Roaming(r) { // 生效（walk.enabled=true）→ 结案；连续失败过的记一条（退避解除）
+			delete(k.inflight, acc)
+			if a.fails > 1 {
+				k.logf("[ROAMPOOL] %s 游荡已生效（此前连续 %d 次派发未生效，退避解除）", acc, a.fails)
+			}
+		}
+	}
+}
+
+// inflightPending 在途占位号数：仍在「退避/生效等待窗口」内（until 未到）且距上次派发不超过 TTL。
+//
+// 为什么取两者的小者：until 是"不再派这个号"的窗口（退避 60/120/300s），TTL 是"我们还不知道
+// 这次派发算不算成功"的窗口（默认 120s，机器人秒级就该上报 walk.enabled）—— 占位只该持续到
+// "结果已知"为止：300s 档位时占位最多 120s（之后就不再挤占目标缺口，让其它号补进来），
+// 但 blocked 仍然持续到 until（不重复派）。这样重派节奏恰好是 60→120→300s。
+func (k *Keeper) inflightPending(now time.Time, cfg Config) int {
+	ttl := time.Duration(cfg.InflightTTLSec) * time.Second
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for _, a := range k.inflight {
+		if now.Before(a.until) && now.Sub(a.at) < ttl {
+			n++
+		}
+	}
+	return n
+}
+
+// inflightView 在途明细快照（按账号升序；面板用）+ 在途占位数（口径同上）。
+func (k *Keeper) inflightView(now time.Time, cfg Config) ([]Inflight, int) {
+	ttl := time.Duration(cfg.InflightTTLSec) * time.Second
+	k.mu.Lock()
+	out := make([]Inflight, 0, len(k.inflight))
+	pending := 0
+	for acc, a := range k.inflight {
+		p := now.Before(a.until) && now.Sub(a.at) < ttl
+		if p {
+			pending++
+		}
+		out = append(out, Inflight{Account: acc, MapID: a.mapID, At: a.at, Fails: a.fails,
+			Until: a.until, Pending: p})
+	}
+	k.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
+	return out, pending
+}
+
+// pickableRobots 派发候选池：剔掉"退避窗口内（until 未到）"的号（在途/已判失败都算）。
+func (k *Keeper) pickableRobots(robots []state.Robot, now time.Time) []state.Robot {
+	k.mu.Lock()
+	if len(k.inflight) == 0 {
+		k.mu.Unlock()
+		return robots
+	}
+	blocked := make(map[string]bool, len(k.inflight))
+	for acc, a := range k.inflight {
+		if now.Before(a.until) {
+			blocked[acc] = true
+		}
+	}
+	k.mu.Unlock()
+	if len(blocked) == 0 {
+		return robots
+	}
+	out := make([]state.Robot, 0, len(robots))
+	for _, r := range robots {
+		if !blocked[r.Account] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// markDispatch 记一批"已下发游荡"的号（P1 在途记账）。
+//
+// 能走到这里说明这些号不在退避窗口内（pickableRobots 已剔除）→ 账上若已有记录，
+// 只能是"上一次派发窗口过了还没生效（没等到 walk.enabled）" → 退避升级 60→120→300s（末档为上限）。
+func (k *Keeper) markDispatch(accounts []string, mapid any, now time.Time, cfg Config) {
+	mid := 0
+	if v, ok := mapid.(int); ok {
+		mid = v // "random"/非法值 → 0（随机图）
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, acc := range accounts {
+		if acc == "" {
+			continue
+		}
+		fails := 1
+		if prev, ok := k.inflight[acc]; ok {
+			fails = prev.fails + 1
+		}
+		if n := len(cfg.BackoffSec); n > 0 && fails > n {
+			fails = n // 档位封顶（= 退避上限）
+		}
+		k.inflight[acc] = &roamAttempt{mapID: mid, at: now, fails: fails,
+			until: now.Add(backoffWindow(cfg, fails))}
+	}
+}
+
+// backoffWindow 第 fails 档退避时长（超出档位取最后一档；空档位=0）。
+func backoffWindow(cfg Config, fails int) time.Duration {
+	list := cfg.BackoffSec
+	if len(list) == 0 {
+		return 0
+	}
+	i := fails - 1
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(list) {
+		i = len(list) - 1
+	}
+	return time.Duration(list[i]) * time.Second
 }
 
 // fail 记一次失败（不退出、不影响下一轮）。
@@ -941,6 +1332,40 @@ func normMaps(in []int) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// normBackoff 退避档位规范化：丢掉 <=0/超上限的、去重、升序；空/全非法 → 默认 [60,120,300]。
+func normBackoff(in []int) []int {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(in))
+	for _, v := range in {
+		if v <= 0 || v > MaxBackoffSec || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return defaultBackoffSec()
+	}
+	sort.Ints(out)
+	return out
+}
+
+// notch 数值分档（日志节流键用）：把"缺口/空闲数"归到粗档，避免每轮一个键导致去重失效。
+func notch(n int) string {
+	switch {
+	case n <= 0:
+		return "0"
+	case n < 5:
+		return "1-4"
+	case n < 10:
+		return "5-9"
+	case n < 50:
+		return "10-49"
+	default:
+		return "50+"
+	}
 }
 
 // parseMaps 解析 "6,17,34,40" / "6 17"（环境变量 CTRL_ROAMPOOL_MAPS 用）。

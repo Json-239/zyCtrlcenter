@@ -12,10 +12,12 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/roampool"
@@ -27,14 +29,15 @@ import (
 // RoampoolDeps 组装"游荡池 keeper"的依赖（main 用它创建 roampool.Keeper）。
 func (a *API) RoampoolDeps() roampool.Deps {
 	return roampool.Deps{
-		Robots:   a.roampoolRobots,
+		Robots: a.roampoolRobots,
 		// 2026-09-22 P0：回收资格闸 —— 只回收"回收后真能进任务池"的号（否则回收-重派空转）
 		ReclaimEligible: a.roamReclaimEligible,
-		Deficit:  a.roampoolDeficit,
-		Maps:     a.roampoolMaps,
-		Dispatch: a.roampoolDispatch,
-		Stop:     a.roampoolStop,
-		Log:      func(format string, args ...any) { a.Log.Printf(format, args...) },
+		Deficit:         a.roampoolDeficit,
+		Maps:            a.roampoolMaps,
+		Dispatch:        a.roampoolDispatch,
+		Stop:            a.roampoolStop,
+		Now:             time.Now, // P1：Status 算"在途/退避"用
+		Log:             func(format string, args ...any) { a.Log.Printf(format, args...) },
 	}
 }
 
@@ -206,7 +209,9 @@ func (a *API) roampoolSnapshot() map[string]any {
 		"enabled": st.Enabled, "target": st.Target, "interval_sec": st.IntervalSec, "max_step": st.MaxStep,
 		"minutes": st.Minutes, "balance": st.Balance, "reclaim_on_deficit": st.ReclaimOnDeficit,
 		"maps": st.Maps, "mode": st.Mode,
+		"inflight_ttl_sec": st.InflightTTLSec, "backoff_sec": st.BackoffSec,
 		"running": st.Running, "idle": st.Idle, "deficit": st.Deficit, "map_count": st.MapCount,
+		"inflight_pending": st.InflightPending, "inflight": st.Inflight, "idle_streak": st.IdleStreak,
 		"env_pinned":  st.EnvPinned,
 		"last_action": st.LastAction, "last_run_ts": st.LastRunTS, "last_err": st.LastErr,
 	}
@@ -262,6 +267,18 @@ func (a *API) handleRoampoolPost(w http.ResponseWriter, r *http.Request) {
 	if _, ok := body["mode"]; ok {
 		cfg.Mode = strings.TrimSpace(toStr(body["mode"]))
 	}
+	// 2026-09-23 P1（派发节流）：在途 TTL 与退避档位（可热改；backoff_sec 给空数组 = 恢复默认）。
+	if _, ok := body["inflight_ttl_sec"]; ok {
+		cfg.InflightTTLSec = toInt(body["inflight_ttl_sec"], cfg.InflightTTLSec)
+	}
+	if _, ok := body["backoff_sec"]; ok {
+		list, err := parseIntListVal(body["backoff_sec"])
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "backoff_sec 非法：" + err.Error()})
+			return
+		}
+		cfg.BackoffSec = list
+	}
 	if _, ok := body["maps"]; ok {
 		if isEmptyMapsVal(body["maps"]) {
 			cfg.Maps = nil // 清空白名单：回到"链数据里有网格的图"
@@ -303,4 +320,38 @@ func isEmptyMapsVal(v any) bool {
 		return strings.TrimSpace(t) == ""
 	}
 	return false
+}
+
+// parseIntListVal 解析整数列表（2026-09-23 P1：backoff_sec 用）：
+// 接受 [60,120,300] / ["60","120"] / "60,120,300"；nil/空 → nil,nil（由 Config.Normalize 补默认）。
+func parseIntListVal(v any) ([]int, error) {
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case []any:
+		out := make([]int, 0, len(t))
+		for _, it := range t {
+			s := strings.TrimSpace(toStr(it))
+			if s == "" {
+				continue
+			}
+			n, err := strconv.Atoi(s)
+			if err != nil {
+				return nil, fmt.Errorf("项 %q 非法（应为正整数秒）", toStr(it))
+			}
+			out = append(out, n)
+		}
+		return out, nil
+	case string:
+		out := make([]int, 0, 4)
+		for _, p := range splitList(t) {
+			n, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil {
+				return nil, fmt.Errorf("项 %q 非法（应为正整数秒）", p)
+			}
+			out = append(out, n)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("不支持的类型 %T（应为秒数数组，如 [60,120,300]）", v)
 }

@@ -64,6 +64,12 @@ func TestRandomWalkDeliversChainWithTargetMap(t *testing.T) {
 	if cmd["mapid"] != float64(6) {
 		t.Fatalf("目标图应为 6（半月岛）: %v", cmd["mapid"])
 	}
+	// 2026-09-23 P0-a（派发节流降噪）：定向派发**必须显式带 maps=[目标图]** ——
+	// 机器人端把"没带 maps 的定向派发"误判成"给定选图全被排除"直接拒收（现场 keeper
+	// 每 10s 派一批、90% 被拒），带上白名单两条路径才同构。
+	if got := asSlice(cmd["maps"]); len(got) != 1 || got[0] != float64(6) {
+		t.Fatalf("定向派发应显式带 maps=[6]（否则机器人端误判拒收）: %v", cmd["maps"])
+	}
 	if cmd["minutes"] != float64(30) {
 		t.Fatalf("minutes 应透传: %v", cmd["minutes"])
 	}
