@@ -124,6 +124,9 @@ type API struct {
 	// chainInflight 新手链/捉鬼链（start_chain）"已派发未确认"在途表（2026-09-23 R1）：
 	// 与抓鬼同口径 —— 防连点「启动(自动分配)」重复下发 start_chain（新手链原先无在途记账）。
 	chainInflight dispatchInflightTable
+	// onlineInflight 批量上线（robot_manage add）"已下发未确认"在途表（2026-09-23 P2）：
+	// 池容量闸用它防"上一批还在登录路上，下一批又按旧在线数放行"（连批叠加超发）。
+	onlineInflight dispatchInflightTable
 	// throttle 注册自适应限速器（进程内一份；见 handlers_create.go）。
 	throttle *CreateThrottle
 }

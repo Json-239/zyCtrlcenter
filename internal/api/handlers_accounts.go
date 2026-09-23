@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"zyctrlcenter/internal/services/accounts"
+	"zyctrlcenter/internal/services/autotask"
 )
 
 // ---------------------------------------------------------------- 账号池
@@ -199,7 +200,8 @@ func (a *API) handleAccountsRemove(w http.ResponseWriter, r *http.Request) {
 //	  "limit": 20,                 // online 选号上限（默认 20，硬上限 500）
 //	  "chunk": 10,                 // 每条命令带多少个账号（默认 10）
 //	  "interval_ms": 500,          // 批间隔（默认 500ms，避免登录风暴）
-//	  "only_usable": true }        // 只选可用号（默认 true）
+//	  "only_usable": true,         // 只选可用号（默认 true）
+//	  "force": false }             // online：跳过池容量闸（默认 false，见 batchOnlineBudgetOf）
 func (a *API) handleRobotsBatch(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	action := strings.ToLower(toStr(body["action"]))
@@ -219,10 +221,11 @@ func (a *API) handleRobotsBatch(w http.ResponseWriter, r *http.Request) {
 		interval = 500
 	}
 	onlyUsable := toBool(body["only_usable"], true)
+	force := toBool(body["force"], false)
 
 	switch action {
 	case "online":
-		a.batchOnline(w, accounts, gameAddr, zoneArg, limit, chunk, interval, onlyUsable)
+		a.batchOnline(w, accounts, gameAddr, zoneArg, limit, chunk, interval, onlyUsable, force)
 	case "offline":
 		a.batchOffline(w, accounts, gameAddr, chunk, interval)
 	default:
@@ -230,9 +233,16 @@ func (a *API) handleRobotsBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// batchOnline 批量上线：选号 → 分批下发 robot_manage add。
+// batchOnline 批量上线：选号 → 池容量闸 → 分批下发 robot_manage add。
+//
+// 2026-09-23 P2（三池对齐）：新增**池容量闸** —— 批量上线原先没有任何池/容量约束，
+// 一次可 add 100~200 个号；这些号上线后被机器人端 auto_roam 兜底游荡、或按意图被各池
+// 补号通道拉去干活，把三池目标（抓鬼/新手/游荡余量）冲垮（见
+// docs/04-测试/分析-20260923-抓鬼分配逻辑.md 第四节"无约束批量上线"）。口径与逃生通道
+// 见 batchOnlineBudgetOf；超出容量的号本次不上线（不"上线后再移出"——团队口径明确否掉
+// "下线待命"：水位器会把压掉的号补回来，形成往返）。
 func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zoneArg string,
-	limit, chunk, interval int, onlyUsable bool) {
+	limit, chunk, interval int, onlyUsable, force bool) {
 
 	online := map[string]bool{}
 	for _, live := range a.St.Snapshot() {
@@ -254,7 +264,29 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 		}
 		accounts = kept
 	}
+	// 2026-09-23 P2：池容量闸 —— 超出"三池可承载"的号本次不上线（force 跳过）。
+	budget := a.batchOnlineBudgetOf()
+	queued := []string{}
+	if !force && budget.cap > 0 && len(accounts) > budget.allow {
+		queued = append(queued, accounts[budget.allow:]...)
+		accounts = accounts[:budget.allow]
+		a.Log.Printf("[BATCH] 池容量闸拦下 %d 个（容量 %d/%s，已占 %d，额度 %d）：%s",
+			len(queued), budget.cap, budget.source, budget.online, budget.allow, strings.Join(queued, ", "))
+	}
+
 	if len(accounts) == 0 {
+		if len(queued) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "requested": 0, "sent": 0, "accounts": []string{},
+				"queued": queued, "queued_count": len(queued), "forced": force,
+				"pool_cap": budget.cap, "pool_online": budget.online,
+				"pool_allow": budget.allow, "cap_source": budget.source,
+				"skipped_online": skipped,
+				"msg": "池容量已满（" + itoa(budget.online) + "/" + itoa(budget.cap) + "，" + budget.source + "）：" +
+					itoa(len(queued)) + " 个号本次未上线；等池内收工或调大目标后再上，或传 force:true 强制",
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "skipped_online": skipped,
 			"msg": "没有可上线的账号（都已在线或池里没有可用号）"})
 		return
@@ -262,12 +294,18 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 
 	sentAccounts, chunks, skippedNoPwd := a.sendOnlineChunks(accounts, gameAddr, chunk, interval, "batch_add")
 	sent := len(sentAccounts)
+	a.onlineInflight.mark(sentAccounts) // P2：上线在途记账（容量闸防"上一批还在登录路上又放行下一批"）
 	// 2026-09-23 R3：显式上线 = 用户让它干活 → 解除人工暂停（只解除本次真的下发成功的号）。
 	a.resumeAccounts(sentAccounts)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_batch", "sub": "online",
 		"zone": zoneArg, "requested": len(accounts), "sent": sent, "chunks": chunks,
-		"interval_ms": interval})
+		"interval_ms": interval, "queued": queued, "force": force,
+		"pool_cap": budget.cap, "pool_online": budget.online, "cap_source": budget.source})
 	msg := "已分 " + itoa(chunks) + " 批下发上线（" + itoa(sent) + "/" + itoa(len(accounts)) + " 个）"
+	if len(queued) > 0 {
+		msg += "；" + itoa(len(queued)) + " 个未上线（池容量已满 " + itoa(budget.online) + "/" +
+			itoa(budget.cap) + "；等池内收工或调大目标，传 force:true 可强制）"
+	}
 	if len(skippedNoPwd) > 0 {
 		msg += "；跳过 " + itoa(len(skippedNoPwd)) + " 个库里没密码的号"
 	}
@@ -280,9 +318,94 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": sent > 0, "msg": msg, "requested": len(accounts), "sent": sent,
 		"chunks": chunks, "accounts": accounts, "skipped_online": skipped,
-		"skipped_no_password": skippedNoPwd,
+		"skipped_no_password": skippedNoPwd, "queued": queued, "queued_count": len(queued),
+		"forced": force, "pool_cap": budget.cap, "pool_online": budget.online,
+		"pool_allow": budget.allow, "cap_source": budget.source,
 		"zone":                zoneArg, "game_addr": gameAddr,
 	})
+}
+
+// ---------------------------------------------------------------- 批量上线池容量闸（2026-09-23 P2）
+
+// batchOnlineBudget 批量上线的"池容量预算"读数（见 batchOnlineBudgetOf）。
+type batchOnlineBudget struct {
+	cap    int    // 容量（0 = 三池都没配目标 → 不约束，保持旧行为）
+	source string // 容量来源："waterline"（水位目标）/ "pools"（三池目标之和）/ "none"
+	online int    // 已占：当前区在线数 + 已下发还没上线的在途数
+	allow  int    // 本次还能上线的额度 = max(0, cap - online)
+}
+
+// batchOnlineBudgetOf 计算批量上线的池容量预算（纯读，不动状态）。
+//
+// 背景（docs/04-测试/分析-20260923-抓鬼分配逻辑.md）：面板「批量上线」原先无任何池/容量约束，
+// 一次可 add 100~200 个号；上线后被机器人端 auto_roam 兜底游荡、或按意图被各池补号通道拉去
+// 干活，把三池目标（抓鬼/新手/游荡余量）冲垮 —— 与 /api/start(auto)、RESTORE 补发并列为超编
+// 来源。这里给批量上线补上"总容量"闸：
+//
+//	容量 cap  = 水位 target（水位**启用且配了目标**时；用户口径的"在线总数"就是这个数）
+//	          = 否则 Σ 三池 target（抓鬼 + 新手 + 游荡里 >0 的；水位没开时的回退口径）
+//	          = 都没配 → 0 → **不约束**（保持旧行为：未配置环境/测试不受影响）
+//	已占 online = 当前区在线号数 + onlineInflight 在途数（已下发 add、还没上线的号；
+//	              防"上一批还在登录路上，下一批又按旧在线数放行"的连批叠加）
+//	额度 allow = max(0, cap - online)
+//
+// 为什么用"总量"尺度而不是"按池归口"：号上线后去哪由池的**运行期判决**决定（抓鬼满额转
+// 游荡、任务池缺人回收游荡号、满额转游荡），按池硬分会让"该去游荡的满额号"上不了线。
+//
+// 逃生通道：请求带 force=true 跳过本闸（临时加压/排障）；被拦下的号作为 queued 回带，
+// **不**做"上线后再移出"（团队口径明确否掉"下线待命"：水位器会把压掉的号补回来，往返空转）。
+func (a *API) batchOnlineBudgetOf() batchOnlineBudget {
+	b := batchOnlineBudget{source: "none"}
+	// ① 容量：水位目标优先（它就是"在线总数"的口径），否则回退三池目标之和。
+	if a.Waterline != nil {
+		if st := a.Waterline.Status(); st.Enabled && st.Target > 0 {
+			b.cap, b.source = st.Target, "waterline"
+		}
+	}
+	if b.cap <= 0 {
+		if a.AutoTask != nil {
+			states := a.AutoTask.States()
+			for _, k := range []autotask.Kind{autotask.KindGhost, autotask.KindNewbie} {
+				if st, ok := states[k]; ok && st.Target > 0 {
+					b.cap += st.Target
+				}
+			}
+		}
+		if a.Roampool != nil {
+			if t := a.Roampool.Config().Target; t > 0 {
+				b.cap += t
+			}
+		}
+		if b.cap > 0 {
+			b.source = "pools"
+		}
+	}
+	// ② 已占：当前区在线数（本地快照；别的区的号不占本区额度）。
+	if a.St != nil {
+		key := a.currentZoneKey()
+		for _, r := range a.St.Snapshot() {
+			if !r.Online {
+				continue
+			}
+			if key != "" && r.Zone != "" && r.Zone != key {
+				continue
+			}
+			b.online++
+		}
+	}
+	// ③ 已占：上线在途（刚下发 add、还没上线；已上线的号按实时状态从在途表剔除）。
+	b.online += a.onlineInflight.count(func(acc string) bool {
+		if a.St == nil {
+			return false
+		}
+		r, ok := a.St.Get(acc)
+		return ok && r.Online // 命令已生效（号已上线）→ 交给在线数统计，不重复占用
+	})
+	b.allow = b.cap - b.online
+	if b.allow < 0 {
+		b.allow = 0
+	}
+	return b
 }
 
 // sendOnlineChunks 分批下发 robot_manage add（**批量上线/定时任务/水位保持共用这一条通路**）。
