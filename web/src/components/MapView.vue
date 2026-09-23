@@ -92,6 +92,12 @@ function doubleTitle(row) {
   return `今日（${txt}）已领双倍经验 · 优先抓鬼（双倍有时长，别派去游荡）`
 }
 
+// 2026-09-23 右侧信息面板「货币」行 / 批量选号列表共用：银两 / 储备金(reserve) / 存款(deposit)。
+//   0/缺失 → '-'；悬浮 title 给完整数值（列表列与详情行共用同一份口径）。
+function moneyTitle(row) {
+  return `银两 ${row?.money ?? 0} · 储备金 ${row?.reserve ?? 0} · 存款 ${row?.deposit ?? 0}`
+}
+
 // 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense)
 async function roamStart(kind, accs, targetMap) {
   const d = detail.value
@@ -633,11 +639,25 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             <el-tag size="small" :type="stateType(detail.state)">{{ detail.state || '--' }}</el-tag>
             <el-tag size="small" :type="detail.online ? 'success' : 'info'" effect="plain">{{ detail.online ? '在线' : '离线' }}</el-tag>
             <el-tag size="small" :type="detail.hs ? 'success' : 'warning'" effect="plain">{{ detail.hs ? '已握手' : '未握手' }}</el-tag>
+            <!-- 2026-09-23 今日已领双倍（机器人心跳 double_claim_date）→ 该号优先抓鬼 -->
+            <el-tag v-if="hasDouble(detail)" size="small" type="warning" effect="dark"
+                    :title="doubleTitle(detail)">双</el-tag>
           </td></tr>
           <tr><td class="muted">区 / 地图</td><td>{{ detail.zone || '--' }} · {{ mapLabel(detail.mapid) }}</td></tr>
           <tr><td class="muted">坐标(格) / 像素</td>
             <td class="mono">{{ posLabel(detail.pos) }} / {{ (detail.pos || []).join(', ') || '--' }}</td></tr>
           <tr><td class="muted">任务</td><td class="mono" :title="taskHint(detail.task_index)">{{ taskLabel(detail.task_index) }} · 进度 {{ detail.done || 0 }}</td></tr>
+          <!-- 2026-09-23 货币（用户要求放右侧信息面板）：银两 / 储备金 / 存款（钱庄存款）。
+               数据来自机器人心跳（90353 全量 + 90073 增量解析）；0/缺失显示 '-'，悬浮给完整数值。 -->
+          <tr><td class="muted">货币</td>
+            <td class="mono" :title="moneyTitle(detail)">
+              <span class="ok-text">{{ fmtMoney(detail.money) }}</span>
+              <span class="muted"> / </span>
+              <span class="warn-text">{{ fmtMoney(detail.reserve) }}</span>
+              <span class="muted"> / </span>
+              <span>{{ fmtMoney(detail.deposit) }}</span>
+              <span class="muted small">（银两 / 储备金 / 存款）</span>
+            </td></tr>
           <tr v-if="detail.err_code"><td class="muted">最近错误</td>
             <td><el-tag size="small" type="danger">{{ detail.err_code }} ×{{ detail.err_repeat || 1 }}</el-tag>
               <span class="muted">{{ detail.err_msg }}</span></td></tr>
