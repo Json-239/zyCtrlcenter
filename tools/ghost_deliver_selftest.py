@@ -235,6 +235,23 @@ check("S15 GhostState.__init__ / reset 均初始化 submit_rounds",
 check("S16 通用看门狗块内无 SUBMIT 专有 rounds 判定",
       "SUBMIT" not in watchdog_block.replace("SUBMIT_FAIL_LIMIT", ""))
 
+# S17: 跨图"无回执"看门狗接入 __consume_nav(nav-owner 87534aa; 抓鬼模式下
+#      quest_engine.tester 被跳过 → 不接入则该看门狗在抓鬼场景从不执行)
+i_cn = ghost_src.find("def __consume_nav(")
+i_hook = ghost_src.find("quest_engine.__check_hop_noack(robot_object, quest, now_ms)", i_cn)
+check("S17 无回执看门狗已接入 __consume_nav(带 dijkstra_waiting 闸门)",
+      0 <= i_cn < i_hook
+      and 'getattr(quest, "dijkstra_waiting", False)' in ghost_src[max(0, i_hook - 260):i_hook + 60],
+      "consume_nav@%s hook@%s" % (i_cn, i_hook))
+
+# S18: 接口契约: 同目录 quest_engine.py 必须定义 __check_hop_noack(缺失会在
+#      "已发 destination 等回执"时 AttributeError; 双副本同步由 cold_start 覆盖)
+_qe_path = os.path.join(script_dir, "quest_engine.py")
+_qe_src = open(_qe_path, encoding="utf-8").read() if os.path.isfile(_qe_path) else ""
+check("S18 接口契约: quest_engine.py 定义 __check_hop_noack",
+      "def __check_hop_noack(robot_object, quest, now_ms):" in _qe_src,
+      "qe=%s" % os.path.basename(_qe_path))
+
 
 # ================================================================ 动态执行
 def wrap_fn(name, body, params):
@@ -650,6 +667,6 @@ print()
 print("自检目标: %s" % script_dir)
 print("  %s sha1=%s" % (os.path.basename(ghost_path),
                         hashlib.sha1(ghost_src.encode("utf-8")).hexdigest()[:12]))
-total = 17 + 22
+total = 19 + 22
 print("结果：%d 项，失败 %d 项" % (total, fails))
 sys.exit(1 if fails else 0)
