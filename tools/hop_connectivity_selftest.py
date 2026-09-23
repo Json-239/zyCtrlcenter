@@ -270,6 +270,38 @@ def main():
             except Exception as _e2:
                 check("真实网格抽查(可选)未抛异常", False, str(_e2))
 
+    # ============================================================ B9. 起点校正半径(2026-09-23h map49)
+    # 现场: map49 进图到达点 (1160,856) = 阻挡格, 距最近可走格 11 格 > nearest_walkable
+    #   默认 radius=8 → 旧代码不校正/不写回 → A* 从阻挡起点直接 NO_LEGAL_ROUTE
+    #   ("地图 49 无可行路径")。修法: 起点校正块加 max_radius=40(640px, 与游荡吸附口径一致)。
+    check("起点校正带 radius=40(2026-09-23h map49)",
+          "nearest_walkable(_g0, from_x, from_y, max_radius=40)" in qe)
+    try:
+        import json as _json49
+        _repo49 = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+        _cfp49 = os.path.join(_repo49, "data", "chains", "zhongkui_nav.json")
+        if _rp is not None and os.path.exists(_cfp49):
+            _g49 = (_json49.load(open(_cfp49, encoding="utf-8")).get("map_grids") or {}).get("49")
+            if _g49:
+                _grid49 = _rp.MapGrid(49, _g49)
+                _r8 = _rp.nearest_walkable(_grid49, 1160, 856, max_radius=8)
+                _r40 = _rp.nearest_walkable(_grid49, 1160, 856, max_radius=40)
+                check("map49 现场: radius=8 → None(旧代码不校正、直接刷屏)", _r8 is None, _r8)
+                _px40 = None if _r40 is None else (_r40[0] * 16 + 8, _r40[1] * 16 + 8)
+                _ok40 = False
+                if _px40 is not None:
+                    _ok40 = _rp.GridPathFinder(_grid49).find_path(
+                        _px40[0], _px40[1], 1753, 918) is not None
+                check("map49 现场: radius=40 → (83,53)/(1336,856) 且到目标可达",
+                      _r40 == (83, 53) and _px40 == (1336, 856) and _ok40,
+                      (_r40, _px40, _ok40))
+            else:
+                check("map49 现场用例: 链数据含 map49(可选)", True, "跳过(无 map49)")
+        else:
+            check("map49 现场用例: 有链数据(可选)", True, "跳过(无链数据)")
+    except Exception as _e3:
+        check("map49 现场用例未抛异常", False, str(_e3))
+
     # ============================================================ C. "免费 hop 有效性"机制
     # (2026-09-23g, 用户口径: 免费跳点走不到 → 优先改走 NPC 跳转)
     #   A. hop_first_reach_ok: 首跳可达性预判(可达→免费优先; 不可达但就近点 ≤400px→仍走;
