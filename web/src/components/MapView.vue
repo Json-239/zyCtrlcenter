@@ -38,6 +38,7 @@ const HATCH_MAPS = [6, 17, 34, 40]  // 服务端 CFG/mount.xml：只有这 4 张
 const ROAM_PROFILES = [
   { id: 'default', label: 'default（拟人挂机）' },
   { id: 'dense', label: 'dense（密集游荡）' },
+  { id: 'wild', label: 'wild（野外挂机刷怪）' },
   { id: 'gather', label: 'gather（采集·占位未实现）' },
 ]
 const ROAM_KIND_LABEL = { current: '当前图', picked: '指定图', random: '随机图', hatch: '孵化图' }

@@ -40,7 +40,7 @@ const err = ref('')
 const selected = ref(new Set())
 
 const filter = reactive({ zone: '', keyword: '', usable: false, onlyOnline: false, includeLive: false, pool: '' })
-const batch = reactive({ limit: 1, chunk: 1, interval_ms: 1500, only_usable: true })
+const batch = reactive({ limit: 1, chunk: 1, interval_ms: 1500, only_usable: true, force: false })
 const addForm = reactive({ text: '', password: '', zone: '' })
 
 // 验证：默认「从本地库按当前区批量验证」；手输账号只是次要入口（同步验证单个/几个）
@@ -468,6 +468,7 @@ async function batchOnline(auto = false) {
       action: 'online', zone: targetZone(),
       limit: batch.limit, chunk: batch.chunk, interval_ms: batch.interval_ms,
       only_usable: batch.only_usable,
+      force: batch.force,   // 2026-09-23 P2 池容量闸：勾选则跳过（容量=水位target 或 Σ三池target）
     }
     if (names.length) body.accounts = names
     const res = await post('/api/robots/batch', body)
@@ -779,6 +780,10 @@ const headline = computed(() => {
       <el-button size="small" @click="selectPage('online')">选本页在线</el-button>
       <el-button size="small" @click="selectPage('none')">清空</el-button>
       <span class="spacer" />
+      <el-checkbox v-model="batch.force" size="small"
+                   title="池容量闸：默认按「水位 target / 三池 target 之和」限制上线数；勾选强制可突破（有超编风险）">
+        强制（跳过池容量闸）
+      </el-checkbox>
       <span class="k">自动挑号上限</span>
       <el-input-number v-model="batch.limit" size="small" :min="1" :max="500" :controls="false"
                        style="width: 78px" title="不勾选时自动挑号的个数（默认 1：一次一个）" />
