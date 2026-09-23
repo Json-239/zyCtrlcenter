@@ -225,6 +225,9 @@ func (r Robot) DailyFull(shareKey string) bool {
 }
 
 // DailyEntryFull 单条进度是否"已满/不可用"（state=DONE 或 limit>0 且 done ≥ limit）。
+//
+// 主判据是 **done ≥ limit**：机器人端满额停止时 state 会被 __request_stop 覆盖成 STOPPED
+// （DONE 常量几乎不会出现在心跳里，gp-1 2026-09-23 确认）。
 func DailyEntryFull(e DailyEntry) bool {
 	if strings.EqualFold(e.State, "DONE") {
 		return true
