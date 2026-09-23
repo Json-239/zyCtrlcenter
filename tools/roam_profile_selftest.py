@@ -267,7 +267,7 @@ def main():
             print("[PASS] %s" % name)
         else:
             nfail += 1
-            print("[FAIL] %s %s" % (name, ("(%s)" % detail) if detail else ""))
+            print("[FAIL] %s %s" % (name, ("(" + str(detail) + ")") if detail else ""))
     print("=== 结果: %s (共 %d 项断言, 失败 %d 项) ===" % ("PASS" if nfail == 0 else "FAIL", len(results), nfail))
     return 0 if nfail == 0 else 1
 
