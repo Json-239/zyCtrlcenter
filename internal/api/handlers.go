@@ -763,6 +763,16 @@ func (a *API) handleRobotsClearRemoved(w http.ResponseWriter, r *http.Request) {
 // 机器人端说明（client.py reload_scripts 分支）：reload 会重置模块级缓存
 // （导航链/网格缓存，下次收到带 chain 的命令会重新填充），建议任务间隙触发；
 // 已实例化的 QuestState 保留旧类，新属性访问须 getattr 兜底。
+// scriptsNoReload 协议/框架层模块（禁热更；改动走重启机器人）。
+//
+// 2026-09-23 生产实证：reload protocol3/msghandle 在多线程收包环境下触发
+// 0xc0000005 访问冲突 → 机器人进程崩溃、全部号掉线。这类模块只能冷启动加载。
+var scriptsNoReload = map[string]bool{
+	"protocol3": true, "msghandle": true, "cnet": true, "protocol": true,
+	"cnetwork": true, "robot_mgr": true, "robot": true, "client": true,
+	"main_tester": true,
+}
+
 func (a *API) handleReloadScripts(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	mods := make([]string, 0, 2)
@@ -773,6 +783,18 @@ func (a *API) handleReloadScripts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 2026-09-23 协议/框架层模块禁热更（生产实证：reload protocol3/msghandle 令机器人
+	// 访问冲突崩溃）—— 在下发前过滤，返回被拦清单（这类改动必须重启机器人）。
+	blocked := make([]string, 0, 2)
+	kept := make([]string, 0, len(mods))
+	for _, m := range mods {
+		if scriptsNoReload[m] {
+			blocked = append(blocked, m)
+			continue
+		}
+		kept = append(kept, m)
+	}
+	mods = kept
 	cmd := map[string]any{"cmd": "reload_scripts"}
 	if len(mods) > 0 {
 		cmd["modules"] = mods
@@ -784,7 +806,11 @@ func (a *API) handleReloadScripts(w http.ResponseWriter, r *http.Request) {
 	if ok && len(mods) > 0 {
 		msg += "（" + strings.Join(mods, ",") + "）"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "modules": mods, "msg": msg})
+	if len(blocked) > 0 {
+		msg += "；已拦截（协议/框架层需重启机器人）: " + strings.Join(blocked, ",")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "modules": mods,
+		"blocked": blocked, "msg": msg})
 }
 
 // ---------------------------------------------------------------- WebSocket

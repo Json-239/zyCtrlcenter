@@ -290,9 +290,38 @@ func (h *Handler) logLevelUpdate(account, zone string, u levelUpdate) {
 
 // ---------------------------------------------------------------- 事件分支
 
+// onHello 机器人握手（type=hello，进程启动/重连一次）与 pong（心跳应答，周期）。
+//
+// 2026-09-23 自愈修复：机器人进程重启 ⇒ 它身上的号全掉了，但中控旧状态仍是 online →
+// 水位器/自动任务判定"达标"而不补号（生产实测：重启后 230 个号没回来、游戏里看不见，
+// 只能人工批量 add 恢复）。因此**收到 hello（仅进程握手；pong 不触发）**时，把该区
+// 在线号标记离线，交由水位器/自动任务重新推号。
 func (h *Handler) onHello(ev map[string]any) {
-	h.Log.Printf("[EVENT] 机器人握手 hello version=%v pid=%v zone=%s",
-		ev["robot_version"], ev["pid"], zoneOf(ev))
+	evType := str(ev, "type")
+	h.Log.Printf("[EVENT] 机器人握手 %s version=%v pid=%v zone=%s",
+		evType, ev["robot_version"], ev["pid"], zoneOf(ev))
+	if evType != "hello" {
+		return // pong 等周期心跳不触发
+	}
+	zone := zoneOf(ev)
+	cleared := 0
+	for _, acc := range h.St.Accounts() {
+		r, ok := h.St.Get(acc)
+		if !ok || !r.Online {
+			continue
+		}
+		if zone != "" && r.Zone != "" && r.Zone != zone {
+			continue // 其它区的号不动（多区部署）
+		}
+		h.St.Update(acc, func(rr *state.Robot) {
+			rr.Online = false
+			rr.HS = false
+		})
+		cleared++
+	}
+	if cleared > 0 {
+		h.Log.Printf("[EVENT] 机器人重启握手(hello)：已把 %d 个号标记离线 → 水位器/自动任务将重新推号", cleared)
+	}
 }
 
 func (h *Handler) onRobotOnline(ev map[string]any) {

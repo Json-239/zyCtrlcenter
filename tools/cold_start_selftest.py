@@ -57,7 +57,9 @@ def check(name, ok, detail=""):
 # 纯 Python 下用 MagicMock 顶替；import 时若模块级代码真调用它，mock 也能承接。
 CORE = ["config", "protocol3", "robot_mgr", "quest_state", "quest_engine",
         "random_walk", "daily_ghost", "auto_roam", "robot_operator",
-        "msghandle", "cnet"]
+        "msghandle", "cnet",
+        # 2026-09-23 技能主动攻击（新模块）
+        "skill_meta", "skill_attack"]
 
 sys.path.insert(0, script_dir)
 sys.modules["cnetwork"] = MagicMock(name="cnetwork")
