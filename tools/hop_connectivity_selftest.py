@@ -258,6 +258,170 @@ def main():
             except Exception as _e2:
                 check("真实网格抽查(可选)未抛异常", False, str(_e2))
 
+    # ============================================================ C. "免费 hop 有效性"机制
+    # (2026-09-23g, 用户口径: 免费跳点走不到 → 优先改走 NPC 跳转)
+    #   A. hop_first_reach_ok: 首跳可达性预判(可达→免费优先; 不可达但就近点 ≤400px→仍走;
+    #      不可达且偏太远→判用不了, 调用方改走含 npc_jumper 路线);
+    #   B. 走不到也记 __hop_fail_note(report=False): 连 3 次 → 拉黑 10 分钟 →
+    #      之后规划自动改走 npc_jumper 备选。
+    if _rp is not None:
+        check("quest_engine 定义 hop_first_reach_ok(首跳可达性公共入口)",
+              "def hop_first_reach_ok(" in qe)
+        check("quest_engine 定义 HOP_NEAR_STEP_PX(就近点偏差上限 400px)",
+              "HOP_NEAR_STEP_PX = 400" in qe)
+        check("__hop_fail_note 支持 why/report(走不到可只计数+拉黑, 不重规划不停链)",
+              'def __hop_fail_note(robot_object, quest, hop, dest, why="被拒", report=True):' in qe)
+        check("__do_walk 的 NO_LEGAL_ROUTE 分支: 带 hop 的走不到也记账",
+              '__hop_fail_note(robot_object, quest, _hop, "walk", why="走不到", report=False)' in qe)
+        rw_path = os.path.join(script_dir, "random_walk.py")
+        rw = open(rw_path, encoding="utf-8", errors="replace").read() if os.path.exists(rw_path) else ""
+        check("random_walk.__goto_map: 首跳可达性预判 + 改走 NPC 路线",
+              "elif not quest_engine.hop_first_reach_ok(quest, robot_object, route):" in rw
+              and "改走跳转NPC 路线" in rw)
+
+        # ---- C1. hop_first_reach_ok 语义(自建紧凑网格, 不依赖 B 段 fixture 细节) ----
+        # 12x8: x=6 竖墙(y=2..7, 上方 y=0/1 可绕) + 右下 1x2 封闭口袋(x=9..10,y=4..5)
+        def _c_grid():
+            rows = []
+            for y in range(8):
+                row = ["0"] * 12
+                if 2 <= y <= 7:
+                    row[6] = "1"
+                rows.append(row)
+            for y in (3, 6):
+                for x in range(7, 12):
+                    rows[y][x] = "1"
+            for y in range(4, 6):
+                rows[y][8] = "1"
+                rows[y][11] = "1"
+            return {"w": 12, "h": 8, "rows": ["".join(r) for r in rows]}
+
+        C_GRID = _c_grid()
+        _cgrid = _rp.MapGrid(FIX_MAP, C_GRID)
+        _cfinder = _rp.GridPathFinder(_cgrid)
+        _c_main = (40, 40)			# 格(2,2) 主区
+        _c_pocket = (9 * 16 + 8, 4 * 16 + 8)	# 格(9,4) 口袋内(与主区不连通)
+
+        cns = {"robot_path": _rp, "HOP_NEAR_STEP_PX": 400}
+        import re as _re2
+        for _m2 in _re2.finditer(r"^(HOP_NEAR_STEP_PX)\s*=\s*(\d+)", qe, _re2.M):
+            cns[_m2.group(1)] = int(_m2.group(2))
+        cns["__chain_grid_for"] = lambda quest, mapid: C_GRID
+
+        def _c_build_path(quest, mapid, fx, fy, tx, ty):
+            return _cfinder.find_path(fx, fy, tx, ty)
+
+        cns["__build_path"] = _c_build_path
+        _fr_ns = dict(cns)
+        _frag_ncc = _extract_func(qe, "__nearest_connected_cell")
+        if _frag_ncc:
+            exec(_frag_ncc, _fr_ns)
+        _frag_hfr = _extract_func(qe, "hop_first_reach_ok")
+        check("提取 quest_engine.hop_first_reach_ok", _frag_hfr is not None)
+        if _frag_hfr:
+            try:
+                exec(_frag_hfr, _fr_ns)
+            except Exception as e:  # noqa
+                check("exec quest_engine.hop_first_reach_ok", False, str(e))
+        hfr = _fr_ns.get("hop_first_reach_ok")
+        if hfr is not None:
+            class _RO(object):
+                pass
+            ro = _RO()
+            ro.m_mapid = FIX_MAP
+            ro.m_pose = [_c_main[0], _c_main[1], 0]
+            q = types.SimpleNamespace(chain={"map_grids": {str(FIX_MAP): C_GRID}})
+            check("首跳可达性: 免费跳点可达 → True(免费优先, 行为不变)",
+                  hfr(q, ro, [{"kind": "map_skip", "x": _c_main[0], "y": _c_main[1]}]) is True)
+            check("首跳可达性: 不可达但就近可走点很近(≤400px) → True(走过去仍可能触发免费跳)",
+                  hfr(q, ro, [{"kind": "map_skip", "x": _c_pocket[0], "y": _c_pocket[1]}]) is True)
+            _far_pt = (FIX_MAP and 12 * 16 + 600, 4 * 16 + 8)	# 网格外 600px+, 就近点偏太远
+            check("首跳可达性: 不可达且就近点偏太远(>400px) → False(改走 NPC 路线)",
+                  hfr(q, ro, [{"kind": "map_skip", "x": _far_pt[0], "y": _far_pt[1]}]) is False)
+            check("首跳可达性: 非 map_skip(npc_jumper) → True(不拦)",
+                  hfr(q, ro, [{"kind": "npc_jumper", "x": 9999, "y": 9999}]) is True)
+            check("首跳可达性: 跳点无坐标 → True(不可判不拦)",
+                  hfr(q, ro, [{"kind": "map_skip"}]) is True)
+            _fr_ns["__build_path"] = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+            check("首跳可达性: 试算异常 → True(退回旧行为, 不钉死)",
+                  hfr(q, ro, [{"kind": "map_skip", "x": _far_pt[0], "y": _far_pt[1]}]) is True)
+            _fr_ns["__build_path"] = _c_build_path
+
+        # ---- C2. __hop_fail_note(report=False) 计数 → 拉黑; 拉黑后规划改走 NPC ----
+        ev_logs = []
+        fns = {"HOP_FAIL_LIMIT": 3, "HOP_BLACKLIST_MS": 10 * 60 * 1000,
+               "__hop_key": lambda fm, e: (int(fm or 0), e.get("destination_index")),
+               "__emit": lambda ro, ev: ev_logs.append(ev.get("msg") or ""),
+               "__report_stuck": lambda ro, q, why: ev_logs.append("STUCK:" + why),
+               "__teleport_click": lambda *a, **kw: ev_logs.append("REPLAN")}
+        import time as _t2
+        fns["time"] = _t2
+        for _m3 in _re2.finditer(r"^(HOP_FAIL_LIMIT|HOP_BLACKLIST_MS)\s*=\s*(\d+)", qe, _re2.M):
+            fns[_m3.group(1)] = int(_m3.group(2))
+        _frag_note = _extract_func(qe, "__hop_fail_note")
+        check("提取 quest_engine.__hop_fail_note", _frag_note is not None)
+        if _frag_note:
+            try:
+                exec(_frag_note, fns)
+            except Exception as e:  # noqa
+                check("exec quest_engine.__hop_fail_note", False, str(e))
+        note = fns.get("__hop_fail_note")
+        if note is not None:
+            class _RO2(object):
+                pass
+            ro2 = _RO2()
+            ro2.m_mapid = 11
+            q2 = types.SimpleNamespace(chain=None, hop_black={})
+            hop = {"kind": "map_skip", "destination_index": 61, "target_map": 45,
+                   "x": 152, "y": 246, "_from_map": 11}
+            r1 = note(ro2, q2, hop, "walk", why="走不到", report=False)
+            r2 = note(ro2, q2, hop, "walk", why="走不到", report=False)
+            check("走不到记账: 第 1/2 次未达阈值 → False(不拉黑)",
+                  r1 is False and r2 is False and hop.get("_fail") == 2 and not q2.hop_black,
+                  (r1, r2, hop.get("_fail")))
+            r3 = note(ro2, q2, hop, "walk", why="走不到", report=False)
+            check("走不到记账: 第 3 次 → True + 拉黑 10 分钟(键=(11,61))",
+                  r3 is True and (11, 61) in q2.hop_black
+                  and q2.hop_black[(11, 61)] > _t2.time() * 1000,
+                  q2.hop_black)
+            check("走不到记账: 日志写明'走不到'(not 被拒)",
+                  any("走不到" in m and "拉黑 10 分钟" in m for m in ev_logs), ev_logs[-3:])
+            check("走不到记账: report=False → 不重规划/不停链",
+                  not any(m == "REPLAN" or m.startswith("STUCK:") for m in ev_logs), ev_logs[-3:])
+
+            # 拉黑后: 同图对的免费 hop 被跳过, 改走 npc_jumper 备选(第二次规划自动换)
+            gns = {"__hop_key": fns["__hop_key"], "time": _t2,
+                   "g_chain_grid_cache": {}, "g_chain_dijkstra_cache": {}}
+            for _m4 in _re2.finditer(r"^(BAD_JUMPERS|HOP_FAIL_LIMIT|HOP_BLACKLIST_MS)\s*=", qe, _re2.M):
+                pass
+            _frag_find = _extract_func(qe, "__find_dijkstra_route")
+            check("提取 quest_engine.__find_dijkstra_route", _frag_find is not None)
+            if _frag_find:
+                try:
+                    exec(_frag_find, gns)
+                except Exception as e:  # noqa
+                    check("exec quest_engine.__find_dijkstra_route", False, str(e))
+            find_route = gns.get("__find_dijkstra_route")
+            if find_route is not None:
+                TABLE = {"11": [{"kind": "map_skip", "destination_index": 61, "target_map": 45,
+                                 "x": 152, "y": 246, "_from_map": 11},
+                                {"kind": "npc_jumper", "destination_index": 62, "target_map": 45,
+                                 "x": 300, "y": 300, "npc_index": 1, "cost_money": 10,
+                                 "_from_map": 11}]}
+                qa = types.SimpleNamespace(chain={"dijkstra": dict(TABLE)}, hop_black={})
+                _r_free = find_route(qa, 11, 45, no_npc_jumper=True)
+                check("规划: 拉黑前免费路线可用(no_npc_jumper=True 选中 map_skip)",
+                      _r_free is not None and _r_free[0].get("kind") == "map_skip", _r_free)
+                qb = types.SimpleNamespace(chain={"dijkstra": dict(TABLE)},
+                                           hop_black={(11, 61): _t2.time() * 1000 + 600000})
+                _r_after = find_route(qb, 11, 45, no_npc_jumper=True)
+                check("规划: 免费 hop 是唯一 pure 选项且被拉黑 → 忽略黑名单再找一次(不返回 None, 旧安全网保留)",
+                      _r_after is not None, _r_after)
+                _r_npc = find_route(qb, 11, 45, no_npc_jumper=False, skip_bad_jumpers=True)
+                check("规划: 拉黑后改走 npc_jumper 备选(第二次规划自动换)✓",
+                      _r_npc is not None and _r_npc[0].get("kind") == "npc_jumper"
+                      and _r_npc[0].get("cost_money") == 10, _r_npc)
+
     nfail = 0
     for name, ok, detail in results:
         if ok:
