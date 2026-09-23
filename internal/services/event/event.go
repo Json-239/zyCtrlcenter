@@ -705,6 +705,17 @@ func (h *Handler) onError(ev map[string]any) {
 	}
 	zone := zoneOf(ev)
 	if code := str(ev, "code"); code != "" {
+		// 2026-09-23 分享日常「满额停止」= **正常收工**（不是故障）：机器人 __request_stop
+		// 发 error 事件并带 done/limit（share_daily.py），这里落满额表后直接返回 ——
+		// 不计错误、不进"任务失败待处理"（否则每天满额一次会让 ErrRepeat 逐日累加，
+		// 第 3 天该号就被"同错 ≥3"判成卡住、不再自动派）。
+		// 为什么不靠心跳：满额后 ~2s 就停（心跳周期 3s），最后一条带 daily 的心跳常停在
+		// done=9/10，之后直接 None —— 事件流才是可靠信号（心跳路径保留作双保险）。
+		if strings.EqualFold(code, "SHARE_DAILY_DAILY_LIMIT") {
+			h.markShareDailyFullFromStop(account, ev)
+			h.Store.LogEvent(ev)
+			return
+		}
 		repeat := h.St.MarkTaskError(account, code, str(ev, "msg"))
 		h.St.Update(account, func(r *state.Robot) {
 			if r.Zone == "" {
@@ -752,6 +763,30 @@ func isGhostUnavailableCode(code string) bool {
 // GHOST_DIALOG_STUCK/TASK_STUCK 是抓鬼专属码；quest_engine 看门狗统一上报
 // STUCK_<STATE>（STUCK_WAIT_NEXT/STUCK_CLICK/...）—— 2026-09-21 前只认前两个，
 // 导致 8 个号卡 ERROR 25 分钟无人恢复。
+// markShareDailyFullFromStop 从"分享日常满额停止"事件落满额表（2026-09-23）。
+//
+// 事件形状（机器人 share_daily.py 的 __request_stop）：
+//
+//	{type:"error", code:"SHARE_DAILY_<CODE>", msg, state:"STOPPED", reason, done, limit}
+//
+// 只有 done ≥ limit 才标（其它 code 的停止走常规错误处理）。**事件不带 share_key**
+// （P0 只有一条链）：用当前配置的玩法键；P1 多玩法时需机器人端在事件里带 share_key。
+func (h *Handler) markShareDailyFullFromStop(account string, ev map[string]any) {
+	done, limit := toInt(ev["done"]), toInt(ev["limit"])
+	if account == "" || limit <= 0 || done < limit {
+		return
+	}
+	key := intent.DefaultShareDailyKey
+	if h.Intents != nil {
+		if k := h.Intents.Decider().ShareDailyKeyOf(); k != "" {
+			key = k
+		}
+	}
+	h.St.MarkShareDailyFull(account, key)
+	h.Log.Printf("[SHAREDAILY] %s 满额停止（%d/%d）→ 记入满额表（%s），今日不再自动派",
+		account, done, limit, key)
+}
+
 func isStuckCode(code string) bool {
 	switch code {
 	case "GHOST_DIALOG_STUCK", "TASK_STUCK":

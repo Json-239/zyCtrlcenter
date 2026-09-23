@@ -273,27 +273,41 @@ func TestShenbuCandidateForGhostFullAccount(t *testing.T) {
 	}
 }
 
-// 契约枚举映射：机器人相位（READY/SUBMIT/STOPPED…）→ pending/running/done/skipped，
-// raw_state 保留原文（前端只认 state；排障看 raw_state）。
+// queue 的 state = **队列状态枚举**（lead 裁决 A）：
+//
+//	满额 → done；有心跳条目（=在跑）且未满 → running；已判该跑但无心跳条目 → pending（合成）。
 func TestDailyOverviewStateEnums(t *testing.T) {
+	t.Setenv("CTRL_SHARE_DAILY", "1")
 	env := newTestEnv(t, "")
 	feed := func(acc, phase string, done, limit int) map[string]any {
 		return map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0,
 			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": done, "limit": limit, "state": phase}}
 	}
+	// 两个"在跑"（相位不同不影响队列语义）+ 一个满额；另有一个"未跑"的靠意图登记
 	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
 		"robots": []any{
-			feed("st_ready@xy3.com", "READY", 0, 10),     // 就绪 → pending
-			feed("st_submit@xy3.com", "SUBMIT", 3, 10),   // 交付中 → running
-			feed("st_stopped@xy3.com", "STOPPED", 2, 10), // 已停 → skipped
-			feed("st_done@xy3.com", "SUBMIT", 10, 10),    // 满额优先（不依赖相位）→ done
+			feed("st_ready@xy3.com", "READY", 0, 10),   // 有心跳条目 → running
+			feed("st_submit@xy3.com", "SUBMIT", 3, 10), // 有心跳条目 → running
+			feed("st_done@xy3.com", "SUBMIT", 10, 10),  // 满额 → done
+			map[string]any{"account": "st_planned@xy3.com", "level": 45, "online": true,
+				"state": "IDLE", "task_index": 0}, // 无 daily 条目
 		},
 		"_zone": testsupportZone()})
+	// 手动把"未跑"号登记为神捕意图（模拟"判了该跑但心跳还没报"）
+	if _, _, err := env.ev.Intents.Apply("st_planned@xy3.com",
+		intent.Decision{Known: true, Kind: intent.KindShenbu, Reason: "测试登记"}, testsupportZone(), "manual"); err != nil {
+		t.Fatalf("登记意图失败: %v", err)
+	}
 
 	res := getJSON(t, env.srv.URL+"/api/daily/overview")
-	want := map[string]string{
-		"st_ready@xy3.com": "pending", "st_submit@xy3.com": "running",
-		"st_stopped@xy3.com": "skipped", "st_done@xy3.com": "done",
+	want := map[string]struct {
+		state  string
+		marked bool
+	}{
+		"st_ready@xy3.com":   {"running", false},
+		"st_submit@xy3.com":  {"running", false},
+		"st_done@xy3.com":    {"done", false},
+		"st_planned@xy3.com": {"pending", true}, // 合成条目
 	}
 	got := 0
 	for _, it := range asSlice(res["rows"]) {
@@ -309,15 +323,83 @@ func TestDailyOverviewStateEnums(t *testing.T) {
 			t.Fatalf("%s 应有一条进度: %v", acc, row["queue"])
 		}
 		q0, _ := q[0].(map[string]any)
-		if q0["state"] != exp {
-			t.Fatalf("%s 应映射为 %s，实际 %v（raw=%v）", acc, exp, q0["state"], q0["raw_state"])
+		if q0["state"] != exp.state {
+			t.Fatalf("%s 队列状态应为 %s，实际 %v（raw=%v）", acc, exp.state, q0["state"], q0["raw_state"])
 		}
-		if q0["raw_state"] == "" {
+		if marked, _ := q0["marked"].(bool); marked != exp.marked {
+			t.Fatalf("%s marked 应为 %v: %v", acc, exp.marked, q0)
+		}
+		// 原始相位只出现在 raw_state（不占 state）
+		if acc != "st_planned@xy3.com" && q0["raw_state"] == "" {
 			t.Fatalf("%s 应保留机器人原相位到 raw_state: %v", acc, q0)
 		}
 	}
 	if got != len(want) {
 		t.Fatalf("应覆盖 %d 个号，实际 %d: %v", len(want), got, res["rows"])
+	}
+}
+
+// shenbuCandN 当前 shenbu 候选数（多个用例共用）。
+func shenbuCandN(t *testing.T, env *testEnv) float64 {
+	t.Helper()
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := res["candidates"].(map[string]any)
+	n, _ := cands["shenbu"].(float64)
+	return n
+}
+
+// 满额停止事件（机器人 __request_stop 的 error，带 done/limit）落满额表：
+// 心跳可能来不及看到 done≥limit（满额后 ~2s 停、心跳 3s 一跳）；且"满额"是正常收工，
+// 不该计入任务错误（否则 ErrRepeat 逐日累加，第 3 天该号被判卡住不再派）。
+func TestShareDailyFullMarkedFromStopEvent(t *testing.T) {
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com"
+	base := func() map[string]any {
+		return map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0,
+			"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+				"count_date": time.Now().Format("20060102")}}
+	}
+	// ① 收尾窗口的最后一条心跳：done=9/10（还没满，仍可进候选）
+	rb1 := base()
+	rb1["daily"] = map[string]any{"share_key": "share_daily_大唐神捕", "done": 9, "limit": 10, "state": "SUBMIT"}
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{rb1}, "_zone": testsupportZone()})
+	if n := shenbuCandN(t, env); n != 1 {
+		t.Fatalf("未满时应进候选: %v", n)
+	}
+	// ② 机器人满额停止事件（心跳没抓到 10/10）
+	env.ev.HandleEvent(map[string]any{"type": "error", "account": acc,
+		"code": "SHARE_DAILY_DAILY_LIMIT", "msg": "今日次数已用完(10/10)", "state": "STOPPED",
+		"reason": "今日次数已用完(10/10)", "done": 10, "limit": 10, "_zone": testsupportZone()})
+	// ③ 停止后心跳：daily=None（机器人 enabled=false 不再上报）
+	rb2 := base()
+	rb2["daily"] = nil
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{rb2}, "_zone": testsupportZone()})
+	if n := shenbuCandN(t, env); n != 0 {
+		t.Fatalf("满额停止事件后应靠满额表继续拦住候选: %v", n)
+	}
+	if r, _ := env.st.Get(acc); r.ErrCode != "" || r.ErrRepeat != 0 {
+		t.Fatalf("满额停止是正常收工，不该计入任务错误: code=%q repeat=%d", r.ErrCode, r.ErrRepeat)
+	}
+	// 总览补一条 10/10 done（心跳已无 daily）
+	ov := getJSON(t, env.srv.URL+"/api/daily/overview")
+	found := false
+	for _, it := range asSlice(ov["rows"]) {
+		row, _ := it.(map[string]any)
+		if row["account"] != acc {
+			continue
+		}
+		for _, qi := range asSlice(row["queue"]) {
+			q0, _ := qi.(map[string]any)
+			if q0["state"] == "done" && q0["done"] == float64(10) && q0["limit"] == float64(10) &&
+				q0["marked"] == true {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("总览应为满额号补一条 10/10 done（marked）: %v", ov["rows"])
 	}
 }
 
