@@ -2,8 +2,11 @@
 // 「链数据」页：链文件列表 / 任务节点表 / 模块视图（组装出的链路）。
 // 2026-09-22 UI 改 Element Plus：下拉与输入换组件、两个大表换 el-table（长文本溢出用 tooltip）、
 // 模块用量/步骤标签换 el-tag；数据来源与交互（含"自动分配"哨兵值）保持不变。
+// 2026-09-23：不可启动的链分两类 —— 导航数据（服务端 nav_only=true，如 zhongkui_nav）与
+// 分享日常声明文件（命名约定 *_nav，如 shenbu_nav；带 task_order 所以服务端判定不了）：
+// 都可选中查看节点，但「启动链」禁用 + 页面说明（日常请在「任务」页启动）。
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiGet } from '../api'
 import { post } from '../store'
 
@@ -27,6 +30,13 @@ const AUTO = '__auto__'
 const current = computed(() => list.value.find((c) => c.id === chainId.value) || null)
 // 导航数据（没有任务节点的文件，如 zhongkui_nav）：**可以在这里查看**，但不能当任务链启动
 const navOnly = computed(() => !!current.value?.nav_only)
+// 分享日常的**声明文件**（如 shenbu_nav，将来的 *_nav）：中控在发送 share_daily_start 时组装用
+// （基座链 + 本声明），**不能手选当任务链启动** —— 但它带 task_order（中控要用），
+// 所以服务端 nav_only=false，需要前端按命名约定 `*_nav` 一起拦（2026-09-23 中控 P0 提示）。
+function isDeclChain(id) { return !!id && String(id).endsWith('_nav') }
+const declChain = computed(() => !navOnly.value && isDeclChain(chainId.value))
+// 两者都"可查看、不可启动"（沿用同一交互：选得中、看得到节点，启动按钮禁用 + 提示）
+const notStartable = computed(() => navOnly.value || declChain.value)
 
 // 节点表空态文案（三种情况分开说，别让"自动分配"看起来像掉数据了）
 const emptyText = computed(() => {
@@ -140,6 +150,14 @@ function cmdBody() {
 }
 
 async function start() {
+  // 双保险：按钮已禁用，这里再拦一次（导航数据/日常声明都不能当任务链下发；
+  // 中控对 nav_only 有拦，但 shenbu_nav 带 task_order、服务端判定不了，只能靠这份名单/命名约定）
+  if (notStartable.value) {
+    ElMessage.warning(declChain.value
+      ? '这是分享日常的声明文件，不能手选启动：请到「任务」页启动日常'
+      : '这是导航数据（没有任务节点），不能作为任务链启动：抓鬼请选「自动分配」')
+    return
+  }
   const body = cmdBody()
   warnings.value = []
   if (chainId.value === AUTO) {
@@ -180,15 +198,16 @@ async function reset() {
         <el-option value="" label="（不指定链，仅下发 chain_id）" />
         <el-option
           v-for="c in list" :key="c.id" :value="c.id"
-          :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据，不可直接启动' : c.task_count + ' 节点'}）`"
+          :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据，不可直接启动' : (isDeclChain(c.id) ? '日常声明，不可直接启动' : c.task_count + ' 节点')}）`"
         />
       </el-select>
       <el-input v-model="accountsText" size="small" style="width: 380px" clearable
                 placeholder="账号（空=全部；多个用逗号分隔）" />
       <el-button
         size="small" type="primary"
-        :disabled="navOnly"
-        :title="navOnly ? '这是导航数据（没有任务节点），不能作为任务链启动；抓鬼请选「自动分配」' : ''"
+        :disabled="notStartable"
+        :title="navOnly ? '这是导航数据（没有任务节点），不能作为任务链启动；抓鬼请选「自动分配」'
+                 : (declChain ? '这是分享日常的声明文件（中控发送神捕/烽火命令时组装用），不能手选启动；日常请到「任务」页启动' : '')"
         @click="start"
       >启动链</el-button>
       <el-button size="small" @click="stop">停链</el-button>
@@ -202,6 +221,12 @@ async function reset() {
       <span class="mono">{{ chainId }}</span> 是抓鬼导航数据（没有任务节点）：可以在这里查看内容，但
       <b>不能作为任务链启动</b> —— 抓鬼请选「自动分配」（后端会下发
       <span class="mono">ghost_start</span> 并带上这份导航数据）。
+    </el-alert>
+    <el-alert v-else-if="declChain" class="mt" type="warning" :closable="false" show-icon title="日常声明（不可直接启动）">
+      <span class="mono">{{ chainId }}</span> 是分享日常的<b>声明文件</b>（如大唐神捕）：中控在发送
+      <span class="mono">share_daily_start</span> 时把它作为载荷组装给机器人，<b>不能手选启动</b>。
+      要跑日常请到「任务」页（「定时自动任务」的新日常策略卡，或「手动启动」按意图分配）。
+      这里可以查看它的任务节点（排障/核对用）。
     </el-alert>
     <el-alert v-for="w in warnings" :key="w.account" class="mt" type="warning" :closable="false" show-icon :title="w.msg" />
     <p class="muted" style="margin: 10px 0 0">
