@@ -7,7 +7,14 @@
   ③ 库存水位 compute_need / bag_count
   ④ status/consume 状态机（无锁 / done / failed）
   ⑤ 各接线点静态核对（daily_ghost 买药改走 shop_errand、quest_engine 锁与通知、
-     config 换 NPC/批量/开关、client.py 命令分发、auto_summon 采购、Go API）。
+     config 换 NPC/批量/开关、client.py 命令分发、auto_summon 采购、Go API）
+  ⑥ 叠加购买重复扣款修复（2026-09-23）:
+     · 90327 数量回执注册/解析/入背包缓存
+     · 1276 通知参数"单元素元组"剥壳（旧实现静默解析失败 → 无任何入包证据）
+     · 复买前本地核对（数量增加 → 判成功不再买 / 已扣款宽限判成功）
+     · 库存≥请求量 → "已满足, 未购买"(skipped) 明确回执
+     · force 绕过跳过（shop_errand.start → cmd.shop_force → quest_engine）
+  ⑦ 回执签名口径：notify_done(reason/skipped) ↔ quest_engine 调用点一致
 用法：python tools/shop_errand_selftest.py
 """
 import os
@@ -26,6 +33,9 @@ sys.path.insert(0, SCRIPT)
 # 同上(冷启动自检): 打包内置的 C 扩展 cnetwork 在纯 Python 下用 MagicMock 顶替
 from unittest.mock import MagicMock  # noqa: E402
 sys.modules.setdefault("cnetwork", MagicMock(name="cnetwork"))
+# 中控通道/诊断日志: 纯 Python 自检不起 socket、不写 diag.log
+sys.modules.setdefault("ctrl_client", MagicMock(name="ctrl_client"))
+sys.modules.setdefault("diag", MagicMock(name="diag"))
 
 fails = 0
 total = 0
@@ -209,17 +219,166 @@ check("Go: /api/shop_errand handler 存在", "handleShopErrand" in go and "shop_
 check("Go: 白名单含四样商品", all(str(i) in go for i in (102007, 102010, 101008, 101009)))
 check("Go: 路由已注册", "POST /api/shop_errand" in rd("internal/api/api.go"))
 
+# ---------------------------------------------------------------- ⑥ 叠加购买重复扣款修复
+_pt = rd("deploy/zones/prod-240-2300/script/protocol3.py")
+_mh = rd("deploy/zones/prod-240-2300/script/msghandle.py")
+_ro = rd("deploy/zones/prod-240-2300/script/robot_operator.py")
+
+check("协议: FORMAT_MS 注册 90327(叠加数量回执)",
+	"FORMAT_MS[S2C_UPDATE_ADD_ITEM_COUNT] = [8, 2]" in _pt)
+check("协议: g_handle_map 注册 90327 → item_count_add_handle",
+	"S2C_UPDATE_ADD_ITEM_COUNT : msghandle.item_count_add_handle" in _pt)
+check("msghandle: 90327 处理函数转到 robot_operator",
+	"def item_count_add_handle(fd, data_list)" in _mh
+	and "robot_operator.on_update_add_item_count" in _mh)
+# 2026-09-23 事故护栏: 严禁运行期补注册协议表(热更后进程崩溃, 230 号掉线)
+check("护栏: robot_operator 不做运行期协议注册(禁 set_format_dict)",
+	re.search(r"^\s*def\s+install_shop_protocol_hooks", _ro, re.M) is None
+	and re.search(r"^\s*(?!\s*#).*cnet\.set_format_dict\s*\(", _ro, re.M) is None)
+check("护栏: shop_errand 不做运行期协议注册",
+	"install_protocol_hooks" not in _srt)
+
+import robot_operator as _rop  # noqa: E402
+
+check("协议: 冷启动静态注册即可(无需运行期补齐)",
+	"S2C_UPDATE_ADD_ITEM_COUNT" in _pt and "90327" not in _ro.split("SHOP_PROTO_HOOKS")[0][-400:])
+
+check("解析 90327: 扁平分包 [id,count]",
+	_rop.__parse_item_count_records([1761, 250]) == [(1761, 250)])
+check("解析 90327: 元组列表 [(id,count)] / [[(id,count)]]",
+	_rop.__parse_item_count_records([(1761, '250')]) == [(1761, 250)]
+	and _rop.__parse_item_count_records([[(1761, 250)]]) == [(1761, 250)])
+
+
+class FakeRobot2(FakeRobot):
+	def get_role_name(self):
+		return "测试角色"
+	def send_message(self, *a, **k):
+		return 0
+
+
+# ① 90327 → 背包计数刷新 + 商店采购判成功
+r5 = FakeRobot2("robot_e@xy3.com")
+r5.m_bag_cache = {101008: [1761, 200, 8199]}
+r5.m_bag_meta = {}
+_q5 = FakeQuest()
+_q5.bought_tasks = {}
+_q5.active_task_index = 0
+_q5.shop_ctx = {"item_index": 101008, "count": 200, "bag_before": 200, "errand": True}
+_q5.active = True
+_q5.state = None
+_q5.set_state = lambda s: setattr(_q5, "state", s)
+r5.m_quest = _q5
+import shop_errand as _se6  # noqa: E402
+_se6._locks["robot_e@xy3.com"] = {"owner": "errand", "since": _se6._now_ms(),
+	"item": 101008, "count": 200, "result": None, "reason": "", "session": 1}
+_rop.on_update_add_item_count(r5, [1761, 400])
+check("90327: 背包计数刷到 400", r5.m_bag_cache[101008][1] == 400)
+check("90327: 商店采购判成功(shop_ctx 清空 + 通知 done)",
+	_q5.shop_ctx is None and _se6.status(r5)["result"] == "done",
+	repr(_se6.status(r5)))
+_se6.release(r5)
+
+# ② 1276 通知参数是"单元素元组" → 必须能解析(旧实现静默失败)
+_pal = getattr(_qe_rt, "__parse_add_item_link")
+check("1276 链接: 裸字符串两种形态",
+	_pal("[item,17622171000906414;101403;5070322,储物袋]") == 101403
+	and _pal("[item_entry,101403,草船]") == 101403)
+check("1276 链接: 单元素元组(服务端 format_args_list 形态) —— 生产 0 次成功的根因",
+	_pal(("[item,17610600359365304;101008;6030619,幻兽丹]",)) == 101008
+	and _pal(("[item_entry,101008,幻兽丹]*1",)) == 101008)
+
+# ③ 复买前本地核对: 数量增加 → 判成功, 不再买
+r6 = FakeRobot2("robot_f@xy3.com")
+r6.m_bag_cache = {101008: [1761, 400, 8199]}
+_q6 = FakeQuest()
+_q6.bought_tasks = {}
+_q6.active_task_index = 0
+_q6.shop_ctx = {"item_index": 101008, "count": 200, "bag_before": 200, "errand": True}
+_q6.active = True
+_q6.set_state = lambda s: setattr(_q6, "state", s)
+r6.m_quest = _q6
+_se6._locks["robot_f@xy3.com"] = {"owner": "errand", "since": _se6._now_ms(),
+	"item": 101008, "count": 200, "result": None, "reason": "", "session": 1}
+_retry = getattr(_qe_rt, "__shop_retry_check")
+check("本地核对: 数量 200→400 → 判已买到(True)",
+	_retry(r6, _q6) is True and _q6.shop_ctx is None and _se6.status(r6)["result"] == "done",
+	"reason=%s" % _se6.status(r6).get("reason"))
+_se6.release(r6)
+
+# ④ 已扣款(1110)宽限判成功(无入包/数量回执时不再复买)
+r7 = FakeRobot2("robot_g@xy3.com")
+r7.m_bag_cache = {101008: [1761, 200, 8199]}
+_q7 = FakeQuest()
+_q7.bought_tasks = {}
+_q7.active_task_index = 0
+_q7.shop_ctx = {"item_index": 101008, "count": 200, "bag_before": 200, "errand": True,
+	"buy_sent": 1, "paid": "16,000", "paid_ts": getattr(_qe_rt, "__now_ms")() - 30000}
+_q7.active = True
+_q7.set_state = lambda s: setattr(_q7, "state", s)
+r7.m_quest = _q7
+_se6._locks["robot_g@xy3.com"] = {"owner": "errand", "since": _se6._now_ms(),
+	"item": 101008, "count": 200, "result": None, "reason": "", "session": 1}
+check("本地核对: 已扣款且宽限期过 → 判成功不再复买",
+	_retry(r7, _q7) is True and _q7.shop_ctx is None)
+_se6.release(r7)
+
+# ⑤ 库存≥请求量 → "已满足, 未购买"(明确回执, skipped=True)
+_se6._locks["robot_h@xy3.com"] = {"owner": "errand", "since": _se6._now_ms(),
+	"item": 101008, "count": 200, "result": None, "reason": "", "session": 1}
+r8 = FakeRobot2("robot_h@xy3.com")
+_se6.notify_done(r8, 101008, "已满足, 未购买(库存 300 ≥ 请求 200)", skipped=True)
+_st8 = _se6.consume(r8, "errand")
+check("库存跳过: reason 明确 + skipped=True",
+	_st8["result"] == "done" and _st8["skipped"] is True
+	and "已满足, 未购买" in _st8["reason"], repr(_st8))
+
+# ⑥ force 链路(绕过"已满足"跳过) + 本地产出静态核对
+check("force: shop_errand.start 参数 → cmd.shop_force",
+	'shop_force": 1 if force else 0' in _srt)
+check("force: quest_engine 认 shop_force/force 并绕过库存跳过",
+	'force = bool(cmd.get("shop_force") or cmd.get("force"))' in qe
+	and 'not quest.shop_ctx.get("force")' in qe)
+check("force: client.py 透传 force(需重启机器人生效)",
+	'cmd.get("force")' in cl and "force=_force" in cl)
+check("Go: /api/shop_errand 支持 force 字段", "force := toBool(body[\"force\"], false)" in go)
+
+check("接线: 复买前本地核对(25s 看门狗 ST_SHOP 分支)", "__shop_retry_check(robot_object, quest)" in qe)
+check("接线: 超时重试前核对(__on_sale_goods 二次下单前)",
+	'if int(_ctx.get("buy_sent", 0) or 0) >= 1 and __shop_retry_check(robot_object, quest):' in qe)
+check("接线: 下单前快照 bag_before", 'if "bag_before" not in _ctx:' in qe)
+check("接线: MAX_TRY 停链前先核对(不把已买到误报 TASK_STUCK)",
+	re.search(r"if _ctx\[\"buy_sent\"\] > SHOP_BUY_MAX_TRY:(.{0,200})__shop_retry_check", qe, re.S) is not None)
+check("接线: 90066 删物品之外的背包缓存由 90327 补齐(注释/实现)",
+	"on_update_add_item_count" in _ro and "m_bag_cache" in _ro)
+
+
+# ---------------------------------------------------------------- ⑦ 回执签名口径
+# notify_done 新参数(reason/skipped)必须与 quest_engine 调用点一致 —— 缺参数会被调用处的
+# except 静默吞掉 → "已买到"永不回执（这就是本次重做的直接原因）。
+import inspect as _inspect  # noqa: E402
+
+_nd = _inspect.signature(se.notify_done).parameters
+check("签名: notify_done 收 reason/skipped(P1 回执口径)",
+	"reason" in _nd and "skipped" in _nd)
+check("签名: quest_engine 以 skipped=True 调 notify_done(两副本口径一致)",
+	"skipped=True" in qe and "notify_done(robot_object, _want_item," in qe)
+
+
 # 双副本(若存在)一致性
 PROD_COPY = "F:/ZyBin/xm/2d-xiyou-server/robot/deploy/single_robot_zy/script"
 if os.path.isdir(PROD_COPY):
 	_diff = []
+	# 2026-09-23 叠加购买修复: protocol3/msghandle/robot_operator 也是本次改动面
+	#   (90327 注册/解析/入包数量刷新) —— 一并要求双副本一致
 	for f in ("shop_errand.py", "daily_ghost.py", "quest_engine.py", "config.py",
-			"client.py", "auto_summon.py"):
+			"client.py", "auto_summon.py", "protocol3.py", "msghandle.py",
+			"robot_operator.py"):
 		a = os.path.join(SCRIPT, f)
 		b = os.path.join(PROD_COPY, f)
 		if not os.path.exists(b) or open(a, "rb").read() != open(b, "rb").read():
 			_diff.append(f)
-	check("双副本一致(核心 6 文件)", not _diff, "不一致: %s" % _diff)
+	check("双副本一致(核心 9 文件: 采购/协议/消息)", not _diff, "不一致: %s" % _diff)
 else:
 	check("双副本检查跳过(生产副本不存在)", True)
 

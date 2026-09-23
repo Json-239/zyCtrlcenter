@@ -25,11 +25,14 @@ const shopErrandMaxCount = 500
 
 // handleShopErrand 手动/冒烟采购：POST /api/shop_errand
 //
-//	{accounts?: ["robot0001000@xy3.com"], item_index: 101008, npc?: 13021, count?: 200}
+//	{accounts?: ["robot0001000@xy3.com"], item_index: 101008, npc?: 13021, count?: 200,
+//	 force?: true}
 //
 // 下发 cmd=shop_errand 到机器人端（shop_errand.start → quest_engine 商店执行器：
 // 导航 → 点 NPC → 选"#iBM#储备金购买…" → S2C_SALE_GOODS → C2S_ROLE_BUY(80108)；
-// 以通知 1110 扣储备金 / 入包 90398 / 1276 得到物品为成功判据）。
+// 成功判据：入包 90398 / 叠加数量回执 90327 / 1276 得到物品 / 本地核对数量增加 /
+// 1110 已扣款）。
+// force=true 绕过"库存≥请求量 → 已满足, 未购买"的跳过（冒烟/复验用，会真的花钱）。
 // 省略 accounts = 广播给全部在线号（危险，调用方自负）。
 func (a *API) handleShopErrand(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
@@ -51,17 +54,22 @@ func (a *API) handleShopErrand(w http.ResponseWriter, r *http.Request) {
 	if count > shopErrandMaxCount {
 		count = shopErrandMaxCount
 	}
+	// 2026-09-23 force: 绕过"库存≥请求量 → 已满足, 未购买"（冒烟/复验要必买时用）
+	force := toBool(body["force"], false)
 	accounts := bodyAccounts(body)
 	cmd := map[string]any{"cmd": "shop_errand", "npc": npc,
 		"item_index": item, "count": count}
+	if force {
+		cmd["force"] = true
+	}
 	if len(accounts) > 0 {
 		cmd["accounts"] = accounts
 	}
 	ok := a.Events != nil && a.Events.SendCmd(cmd, "shop_errand")
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "shop_errand",
 		"zone": a.currentZoneKey(), "accounts": accounts,
-		"item_index": item, "npc": npc, "count": count, "sent": ok})
+		"item_index": item, "npc": npc, "count": count, "force": force, "sent": ok})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "item_index": item,
-		"npc": npc, "count": count, "accounts": accounts,
+		"npc": npc, "count": count, "force": force, "accounts": accounts,
 		"msg": okMsg(ok, "已下发采购(储备金)")})
 }
