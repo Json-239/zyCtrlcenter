@@ -63,7 +63,8 @@ def money_stats(files, since_ts, now_ts):
     """跨图成本口径: 付费传送(次数/银两) vs 过图次数 → 归一化"次/过图"。
 
     付费判定 = 对话选项文本里的 "（N银）"(如"请送我去幽冥界（5银）"), 取 N 累计;
-    过图判定 = "跨图跳转成功" / "跳转NPC过图成功"。
+    过图判定 = "跨图跳转成功"(map_skip) **或** "跳转NPC过图成功"(npc_jumper) —— 两者都算,
+    否则分母偏小、归一化值虚高(实测只算后者会得 0.60, 两者都算才是 0.23~0.24)。
     返回 dict(paid, silver, cross, mins)。
     """
     import re
@@ -77,7 +78,7 @@ def money_stats(files, since_ts, now_ts):
             continue
         with f:
             for line in f:
-                if "银" not in line and "过图成功" not in line:
+                if "银" not in line and "过图成功" not in line and "跨图跳转成功" not in line:
                     continue
                 try:
                     o = json.loads(line)
@@ -92,7 +93,7 @@ def money_stats(files, since_ts, now_ts):
                     if m:
                         paid += 1
                         silver += int(m.group(1))
-                if "过图成功" in msg:
+                if ("过图成功" in msg) or ("跨图跳转成功" in msg):
                     cross += 1
     return {"paid": paid, "silver": silver, "cross": cross,
             "mins": max(1.0, (now_ts - since_ts) / 60.0)}
