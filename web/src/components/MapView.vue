@@ -98,18 +98,21 @@ function moneyTitle(row) {
   return `银两 ${row?.money ?? 0} · 储备金 ${row?.reserve ?? 0} · 存款 ${row?.deposit ?? 0}`
 }
 
-// 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense)
+// 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense) /
+//                    batchmap(②区多图分配：每图一批，targetMap=该批的目标图)
 async function roamStart(kind, accs, targetMap) {
   const d = detail.value
   const targets = (accs && accs.length) ? accs : (d ? [d.account] : [])
   if (!targets.length) return
   const body = { accounts: targets }
   if (kind === 'batchmap') {
+    // 2026-09-23 修复：原实现把 kind 改写成 'picked' 后**继续走下面的 if/else 链** →
+    // ① 顶部「选图」下拉为空时直接 return（界面提示"已分配"但一条命令都没发）；
+    // ② 下拉有值时用 roamMap 覆盖这里的目标图（多图分配全被派到同一张图）。
+    // 现在 batchmap 就地定目标图，不参与下面的分支链。
     if (!targetMap) return
     body.mapid = targetMap
-    kind = 'picked'          // 走"指定图"分支
-  }
-  if (kind === 'current') {
+  } else if (kind === 'current') {
     // 选中号面板：目标=该号所在图；批量场景没有"选中号"，退回地图页当前图（接口 mapid 必填，0 会被服务端拒）
     body.mapid = (d && d.mapid) || mapid.value || 0
     // 原实现 d.mapid（d 为 null 时 TypeError）→ 批量·当前图 直接报错，现一并修掉
@@ -159,8 +162,99 @@ async function confirmStop(text) {
   }
 }
 
-// ---------------- 2026-09-22 批量游荡（本图多选，弹窗内操作） ----------------
-const roamCands = computed(() => robotsOnMap.value)
+// ---------------- 2026-09-23 批量游荡选号（全局候选 + 状态/图筛选） ----------------
+// 旧实现候选池 = "地图页当前图"的在线号（换图才能选别的图的人）。用户口径：要能跨图挑
+// "跑完任务/空闲"的号 → 候选池改全局在线号，按图筛选降级成筛选器里的一档（默认全部图）。
+const onlineRobots = computed(() => (state.status?.robots || []).filter((r) => r.online))
+const onlineCntAll = computed(() => onlineRobots.value.length)
+
+// 归类判据与中控 Go 侧同口径（internal/services/waterline/waterline.go:Busy、roampool.Idle）：
+//   忙碌 = 战斗中 / 活跃抓鬼会话(ghost.enabled) / 游荡或孵化(walk.enabled、hatch.active) /
+//          NAV·CLICK·DIALOG·FIGHT·SHOP·ALLOC·WAIT_NEXT / WAIT_TASK 且 task_index≠0
+//   空闲 = 在线 且 非忙碌（含 READY/IDLE/ONLINE/WAIT_GHOST/DONE）
+// 「已抓满」= 后端标记 ghost_done_today（今天抓鬼已满/不可用，跨日自动消失）——这类号不能
+// 再抓鬼了，最适合派去游荡。
+//
+// 注：这里比 waterline.Busy 的**黑名单多一个 SUBMIT**（交任务/提交中）。理由：
+//   - roampool.Interruptible 的口径把 SUBMIT 与 FIGHT/NAV 并列 = "推进中，不打断"（超编收敛不动它）；
+//   - /api/random_walk 下游只校验"在线"，不看状态 —— 派错就会打断任务链，前端必须偏保守归类；
+//   - 实战数据：SUBMIT 号几乎都 ghost.enabled=true（先落"抓鬼中"桶），该条只在抓鬼会话外兜底。
+const BUSY_STATES = ['NAV', 'CLICK', 'DIALOG', 'FIGHT', 'SHOP', 'ALLOC', 'WAIT_NEXT', 'SUBMIT']
+function isGhosting(r) { return !!(r.ghost && r.ghost.enabled === true) }
+function isHatching(r) { return !!(r.hatch && r.hatch.active === true && r.hatch.hatched !== true) }
+function isWalking(r) { return !!(r.walk && r.walk.enabled === true) || isHatching(r) }
+// ERROR = 机器人上报的卡住/停链态（如"换图推送迟迟未到"），先人工处理，不能当空闲派活
+function isErr(r) { return String(r.state || '').toUpperCase() === 'ERROR' }
+function isBusy(r) {
+  if (r.fight || isGhosting(r) || isWalking(r)) return true
+  const s = String(r.state || '').toUpperCase()
+  if (BUSY_STATES.includes(s)) return true
+  if (s === 'WAIT_TASK') return Number(r.task_index) !== 0
+  return false
+}
+// 互斥归类（按"最该先看到"的优先级取一个）——筛选按钮与排序共用
+const CAND_BUCKETS = [
+  { key: 'idle', label: '空闲', title: '在线且没在干活（与中控在线水位/游荡池同一判据）——最适合派游荡' },
+  { key: 'full', label: '已抓满', title: '今天抓鬼已满/不可用（ghost_done_today）：这类号最适合去游荡' },
+  { key: 'task', label: '任务中', title: '任务链推进中（导航/对话/战斗/交任务等）' },
+  { key: 'ghost', label: '抓鬼中', title: '有活跃抓鬼会话（ghost.enabled=true）' },
+  { key: 'walk', label: '游荡中', title: '已在游荡/孵化（walk.enabled 或孵化会话进行中）' },
+  { key: 'err', label: '异常', title: '机器人上报 ERROR（卡住/停链等待处理，如换图推送未到）：先人工处理，别派活' },
+]
+const BUCKET_ORDER = { idle: 0, full: 1, task: 2, ghost: 3, walk: 4, err: 5 }
+function bucketOf(r) {
+  // ERROR（机器人上报的卡住/停链）**最优先**：Go 的 waterline.Busy() 黑名单也不含它，
+  // 若按"非忙碌=空闲"会把它归进「空闲」——派游荡只会让卡住号更难处理。这里单列一类。
+  if (isErr(r)) return 'err'
+  if (isWalking(r)) return 'walk'
+  if (isGhosting(r)) return 'ghost'
+  if (isBusy(r)) return 'task'
+  if (r.ghost_done_today) return 'full'
+  return 'idle'
+}
+// 标记列里"有内容吗"（没有就显示 —）
+function hasMarks(r) {
+  return !!(isErr(r) || hasDouble(r) || r.ghost_done_today || isWalking(r) || isGhosting(r) || r.paused)
+}
+
+const candBuckets = ref(['idle', 'full'])   // 默认只勾"空闲+已抓满"（最适合派游荡）；全不勾=不筛
+const candMap = ref(0)                      // 0 = 全部图（按图筛选是可选项）
+// 图筛选项：只列"当前有在线号"的图（按人数降序），避免 40+ 张空图刷屏
+const candMapOptions = computed(() => {
+  const cnt = {}
+  for (const r of onlineRobots.value) cnt[r.mapid] = (cnt[r.mapid] || 0) + 1
+  const out = []
+  for (const k in cnt) {
+    const id = Number(k)
+    if (id > 0) out.push({ id, name: mapLabel(id), n: cnt[k] })
+  }
+  out.sort((a, b) => (b.n - a.n) || (a.id - b.id))
+  return out
+})
+// 只按"图"筛过的候选（各归类计数与最终列表共用一份口径）
+const candScoped = computed(() => {
+  const m = Number(candMap.value) || 0
+  return m ? onlineRobots.value.filter((r) => r.mapid === m) : onlineRobots.value
+})
+// 各归类计数（给筛选按钮上的数字；不受状态勾选影响，只受"图"筛选影响）
+const candCounts = computed(() => {
+  const c = { idle: 0, full: 0, task: 0, ghost: 0, walk: 0, err: 0 }
+  for (const r of candScoped.value) c[bucketOf(r)]++
+  return c
+})
+// 最终候选：状态筛选（多选=并集；全不勾=不筛）+ 排序（空闲优先 → 已抓满 → … → 同档按图/账号）
+const roamCands = computed(() => {
+  const on = candBuckets.value
+  const rows = []
+  for (const r of candScoped.value) {
+    const b = bucketOf(r)
+    if (on.length && !on.includes(b)) continue
+    rows.push([BUCKET_ORDER[b], r.mapid || 0, r])
+  }
+  rows.sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]) ||
+    (a[2].account < b[2].account ? -1 : a[2].account > b[2].account ? 1 : 0))
+  return rows.map((x) => x[2])
+})
 const roamCandCnt = computed(() => roamCands.value.length)     // 同上：给模板用稳定值
 function isSel(acc) { return selAccounts.value.includes(acc) }
 function toggleSel(acc) {
@@ -175,23 +269,23 @@ function autoSplitIfNeeded() {
   autoSplitBatchMaps()
 }
 function selAll() {
+  // 全选**筛选结果**（不只本页）：跨图/跨页一次勾满
   selAccounts.value = roamCands.value.map((r) => r.account)
   autoSplitIfNeeded()
 }
 function selNone() { selAccounts.value = [] }
-function selByFilter(kind) {
-  // idle: 只怕任务链/抓鬼占着 → 只勾状态为 READY/DONE 的（空闲）
-  const idle = ['READY', 'DONE', 'IDLE']
-  const list = kind === 'idle'
-    ? roamCands.value.filter((r) => idle.includes(String(r.state || '').toUpperCase()))
-    : roamCands.value
-  selAccounts.value = list.map((r) => r.account)
-  autoSplitIfNeeded()
-}
+// 已选里"不在当前筛选结果内"的个数：切换筛选不清已选（跨图分次挑选是有意保留的），
+// 但要提示出来 —— 否则"下发 N 个"和屏幕上看到的行数对不上，容易误发。
+const selOutScope = computed(() => {
+  const inScope = new Set(roamCands.value.map((r) => r.account))
+  return selAccounts.value.filter((a) => !inScope.has(a)).length
+})
 
 // 分页（渲染量收敛：上百个号也只渲染 20/50/100 行）
 const maxPage = computed(() => Math.max(1, Math.ceil(roamCands.value.length / candSize.value)))
 watch(maxPage, (m) => { if (candPage.value > m) candPage.value = m })
+// 换筛选条件回到第 1 页（否则会停在新条件下不存在的页上）
+watch([candBuckets, candMap], () => { candPage.value = 1 })
 let candCache = []
 const pagedCands = computed(() => {
   const s = (candPage.value - 1) * candSize.value
@@ -290,7 +384,9 @@ async function roamBatchToMaps() {
       const accs = sel.slice(idx, idx + cnt)
       idx += cnt
       const res = await roamStart('batchmap', accs, m.id)
-      if (res?.ok === false) continue           // 失败的那批不写进小结（post() 已 toast 原因）
+      // 只有明确 ok 才计入小结（原 `res?.ok === false` 在 res 为 undefined（参数缺失提前 return）
+      // 时会被当成成功 → 提示"已分配"但实际没下发）
+      if (!res?.ok) continue
       done.push(`${mapLabel(m.id)}×${accs.length}`)
       await new Promise((r) => setTimeout(r, 250))   // 轻微间隔, 别把控制通道打爆
     }
@@ -599,11 +695,12 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
       </el-card>
 
       <!-- 2026-09-22 批量游荡：入口常驻，选号/选图收进弹窗（避免上百行列表每 3 秒被重渲染） -->
+      <!-- 2026-09-23 选号池改全局在线号（跨图），弹窗里按状态/图筛选 -->
       <el-card class="panel-card" shadow="never">
         <template #header>
           <div class="row">
             <b>批量游荡</b>
-            <el-tag size="small" type="info" effect="plain">本图在线 {{ roamCandCnt }}</el-tag>
+            <el-tag size="small" type="info" effect="plain">在线号 {{ onlineCntAll }}</el-tag>
             <el-tag size="small" :type="selAccounts.length ? 'success' : 'info'">已选 {{ selAccounts.length }}</el-tag>
             <el-tag v-if="batchMaps.length" size="small" type="warning" effect="plain">
               {{ batchMaps.length }} 图 · 合计 {{ batchMapSum }} 号
@@ -619,7 +716,8 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
           </div>
         </template>
         <div class="muted small">
-          候选号 = 地图「当前图」的在线号。点「批量游荡…」选号 → 勾目标图并填每图数量 → 下发。
+          候选号 = <b>全部在线号（跨图）</b>。点「批量游荡…」→ 在弹窗里按<b>状态</b>（空闲/已抓满/…）和<b>图</b>筛选选号 →
+          勾目标图并填每图数量 → 下发。
           游荡与抓鬼/任务链互斥；档位/限时与下方「选中号」面板共用同一份设置（当前 {{ roamMode }}<span v-if="roamMinutes"> · {{ roamMinutes }} 分钟</span>）。
         </div>
       </el-card>
@@ -781,9 +879,9 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
     </el-card>
   </div>
 
-  <!-- 批量游荡弹窗：选号（表格+分页） + 选图（每图数量） + 下发。
+  <!-- 批量游荡弹窗：选号（全局候选 + 状态/图筛选 + 分页） + 选图（每图数量） + 下发。
        destroy-on-close：关掉后内容整体销毁，列表不再参与 3 秒轮询的重渲染（"一直在刷新"的主因之一） -->
-  <el-dialog v-model="batchDlg" title="批量游荡" width="1000px" top="4vh" append-to-body
+  <el-dialog v-model="batchDlg" title="批量游荡" width="min(1240px, 96vw)" top="4vh" append-to-body
              :close-on-click-modal="false" destroy-on-close>
     <div class="bdg">
       <div class="row form-row bdg-params">
@@ -806,15 +904,37 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
       </div>
 
       <div class="bdg-cols">
-        <!-- ① 选号 -->
+        <!-- ① 选号（全局候选：状态筛选 + 图筛选 + 分页） -->
         <div class="bdg-col">
           <div class="bdg-head">
             <b>① 选号</b>
-            <span class="muted small">本图在线 {{ roamCandCnt }} · 已选 <b class="ok-text">{{ selAccounts.length }}</b></span>
+            <span class="muted small">
+              筛选后 <b class="ok-text">{{ roamCandCnt }}</b> 个 / 共 {{ onlineCntAll }} 个在线 ·
+              已选 <b class="ok-text">{{ selAccounts.length }}</b><span
+                v-if="selOutScope" class="warn-text" :title="`已选里有 ${selOutScope} 个不在当前筛选结果内（切筛选不清已选，属正常）`">（{{ selOutScope }} 个在筛选外）</span>
+            </span>
             <span class="spacer" />
-            <el-button size="small" @click="selByFilter('idle')" title="只勾空闲号（READY/DONE）——最适合批量派游荡">选空闲</el-button>
-            <el-button size="small" @click="selAll()">全选本图</el-button>
+            <el-button size="small" @click="selAll()"
+                       title="勾选当前筛选出的全部号（跨页，不只本页；会替换当前已选——只想加勾请逐条/分页勾）">全选筛选结果</el-button>
             <el-button size="small" @click="selNone()">清空</el-button>
+          </div>
+          <div class="cand-filter">
+            <span class="lbl">状态</span>
+            <el-checkbox-group v-model="candBuckets" size="small">
+              <el-checkbox-button v-for="b in CAND_BUCKETS" :key="b.key" :value="b.key" :title="b.title">
+                {{ b.label }} {{ candCounts[b.key] }}
+              </el-checkbox-button>
+            </el-checkbox-group>
+            <span class="lbl">图</span>
+            <el-select v-model="candMap" size="small" filterable style="width:172px">
+              <el-option :value="0" :label="`全部图（${onlineCntAll}）`" />
+              <el-option v-for="m in candMapOptions" :key="m.id" :value="m.id" :label="`${m.name} · ${m.n}`" />
+            </el-select>
+          </div>
+          <div class="muted small cand-tip">
+            状态不勾=不筛；多选=并集。「空闲」= 在线且没在干活（与中控调度同一判据）、「已抓满」= 今天抓鬼已满/不可用 ——
+            这两类最适合派游荡。「异常」= 机器人上报 ERROR（卡住/停链），先人工处理，别派活。
+            排序：空闲 → 已抓满 → 任务中 → 抓鬼中 → 游荡中 → 异常，同档按图/账号。
           </div>
           <el-table :data="pagedCands" size="small" height="320" class="cand-table">
             <el-table-column width="42">
@@ -826,28 +946,43 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
                 <el-checkbox :model-value="isSel(row.account)" @change="() => toggleSel(row.account)" />
               </template>
             </el-table-column>
-            <el-table-column label="账号" prop="account" min-width="160" class-name="mono" show-overflow-tooltip />
-            <el-table-column label="状态" width="96">
+            <el-table-column label="账号" prop="account" min-width="166" class-name="mono" show-overflow-tooltip />
+            <!-- 2026-09-23 候选池改全局 → 必须能看出"这个号在哪张图" -->
+            <el-table-column label="图" width="104" show-overflow-tooltip>
+              <template #default="{ row }"><span class="muted">{{ mapLabel(row.mapid) }}</span></template>
+            </el-table-column>
+            <el-table-column label="状态" width="94">
               <template #default="{ row }">
                 <el-tag size="small" :type="stateType(row.state)" effect="plain">{{ row.state || '--' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="等级" width="66">
-              <template #default="{ row }">Lv{{ row.level ?? '--' }}</template>
-            </el-table-column>
-            <!-- 2026-09-23 「双」：今日已领双倍经验（机器人心跳 double_claim_date）。
-                 双倍有时长 → 该号应优先抓鬼（中控调度已把它置顶、不派游荡）。 -->
-            <el-table-column label="双" width="46" align="center">
+            <!-- 2026-09-23 标记：异常（ERROR，卡住/停链）/ 双（今日已领双倍）/ 已满（今天抓鬼已满）/ 游荡中 / 抓鬼中 / 暂停（人工） -->
+            <el-table-column label="标记" width="146">
               <template #default="{ row }">
+                <el-tag v-if="isErr(row)" size="small" type="danger" effect="dark"
+                        :title="row.err_msg || '机器人上报 ERROR（卡住/停链等待处理）——先人工处理，别派游荡'">异常</el-tag>
                 <el-tag v-if="hasDouble(row)" size="small" type="warning" effect="dark"
                         :title="doubleTitle(row)">双</el-tag>
-                <span v-else class="muted">—</span>
+                <el-tag v-if="row.ghost_done_today" size="small" type="warning" effect="plain"
+                        title="今天抓鬼已满/不可用（跨日自动消失）——最适合派游荡">已满</el-tag>
+                <el-tag v-if="isWalking(row)" size="small" type="success"
+                        :title="isHatching(row) ? '孵化会话进行中（也是游荡到孵化图）' : '游荡中'">
+                  {{ isHatching(row) ? '孵化中' : '游荡中' }}
+                </el-tag>
+                <el-tag v-else-if="isGhosting(row)" size="small" type="danger" effect="plain"
+                        title="有活跃抓鬼会话（ghost.enabled=true）">抓鬼中</el-tag>
+                <el-tag v-if="row.paused" size="small" type="info" effect="plain"
+                        title="人工暂停：自动编排不会派活给它（面板「启动」可解除）">暂停</el-tag>
+                <span v-if="!hasMarks(row)" class="muted">—</span>
               </template>
+            </el-table-column>
+            <el-table-column label="等级" width="58">
+              <template #default="{ row }">Lv{{ row.level ?? '--' }}</template>
             </el-table-column>
             <!-- 2026-09-23 货币详情：银两(money) / 储备金(reserve)，数据来自机器人心跳
                  （机器人端 90353 全量 + 90073 增量解析，见 msghandle.match_role_data_handle）。
                  0/缺省显示 '-'；完整数值见悬浮提示。 -->
-            <el-table-column label="银两 / 储备" width="140">
+            <el-table-column label="银两 / 储备" width="132">
               <template #default="{ row }">
                 <span class="mono ok-text"
                       :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.money) }}</span>
@@ -856,14 +991,8 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
                       :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.reserve) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="游荡" width="80">
-              <template #default="{ row }">
-                <el-tag v-if="row.walk?.enabled" size="small" type="success">游荡中</el-tag>
-                <span v-else class="muted">—</span>
-              </template>
-            </el-table-column>
             <template #empty>
-              <span class="muted">（本图当前没有在线号；先在地图上换到有人的图）</span>
+              <span class="muted">（当前筛选下没有号：放宽状态/图筛选，或确认有在线号）</span>
             </template>
           </el-table>
           <div class="bdg-pager">
@@ -991,6 +1120,10 @@ table.mini th, table.mini td { padding: 3px 6px; font-size: 12px; }
 @media (max-width: 1000px) { .bdg-cols { grid-template-columns: 1fr; } }
 .bdg-col { min-width: 0; }
 .bdg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+/* 2026-09-23 选号筛选条：状态多选（按钮组）+ 图下拉 */
+.cand-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.cand-filter :deep(.el-checkbox-button__inner) { padding: 4px 9px; font-size: 12px; }
+.cand-tip { line-height: 1.5; margin-bottom: 6px; }
 .cand-table :deep(.el-table__cell) { padding: 3px 0; }
 .bdg-pager { display: flex; justify-content: flex-end; margin-top: 8px; }
 .map-pick { max-height: 330px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;
