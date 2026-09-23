@@ -59,7 +59,9 @@ CORE = ["config", "protocol3", "robot_mgr", "quest_state", "quest_engine",
         "random_walk", "daily_ghost", "auto_roam", "robot_operator",
         "msghandle", "cnet",
         # 2026-09-23 技能主动攻击（新模块）
-        "skill_meta", "skill_attack"]
+        "skill_meta", "skill_attack",
+        # 2026-09-23 分享日常通用驱动（P0 大唐神捕；新模块）
+        "share_daily"]
 
 sys.path.insert(0, script_dir)
 sys.modules["cnetwork"] = MagicMock(name="cnetwork")
