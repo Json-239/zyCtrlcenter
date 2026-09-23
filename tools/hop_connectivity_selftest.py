@@ -113,6 +113,26 @@ def main():
     check("原 NO_LEGAL_ROUTE 报错路径保留(找不到才走原路径)",
           '地图 %d 无可行路径 (%d,%d)→(%d,%d), 取消行走' in qe)
 
+    # 结构: 连通筛选必须是"就近可走格校正"的**独立一层**(与 >8 门槛同级) —— 否则
+    #   "目标格可走但不可达"(现场 map45 (1074,907)→(152,246)、map24 钟馗
+    #   (4712,2776)→(1672,1080)) 这类连门槛都进不去, 筛选形同虚设。
+    def _indent(s):
+        return len(s) - len(s.lstrip("\t"))
+
+    _abs_line = None
+    _guard_line = None
+    for _ln in qe.splitlines():
+        if _abs_line is None and "if abs(_nx - to_x) + abs(_ny - to_y) > 8:" in _ln:
+            _abs_line = _ln
+        if _guard_line is None and _ln.strip() == "if path2 is None:":
+            _guard_line = _ln
+    check("连通筛选是独立一层(与 >8 门槛同级, 目标格可走也能进)",
+          _abs_line is not None and _guard_line is not None
+          and _indent(_abs_line) == _indent(_guard_line),
+          (_abs_line, _guard_line))
+    check("path2 进入门槛前先置 None(门槛不进入时不 NameError)",
+          "\t\t\t\t\tpath2 = None" in qe)
+
     # ============================================================ B. 执行(真实 robot_path)
     try:
         sys.path.insert(0, script_dir)
