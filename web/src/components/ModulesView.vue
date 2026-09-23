@@ -42,10 +42,26 @@ const skSpecialText = ref('901,902')
 // 2026-09-23 种族策略升级为「种族 × 性别」：键优先级 "种族:性别" → "种族"（通用）→ "default"，
 // 与机器人端 skill_attack.pick_skill 的退化顺序一致（sex 取值 male/female，见 skill_meta.ROLE_META）。
 // 值支持两种形态：字符串（旧格式/非系别模式）与对象 {mode, magics}（magic_random = 指定系别随机）。
+// 2026-09-23 用户口径「一个性别只有 3 个系」：门派按性别限定，男/女行不再列全部 4 个系。
+// 矩阵依据（三路一致，勿再凭猜）：
+//   ① 服务端技能配置的硬条件（最权威）：config/skill/{human,immortal,demon}_skill.xml 里
+//      五庄观(风)、法门寺(混乱)、狮驼岭(速)=限定"男"；普陀山(火)、女儿国(毒)、盘丝洞(防)=限定"女"，
+//      天宫/龙宫/方寸山/折冲府/千魔谷/地府 = 无性别条件；
+//   ② 服务端 config/rolemsg.csv「种族推荐技能」列：6 个造型各自只列该性别的 3 个系；
+//   ③ 运行数据：298 个在跑号实学技能（diag.log REINC_SKILL）只出现 5 种三元组，无例外，
+//      与 deploy 侧 role_data.py 的 5 个造型（10001/10006/10008/10014/10016）一一对应；
+//      其中 48 个号包内"外形限定装备"的外形与技能推断性别 100% 一致、0 矛盾。
+//   仙族男(白龙将)=风/雷/水  仙族女(飞天姬)=火/雷/水  → 女仙没有风系（五庄观限男）
+//   人族男(玉公子)=混乱/昏睡/封印  人族女(红霞女)=毒/昏睡/封印
+//   魔族男(万兽王)=攻/速/震慑      魔族女(青蛇妖)=攻/防/震慑
+// magics = 「通用」行可选（两性并集，性别未知时用）；byGender = 男/女行各自的集合。
 const SK_RACES = [
-  { key: 'immortal', name: '仙族', magics: ['水系', '火系', '雷系', '风系'] },   // 龙宫/普陀山/天宫/五庄观
-  { key: 'human', name: '人族', magics: ['毒系', '昏睡系', '封印系', '混乱系'] }, // 女儿国/方寸山/折冲府/法门寺
-  { key: 'demon', name: '魔族', magics: ['攻系', '防系', '震慑', '速系'] },      // 魔王寨/盘丝洞/地府/狮驼岭
+  { key: 'immortal', name: '仙族', magics: ['水系', '火系', '雷系', '风系'],
+    byGender: { male: ['水系', '雷系', '风系'], female: ['水系', '火系', '雷系'] } },       // 龙宫/普陀山/天宫/五庄观
+  { key: 'human', name: '人族', magics: ['毒系', '昏睡系', '封印系', '混乱系'],
+    byGender: { male: ['昏睡系', '封印系', '混乱系'], female: ['毒系', '昏睡系', '封印系'] } }, // 女儿国/方寸山/折冲府/法门寺
+  { key: 'demon', name: '魔族', magics: ['攻系', '防系', '震慑', '速系'],
+    byGender: { male: ['攻系', '震慑', '速系'], female: ['攻系', '防系', '震慑'] } },        // 魔王寨/盘丝洞/地府/狮驼岭
 ]
 const SK_GENDERS = [
   { key: 'male', name: '男' },
@@ -64,6 +80,11 @@ const SK_MODE_DEFAULT = { immortal: 'best_damage', human: 'special_random', demo
 
 function skKey(race, gender) { return gender ? `${race}:${gender}` : race }
 
+// 该「种族 × 性别」可选的系别（通用行=两性并集）。矩阵外的一律不出现。
+function skMagicsOf(race, gender) {
+  return (gender && race.byGender && race.byGender[gender]) || race.magics
+}
+
 // 服务端一个策略值 → {mode, magics}：字符串=旧格式；对象=新格式；未识别模式按 random（与后端同口径）
 function normStratVal(v) {
   const o = (v && typeof v === 'object') ? v : { mode: v, magics: [] }
@@ -81,16 +102,25 @@ function skEffective(raw, race, gender) {
   return { mode: SK_MODE_DEFAULT[race] || 'random', magics: [] }
 }
 
-// 整棵 strategy 状态：三族的 男/女/通用 + 兜底；系别裁剪到该族可选集合
+// 旧配置里"不属于该性别"的系别（例：女仙配了风系）——不显示、保存时丢弃；
+// 机器人侧本来也用不到（该系别无可用技能 → pick_skill 退化为"全部随机"），这里明确提示。
+const skDropped = ref([])
+
+// 整棵 strategy 状态：三族的 男/女/通用 + 兜底；系别按"该性别可选集合"裁剪
 function buildStrategy(raw) {
   const out = {}
+  const dropped = []
   for (const r of SK_RACES) {
     for (const g of SK_GENDERS) {
       const v = skEffective(raw, r.key, g.key)
-      out[skKey(r.key, g.key)] = { mode: v.mode, magics: v.magics.filter((m) => r.magics.includes(m)) }
+      const allow = skMagicsOf(r, g.key)
+      const lost = v.magics.filter((m) => !allow.includes(m))
+      if (lost.length) dropped.push({ label: r.name + '·' + g.name, magics: lost })
+      out[skKey(r.key, g.key)] = { mode: v.mode, magics: v.magics.filter((m) => allow.includes(m)) }
     }
   }
   out.default = skEffective(raw, 'default', '')
+  skDropped.value = dropped
   return out
 }
 
@@ -296,6 +326,15 @@ function reportLine() {
         <div class="muted small">未勾选的场景用普通攻击（剧情默认不勾 —— 历史上有打不赢的教训）</div>
       </el-form-item>
       <el-divider content-position="left">种族策略（每族按 男 / 女 / 通用 配）</el-divider>
+      <el-alert
+        v-if="skDropped.length"
+        class="mb"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="旧配置里有该系统不存在的系别：已不显示，保存后会被忽略"
+        :description="skDropped.map((d) => d.label + '：' + d.magics.join('/')).join('；')"
+      />
       <template v-for="race in SK_RACES" :key="race.key">
         <el-divider content-position="left" class="sk-race">{{ race.name }}</el-divider>
         <el-form-item v-for="g in SK_GENDERS" :key="g.key" :label="g.name">
@@ -307,10 +346,11 @@ function reportLine() {
               <span class="sk-magics-wrap">
                 <span class="muted small">系别</span>
                 <el-checkbox-group v-model="skCfg.strategy[skKey(race.key, g.key)].magics" size="small" class="sk-magics">
-                  <el-checkbox v-for="mg in race.magics" :key="mg" :value="mg">{{ mg }}</el-checkbox>
+                  <el-checkbox v-for="mg in skMagicsOf(race, g.key)" :key="mg" :value="mg">{{ mg }}</el-checkbox>
                 </el-checkbox-group>
               </span>
               <span v-if="!skCfg.strategy[skKey(race.key, g.key)].magics.length" class="muted small">未勾选 → 机器人按"全部随机"</span>
+              <span v-else-if="!g.key" class="muted small">通用=两性并集，性别未知的号走这行</span>
             </template>
             <span v-else-if="!g.key" class="muted small">不分性别或性别未知时用这行</span>
           </div>
