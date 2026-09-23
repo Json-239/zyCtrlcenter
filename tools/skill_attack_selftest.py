@@ -63,8 +63,10 @@ check("S5 robot_operator.update_share_skill 解析（10701/10704）",
       "def update_share_skill(" in ro and "10701" in ro and "10704" in ro)
 check("S6 daily_ghost 打 m_fight_kind 标记",
       'robot_object.m_fight_kind = "ghost" if g.fight_was_ghost else "wild"' in dg)
-check("S7 fight_tester 技能发货（第2参数 4）+ 普攻回退",
-      "[1, 4, target_index, _sidx, _prof]" in ft and "def __pick_fight_skill(" in ft)
+# 2026-09-23 第 5 参数由 proficiency 改为 reinc_class(0)（服务端实证：第5位是转世世系）
+check("S7 fight_tester 技能发货（[1,4,target,skill,0]）+ 守护普攻 + 普攻回退",
+      "[1, 4, target_index, _sidx, 0]" in ft and "[0, 1, target_index, 0, 0]" in ft
+      and "def __pick_fight_skill(" in ft)
 check("S8 fight_tester 战斗结束清缓存",
       "robot_object.m_fight_skill = None" in ft and 'robot_object.m_fight_kind = ""' in ft)
 
@@ -84,11 +86,25 @@ check("D1 仙族: 选纯伤害技（91/71/81 之一）",
       idx in (91, 71, 81) and prof in (1, 2, 3) and skill_meta.is_damage(idx),
       "pick=%s/%s" % (idx, prof))
 
-# D2 人族（11 迷魂香 status=11）：随机但必在候选内
+# D2 人族（11 迷魂香 status=11）：无特殊技能时随机门派技
 r = mk_robot({11: 5, 12: 6}, level=1, mp=999)
 idx, prof = skill_attack.pick_skill(r)
-check("D2 人族: 随机选（11/12 之内）且非伤害技",
+check("D2 人族: 无特殊技能 → 随机门派技（11/12 之内）且非伤害技",
       idx in (11, 12) and not skill_meta.is_damage(idx), "pick=%s" % idx)
+
+# D2b 人族+特殊技能（901 初露锋芒/902 一石二鸟）→ **优先特殊技能随机**（用户口径）
+r = mk_robot({11: 5, 12: 6, 901: 1, 902: 1}, level=50)
+picks = set()
+for _ in range(30):
+    idx, _ = skill_attack.pick_skill(r)
+    picks.add(idx)
+check("D2b 人族: 优先特殊技能（901/902，30 次采样全在其中）",
+      picks and picks <= {901, 902}, "picks=%s" % sorted(picks))
+
+# D2c 仙族+门派伤害技+特殊技能 → 优先门派伤害技（81 电闪雷鸣 hurt=40）
+r = mk_robot({81: 1, 901: 1, 902: 1}, level=50)
+idx, _ = skill_attack.pick_skill(r)
+check("D2c 仙族: 优先门派纯伤害技（81），不是特殊技能", idx == 81, "pick=%s" % idx)
 
 # D3 等级过滤：13 需要 30 级 → 10 级不可用
 r = mk_robot({13: 1}, level=10)

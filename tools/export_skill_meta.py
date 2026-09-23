@@ -34,6 +34,10 @@ script_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
 
 RACE_FILES = (("human", "human_skill.xml"), ("demon", "demon_skill.xml"),
               ("immortal", "immortal_skill.xml"))
+# 2026-09-23 特殊技能（extern_skill.xml）：每号都有的"新手"类伤害技 ——
+#   901 初露锋芒（单体物理法术）/ 902 一石二鸟（远程打 2 个）。用户口径：
+#   人/魔的门派技是控制/辅助（昏睡/封印/护甲），"打伤害"要用这两个。
+EXTERN_FILE = "extern_skill.xml"
 SKILL_ROOT = os.path.join(server_root, "config", "skill")
 
 
@@ -69,6 +73,40 @@ def main():
                 "magic": field(body, "magic_type_name"),
                 "plan": field(body, "skill_plan"),
             }
+    # 特殊技能（新手类 901/902 等；magic_type_name == "新手" 过滤）
+    try:
+        src = open(os.path.join(SKILL_ROOT, EXTERN_FILE),
+                   encoding="utf-8", errors="replace").read()
+        entries = re.findall(
+            r'<skill_entry skill_index="(\d+)" skill_name="([^"]*)"[^>]*>(.*?)</skill_entry>',
+            src, re.S)
+        for idx, name, body in entries:
+            if field(body, "magic_type_name") != "新手":
+                continue
+
+            def _num_ex(k, default=0):
+                v = field(body, k)
+                try:
+                    return int(float(v)) if v else default
+                except Exception:
+                    return default
+
+            rows[int(idx)] = {
+                "name": name,
+                "race": "common",
+                "school": "新手",
+                "level": _num_ex("role_lower_level"),
+                "hurt": 9,  # 伤害写在 effect_describe（"使对方N目标受到物理伤害"）→ 标记为伤害型
+                "status": 0,
+                "mp": _num_ex("base_cost_mp"),
+                "targets": _num_ex("base_target_num", 1),
+                "magic": "新手",
+                "plan": field(body, "skill_plan"),
+                "special": True,
+            }
+    except Exception as e:
+        print("★extern 特殊技能解析失败: %s" % e)
+
     if not rows:
         print("★未解析到任何技能，检查路径: %s" % SKILL_ROOT)
         return 1
@@ -87,10 +125,11 @@ def main():
     ]
     for idx in sorted(rows):
         r = rows[idx]
+        _sp = ', "special": True' if r.get("special") else ''
         lines.append('    %d: {"name": "%s", "race": "%s", "school": "%s", "level": %d, '
-                     '"hurt": %s, "status": %d, "mp": %d, "targets": %d, "magic": "%s", "plan": "%s"},' % (
+                     '"hurt": %s, "status": %d, "mp": %d, "targets": %d, "magic": "%s", "plan": "%s"%s},' % (
                          idx, r["name"], r["race"], r["school"], r["level"],
-                         str(r["hurt"]), r["status"], r["mp"], r["targets"], r["magic"], r["plan"]))
+                         str(r["hurt"]), r["status"], r["mp"], r["targets"], r["magic"], r["plan"], _sp))
     lines.append("}")
     lines.append("")
     lines.append("")
