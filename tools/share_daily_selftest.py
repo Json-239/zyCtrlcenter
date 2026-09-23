@@ -912,6 +912,42 @@ check("S24 ③9/10 → 不触发停止（继续接取）", not handled and g.sta
 check("S24 DAILY_LIMIT_DELIVERY_WAIT=2s（照抄客户端）", S.DAILY_LIMIT_DELIVERY_WAIT == 2.0)
 
 # ================================================================
+# 21.5) tick 集成冒烟（抓 tick 内 NameError / 流程串联）
+# ================================================================
+r = fresh_robot()
+g = new_state()
+r.m_share_daily = g
+g.state = "ACCEPT"
+g.state_since_ms = time.time() * 1000
+_err = None
+try:
+    S.tick(r, time.time() * 1000)
+except Exception as e:
+    _err = "%s: %s" % (type(e).__name__, e)
+check("S0 tick 集成: 启用 + 无任务(ACCEPT) 不抛异常", _err is None, _err or "")
+r = fresh_robot()
+g = new_state()
+r.m_share_daily = g
+g.state = "READY"
+g.state_since_ms = time.time() * 1000
+q = r.m_quest
+q.tasks[2028301] = mk_task(2028301, counters=[counter(11883, 30126, 0, 1)])
+q.dyn_npc_meta = {777: 18140}
+q.dynamic_npcs = {777: [12, 2300, 1900]}
+r.m_mapid = 12
+r.m_pose = (2300, 1900)
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+_err = None
+try:
+    S.tick(r, time.time() * 1000)
+except Exception as e:
+    _err = "%s: %s" % (type(e).__name__, e)
+_clicks = _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]
+check("S0 tick 集成: 有可点怪 → 点击开战 + 普攻闸 fight_ctx",
+      _err is None and bool(_clicks) and _clicks[0][0] == 777
+      and isinstance(q.fight_ctx, dict), "%s / %s" % (_err, str(_clicks[:2])))
+
+# ================================================================
 # 22) 汇总
 # ================================================================
 print("\n自检目标: %s" % SCRIPT_DIR)
