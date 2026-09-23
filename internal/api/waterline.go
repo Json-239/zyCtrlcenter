@@ -39,7 +39,19 @@ func (a *API) WaterlineDeps() waterline.Deps {
 		Candidates: a.waterlineCandidates,
 		Online:     a.waterlineOnline,
 		Offline:    a.waterlineOffline,
-		Log:        func(format string, args ...any) { a.Log.Printf(format, args...) },
+		// 2026-09-23 压号前先停游荡（现场：在线 243 超水位 230 压不下来——游荡号被判
+		// "在忙"永远等收工）。与游荡池回收含孵化号的先例同口径：先收工再断。
+		StopRoam: func(accounts []string) error {
+			res := a.StopRoam(accounts)
+			if res.Err != "" {
+				return errors.New(res.Err)
+			}
+			if res.Sent == 0 {
+				return errors.New(res.Msg)
+			}
+			return nil
+		},
+		Log: func(format string, args ...any) { a.Log.Printf(format, args...) },
 	}
 }
 

@@ -34,6 +34,7 @@ type fake struct {
 	offlineCalls [][]string
 	onlineOK     bool
 	offlineOK    bool
+	stopRoamCalls [][]string
 	logs         []string
 }
 
@@ -82,6 +83,11 @@ func (f *fake) deps() waterline.Deps {
 			// 真实壳层会把号标记移除 + 从状态表删行 → 本地立刻不再在线
 			f.markOffline(accs)
 			return accs, nil
+		},
+		// 2026-09-23：压号前先停游荡（记录调用供断言）。
+		StopRoam: func(accs []string) error {
+			f.stopRoamCalls = append(f.stopRoamCalls, accs)
+			return nil
 		},
 		Log: func(format string, args ...any) {
 			f.logs = append(f.logs, fmt.Sprintf(format, args...))

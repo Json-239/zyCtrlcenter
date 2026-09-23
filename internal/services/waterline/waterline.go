@@ -172,7 +172,13 @@ type Deps struct {
 	Online func(accounts []string) ([]string, error)
 	// Offline 下发下线（返回**实际下发成功**的账号；失败返回 err）。
 	Offline func(accounts []string) ([]string, error)
-	Log     func(format string, args ...any)
+	// StopRoam 压号前给"纯游荡"号停游荡（可选；nil = 不预停，直接下线）。
+	// 2026-09-23 新增（现场：在线 243 超水位 230 压不下来）：游荡号此前被判"在忙"
+	// 只能进"待下线等收工"，而游荡不会收工 → 压号死等。现在允许直接压纯游荡号，
+	// 但按游荡池回收含孵化号的先例**先停游荡再断**，避免号下线后机器人端
+	// 游荡状态残留、下次上线又自动继续。
+	StopRoam func(accounts []string) error
+	Log      func(format string, args ...any)
 }
 
 // Status 保持器状态（面板 / GET /api/waterline 展示）。
@@ -352,15 +358,19 @@ func ComputeAdjust(cur, target, deadZone, maxStep int) int {
 	return diff
 }
 
-// PickOffline 从在线机器人里挑 n 个下线：now = 空闲的（现在就能断），
-// pending = 在忙的（有抓鬼会话/任务/战斗/游荡，**绝不硬断**，等它收工再断）。
+// PickOffline 从在线机器人里挑 n 个下线：now = 现在就能断的（空闲 **或纯游荡**），
+// pending = 在忙的（有任务推进/抓鬼会话/战斗/孵化，**绝不硬断**，等它收工再断）。
 //
-// preferIdle=true（默认）：空闲号优先，不够再用忙号补 pending；
+// preferIdle=true（默认）：可压号优先，不够再用忙号补 pending；
 // preferIdle=false：按传入顺序挑（壳层传随机序 = 随机补选），但忙号仍只进 pending。
 // 取舍顺序由输入顺序决定（纯函数、不用随机源，便于确定性单测）。
 //
 // 2026-09-23 R3：**人工暂停的号既不 now 也不 pending** —— 用户点过「停止」的号
 // 水位保持器不主动断它（保留它在线，等用户自己决定；目标缺口由别的号摊）。
+//
+// 2026-09-23 修复（现场：在线 243 超水位 230 压不下来）：判定从 Busy 换成 Pressable ——
+// **纯游荡号（Walking 且无任务/抓鬼/战斗）直接进 now**（压前会先停游荡，见 stopRoamFor）。
+// 旧实现把游荡号放进 pending"等收工"，而游荡不收工 → 压号永远不动。
 func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pending []string) {
 	if n <= 0 {
 		return nil, nil
@@ -373,7 +383,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 			if r.Account == "" || !r.Online || r.Paused {
 				continue
 			}
-			if Busy(r) {
+			if !Pressable(r) {
 				pending = append(pending, r.Account)
 			} else {
 				now = append(now, r.Account)
@@ -385,7 +395,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 		if len(now) >= n {
 			break
 		}
-		if r.Account == "" || !r.Online || r.Paused || Busy(r) {
+		if r.Account == "" || !r.Online || r.Paused || !Pressable(r) {
 			continue
 		}
 		now = append(now, r.Account)
@@ -394,7 +404,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 		if len(now)+len(pending) >= n {
 			break
 		}
-		if r.Account == "" || !r.Online || r.Paused || !Busy(r) {
+		if r.Account == "" || !r.Online || r.Paused || Pressable(r) {
 			continue
 		}
 		pending = append(pending, r.Account)
@@ -451,6 +461,60 @@ func Busy(r state.Robot) bool {
 		return r.TaskIndex != 0
 	}
 	return false
+}
+
+// Pressable 是否"现在就能压下线"（比 Busy 宽的**仅压号**判据）。
+//
+// 2026-09-23 现场：在线 243 超出水位目标 230，压号一直显示"待下线 N 个，等它们收工"
+// 却永远不断 —— 根因是 Busy() 把"游荡（Walking）"也算忙，游荡号只能进待下线，
+// 而**游荡不会收工** → 压号死等。压号是"降低在线数"的动作、游荡是低价值填充活动，
+// 因此压号场景要比 Busy 更宽一档：纯游荡号可直接压（压前会先停游荡，见 stopRoamFor）。
+//
+// 不压（保持与 Busy 同口径的"不打扰"）：
+//   - 人工暂停 / 战斗 / 活跃抓鬼会话 / 孵化会话；
+//   - 任务推进态 NAV/CLICK/DIALOG/FIGHT/SHOP/ALLOC/WAIT_NEXT/SUBMIT（压下去=任务半途而废）；
+//   - 抓鬼会话态 WAIT_GHOST/ACCEPT/HEAL（等鬼/接取/治疗，属活跃会话）；
+//   - ERROR 异常号（既有口径：等人工重登或机器人端自愈，不拿它当可回收空闲号）。
+//
+// 可压：IDLE/READY/ONLINE 等空闲态，**以及 Walking（纯游荡）但无任务/抓鬼/战斗的号**。
+// 关系：Pressable ⊇ {!Busy}，差异只有"Walking 且非任务态"这一档。
+func Pressable(r state.Robot) bool {
+	if r.Paused || r.Fight || r.GhostActive() || r.HatchActive() {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(r.State)) {
+	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT", "SUBMIT",
+		"ERROR", "WAIT_GHOST", "ACCEPT", "HEAL":
+		return false
+	case "WAIT_TASK":
+		return r.TaskIndex == 0
+	}
+	return true
+}
+
+// stopRoamFor 压号前对"纯游荡"号先停游荡（Deps.StopRoam 未接时跳过；失败只记日志不阻断压号）。
+func (k *Keeper) stopRoamFor(accounts []string) {
+	if k.d.StopRoam == nil || k.d.Robots == nil || len(accounts) == 0 {
+		return
+	}
+	want := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		want[a] = true
+	}
+	roam := make([]string, 0, len(accounts))
+	for _, r := range k.d.Robots() {
+		if want[r.Account] && r.Walking() {
+			roam = append(roam, r.Account)
+		}
+	}
+	if len(roam) == 0 {
+		return
+	}
+	if err := k.d.StopRoam(roam); err != nil {
+		k.logf("[WATERLINE] 压号前停游荡失败（继续下线）: %v", err)
+		return
+	}
+	k.note(fmt.Sprintf("压号前先停游荡 %d 个：%s", len(roam), strings.Join(roam, ",")))
 }
 
 // ---------------------------------------------------------------- 取数
@@ -574,6 +638,7 @@ func (k *Keeper) Tick(now time.Time) bool {
 
 		// ① 待下线队列里已经收工的 → 现在断（同样受预算约束，别一次砸太多）
 		if ready := k.pendingReady(budget); len(ready) > 0 {
+			k.stopRoamFor(ready) // 纯游荡号：先停游荡再断（2026-09-23）
 			sent, err := k.doOffline(ready, "待下线收工")
 			if err != nil {
 				k.fail("压号", err)
@@ -682,7 +747,7 @@ func (k *Keeper) doOnline(want int, now time.Time) ([]string, error) {
 	return sent, nil
 }
 
-// doOfflinePick 挑号压制：空闲的直接断，在忙的进「待下线」。
+// doOfflinePick 挑号压制：可压的直接断（空闲**或纯游荡**），在忙/异常的进「待下线」。
 func (k *Keeper) doOfflinePick(n int, preferIdle, randomFallback bool, now time.Time) (bool, error) {
 	if k.d.Robots == nil || k.d.Offline == nil {
 		return false, errors.New("下线下发能力不可用")
@@ -712,17 +777,18 @@ func (k *Keeper) doOfflinePick(n int, preferIdle, randomFallback bool, now time.
 	}
 	acted := false
 	if len(nowList) > 0 {
+		k.stopRoamFor(nowList) // 纯游荡号：先停游荡再断（2026-09-23）
 		sent, err := k.doOffline(nowList, "空闲号")
 		if err != nil {
 			return false, err
 		}
 		acted = true
-		k.note(fmt.Sprintf("压号 %d 个空闲号：%s", len(sent), strings.Join(sent, ",")))
+		k.note(fmt.Sprintf("压号 %d 个（空闲/纯游荡）：%s", len(sent), strings.Join(sent, ",")))
 	}
 	if len(pendList) > 0 {
 		k.addPending(pendList)
 		acted = true
-		k.note(fmt.Sprintf("标记待下线 %d 个（在忙，等任务收尾再断）：%s",
+		k.note(fmt.Sprintf("标记待下线 %d 个（在忙/异常，等任务收尾再断）：%s",
 			len(pendList), strings.Join(pendList, ",")))
 	}
 	return acted, nil
@@ -789,7 +855,7 @@ func (k *Keeper) syncQueues(now time.Time) {
 	}
 }
 
-// pendingReady 待下线里"已经回到空闲态"的号（可以现在断），最多 max 个（保序）。
+// pendingReady 待下线里"现在就能断"的号（空闲 **或纯游荡**，见 Pressable），最多 max 个（保序）。
 func (k *Keeper) pendingReady(max int) []string {
 	if max <= 0 || k.d.Robots == nil {
 		return nil
@@ -797,10 +863,10 @@ func (k *Keeper) pendingReady(max int) []string {
 	if k.pendingLen() == 0 {
 		return nil
 	}
-	idle := map[string]bool{}
+	ready := map[string]bool{}
 	for _, r := range k.d.Robots() {
-		if r.Online && r.Account != "" && !Busy(r) {
-			idle[r.Account] = true
+		if r.Online && r.Account != "" && Pressable(r) {
+			ready[r.Account] = true
 		}
 	}
 	k.mu.Lock()
@@ -810,7 +876,7 @@ func (k *Keeper) pendingReady(max int) []string {
 		if len(out) >= max {
 			break
 		}
-		if idle[a] {
+		if ready[a] {
 			out = append(out, a)
 		}
 	}
