@@ -81,22 +81,26 @@ check("S8 中控 ghostDoneMap 旧快照不下发",
       'toStr(r.Ghost["count_date"])' in hd)
 
 # ================================================================ 动态：S3 跨夜检测
+# 2026-09-23 计数口径修复后: `g.done_count += 1` 被收进 `if int(ti) != GHOST_SUBMIT_TASK:`
+# （只数打鬼 FINISH）→ 这里按新形状提取, 并给 _f 补 ti 形参（打鬼 ti, 跨夜语义不变）。
 m3 = re.search(
-    r"(?ms)^\t# 2026-09-23 跨夜检测.*?^\tg\.done_count \+= 1\n"
+    r"(?ms)^\t# 2026-09-23 跨夜检测.*?^\t\tg\.done_count \+= 1\n"
     r"^\tg\.submit_fail = 0\t\t# 2026-09-15[^\n]*$", dh)
 if not m3:
     check("D-S3 提取跨夜检测块", False, "未匹配")
 else:
     body = m3.group(0)
-    code = "def _f(g, robot_object, __today_key, __log):\n" + body + "\n"
+    code = ("def _f(g, robot_object, __today_key, __log, ti, GHOST_SUBMIT_TASK):\n"
+            + body + "\n")
     ns = {}
     exec(compile(code, "<crossday3>", "exec"), ns)  # noqa: S102 —— 自检专用
     fn = ns["_f"]
     logs = []
+    SUBMIT = 2019511
     mk = lambda done, cd: types.SimpleNamespace(done_count=done, count_date=cd, submit_fail=9)
 
     g = mk(49, YDAY)
-    fn(g, None, lambda: TODAY, lambda *a: logs.append(a))
+    fn(g, None, lambda: TODAY, lambda *a: logs.append(a), 2019509, SUBMIT)
     check("D1 跨夜后 +1: 旧计数 49 → 1（并打重置日志）",
           g.done_count == 1 and g.count_date == TODAY and g.submit_fail == 0
           and any("跨夜重置" in str(x) for x in logs),
@@ -104,14 +108,20 @@ else:
 
     g = mk(49, TODAY)
     logs2 = []
-    fn(g, None, lambda: TODAY, lambda *a: logs2.append(a))
+    fn(g, None, lambda: TODAY, lambda *a: logs2.append(a), 2019509, SUBMIT)
     check("D2 同日 +1: 49 → 50（无重置日志）",
           g.done_count == 50 and not any("跨夜重置" in str(x) for x in logs2),
           "done=%s" % g.done_count)
 
     g = mk(0, YDAY)
-    fn(g, None, lambda: TODAY, lambda *a: None)
+    fn(g, None, lambda: TODAY, lambda *a: None, 2019509, SUBMIT)
     check("D3 跨夜且旧计数为 0: → 1", g.done_count == 1 and g.count_date == TODAY)
+
+    # D10: 计数口径 —— 交付任务(2019511) 不再累加（2026-09-23 修复）
+    g = mk(7, TODAY)
+    fn(g, None, lambda: TODAY, lambda *a: None, SUBMIT, SUBMIT)
+    check("D10 交付 FINISH(2019511) 不计数: 7 → 7", g.done_count == 7,
+          "done=%s" % g.done_count)
 
 # ================================================================ 动态：S4 启动三态
 m4 = re.search(r"(?ms)^\t\t# 2026-08-24 已完成数.*?^\t\tg\.count_date = _today\n", dh)
