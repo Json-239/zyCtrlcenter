@@ -17,14 +17,24 @@
         minutes = 限时(分钟; 到点自动停)
         解析/校验集中在纯函数 resolve_roam_target 里(非法参数明确拒绝, 不静默改图)。
 
+  2026-09-23h 扩展(野外挂机刷怪档位 wild):
+        依据服务端遇怪机制(role_object.cpp calc_meet_monster: 累计移动 ≥1120px 后每次
+        位置上报判定, 25% 概率 × 落点在怪物分布区 × 非和平区; 停下=零判定)——
+        wild = 几乎不停 + 中小步幅 + 少摆动 + 直行; 另补游荡号遇怪战斗统计
+        (__note_roam_fight → fight_tester.stat_begin wild, 每场一次)。
+
 本自检断言:
-  ① ROAM_PROFILES 含 default/dense/gather; dense 的停顿参数确实"密"; gather 是占位档;
+  ① ROAM_PROFILES 含 default/dense/gather/wild; dense 的停顿参数确实"密"; gather 是占位档;
+     wild 是"野外挂机刷怪"独立档(参数与 dense 不同, 不改 default/dense);
   ② apply_roam_profile: default 不覆盖任何参数(账号级随机保留)、dense 覆盖生效、
-     未知档位回退 default 且记日志、**gather 占位档明确回退 + 记日志**(不静默按 default 跑);
+     未知档位回退 default 且记日志、**gather 占位档明确回退 + 记日志**(不静默按 default 跑)、
+     **wild 覆盖生效 + 大小写容错**;
   ③ maps 白名单参数解析(norm_map_list): 数组/字符串/单个数字/去重/非法项;
   ④ mode=random 选图逻辑(pick_random_map/resolve_roam_target, 纯函数可注入随机):
      抽签避开当前图、白名单里没有可用图/指定图不在白名单/指定图没有网格 → 明确拒绝;
-  ⑤ 源码形状: 随机图/白名单/限时确实接进了 random_walk; mount_egg 启动游荡固定传 dense。
+  ⑤ 源码形状: 随机图/白名单/限时确实接进了 random_walk; mount_egg 启动游荡固定传 dense;
+     **wild 档注册 + __note_roam_fight 统计补口 + tick 战斗分支调用 + 沿标记复位**;
+     default/dense 参数精确值(防"顺手改档"回归)。
 
 用法:
   python tools/roam_profile_selftest.py <script 目录 或 random_walk.py 路径>
@@ -117,6 +127,22 @@ def main():
     check("random_walk 的图校验用 getattr 兜底(热更兼容)",
           'getattr(w, "deadline_ms"' in src and 'getattr(w, "map_req"' in src,
           "新字段没有 getattr 兜底, 热更后旧实例会 AttributeError")
+    # 2026-09-23h: wild 档 + 游荡号战斗统计补口(形状断言)
+    check("random_walk 注册 wild 档(野外挂机刷怪)", '"wild": {' in src,
+          "wild 档未注册(野外刷怪档不可用)")
+    check("random_walk 取档位时解析 mode 字段(权威形态)",
+          '_prof_req = str(cmd.get("mode", "") or "").strip().lower()' in src,
+          "mode 解析被改动(档位透传会失效)")
+    check("random_walk 含游荡号战斗统计补口(__note_roam_fight)",
+          "def __note_roam_fight(" in src
+          and 'fight_tester.stat_begin(robot_object, "wild")' in src,
+          "游荡号野外战斗不计入 m_fight_stats(大屏 wild 漏计)")
+    check("random_walk tick 战斗分支调用 __note_roam_fight",
+          "__note_roam_fight(robot_object)" in src,
+          "tick 未调用统计补口")
+    check("random_walk 战斗结束复位沿标记(m_roam_fight_open)",
+          "m_roam_fight_open = False" in src,
+          "沿标记不复位 → 只有第一场战斗被统计")
 
     # ---- ② 提取纯函数并执行(按依赖顺序) ----
     ns = {}
@@ -127,6 +153,7 @@ def main():
         ("norm_map_list", _extract_func(src, "norm_map_list")),
         ("pick_random_map", _extract_func(src, "pick_random_map")),
         ("resolve_roam_target", _extract_func(src, "resolve_roam_target")),
+        ("__note_roam_fight", _extract_func(src, "__note_roam_fight")),
     ]
     for _name, _frag in frags:
         check("提取 %s" % _name, _frag is not None)
@@ -201,6 +228,52 @@ def main():
               len(logs5) == 1 and "gather" in logs5[0] and ("未实现" in logs5[0] or "占位" in logs5[0]),
               logs5)
 
+        # 2026-09-23h wild 档(野外挂机刷怪): 覆盖生效 + 与 dense 独立调参
+        w6 = _W()
+        w6.stand_ratio, w6.stand_min_ms, w6.stand_max_ms = 0.7, 60000, 180000
+        w6.step_min, w6.step_max = 120, 300
+        w6.dither_ratio = 0.5
+        eff6 = fn(w6, "wild")
+        check("wild 档: 注册在 ROAM_PROFILES + 带 desc",
+              "wild" in profs and isinstance((profs.get("wild") or {}).get("desc"), str))
+        check("wild 档: 几乎不停(stand_ratio <= 0.1)", w6.stand_ratio <= 0.1,
+              "stand_ratio=%s" % w6.stand_ratio)
+        check("wild 档: 停顿短(stand_max_ms <= 3000)", w6.stand_max_ms <= 3000,
+              "stand_max_ms=%s" % w6.stand_max_ms)
+        check("wild 档: 中小步幅(step_min >= 120 且 step_max <= 600)",
+              w6.step_min >= 120 and w6.step_max <= 600,
+              "step=%s~%s" % (w6.step_min, w6.step_max))
+        check("wild 档: 少摆动(dither_ratio <= 0.2)", w6.dither_ratio <= 0.2,
+              "dither_ratio=%s" % w6.dither_ratio)
+        check("wild 档: profile=wild", eff6 == "wild" and getattr(w6, "profile", "") == "wild")
+        check("wild 档: 与 dense 参数不同(独立调参, 非复制)",
+              (profs.get("wild") or {}).get("step_max") != (profs.get("dense") or {}).get("step_max")
+              and (profs.get("wild") or {}).get("stand_max_ms") != (profs.get("dense") or {}).get("stand_max_ms"),
+              "wild=%s dense=%s" % (profs.get("wild"), profs.get("dense")))
+        w7 = _W()
+        w7.stand_ratio = 0.7
+        eff7 = fn(w7, "  WILD  ")
+        check("wild 档: 大小写/空格容错", eff7 == "wild" and w7.stand_ratio <= 0.1)
+        # 未实现用途(打猎/挖宝)仍明确回退, 不静默按 default 跑
+        w8 = _W()
+        w8.stand_ratio = 0.7
+        logs8 = []
+        eff8 = fn(w8, "hunt", log=lambda m: logs8.append(m))
+        check("未实现档 hunt(打猎) → 回退 default 并记日志",
+              eff8 == "default" and w8.stand_ratio == 0.7
+              and len(logs8) == 1 and "hunt" in logs8[0], logs8)
+
+        # default/dense 参数精确值(防"顺手改档"回归: 本次新增 wild 不得动旧档)
+        check("default 档仍为空(不覆盖账号级随机)", (profs.get("default") or {}) == {},
+              profs.get("default"))
+        _dn = profs.get("dense") or {}
+        check("dense 参数未改动(260~620/0.05/800~2500/0.15/0.6)",
+              _dn.get("step_min") == 260 and _dn.get("step_max") == 620
+              and _dn.get("stand_ratio") == 0.05
+              and _dn.get("stand_min_ms") == 800 and _dn.get("stand_max_ms") == 2500
+              and _dn.get("dither_ratio") == 0.15 and _dn.get("heading_span") == 0.6,
+              _dn)
+
     # ---- ④ maps 白名单解析 ----
     if norm is not None:
         check("白名单: [6,'17',34] → [6,17,34]", norm([6, "17", 34]) == [6, 17, 34])
@@ -260,6 +333,45 @@ def main():
         # 白名单给了但解析不出 → 拒绝
         t11 = resolve("random", "abc", [6, 10])
         check("白名单全非法 → 拒绝", t11[0] == 0 and "白名单" in t11[2], t11)
+
+    # ---- ⑥ 游荡号战斗统计补口行为(2026-09-23h, mock fight_tester) ----
+    note = ns.get("__note_roam_fight")
+    check("提取 __note_roam_fight", note is not None)
+    if note is not None:
+        import sys as _sys
+        import types as _types
+        calls = []
+        ft_mod = _types.ModuleType("fight_tester")
+        ft_mod.stat_begin = lambda ro, kind: calls.append(kind)
+        _old_ft = _sys.modules.get("fight_tester")
+        _sys.modules["fight_tester"] = ft_mod
+        try:
+            class _R(object):
+                pass
+
+            class _StoryQ(object):
+                pass
+
+            r = _R()
+            note(r)
+            note(r)		# 同一场(沿标记未复位) → 不重复
+            check("__note_roam_fight: 每场只记一次", calls == ["wild"], calls)
+            check("__note_roam_fight: 打标 m_fight_kind=wild",
+                  getattr(r, "m_fight_kind", "") == "wild")
+            r.m_roam_fight_open = False	# 战斗结束(tick 复位)
+            note(r)
+            check("__note_roam_fight: 复位后新一场再记", calls == ["wild", "wild"], calls)
+            q = _StoryQ()
+            q.fight_ctx = {"x": 1}
+            r2 = _R()
+            r2.m_quest = q
+            note(r2)
+            check("__note_roam_fight: 剧情战(fight_ctx)不计数", calls == ["wild", "wild"], calls)
+        finally:
+            if _old_ft is not None:
+                _sys.modules["fight_tester"] = _old_ft
+            else:
+                del _sys.modules["fight_tester"]
 
     nfail = 0
     for name, ok, detail in results:
