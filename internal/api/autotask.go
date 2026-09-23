@@ -146,7 +146,8 @@ func (a *API) ghostGate(level, required int) (bool, string) {
 // 2026-09-23 R3（操作健壮性审计）：**人工暂停闸对所有 kind 生效**（原先只处理 ghost）——
 // 用户点过「停止/停链」的号，恢复引擎不再按意图把它拉起来；再次「启动/立即补发/上线」
 // 由壳层清标（见 handleStart / handleIntentsRestore / batchOnline）。
-// 抓鬼等级/池闸的判据沿用原口径（只对 ghost），不变。
+// 抓鬼等级/池闸的判据沿用原口径（只对 ghost），不变；
+// 2026-09-23 分享日常（shenbu）：自有池状态闸 + 今日满额闸（与抓鬼同款，只对 shenbu）。
 func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	return func(kind, account string) (bool, string) {
 		if a.St != nil && a.St.IsPaused(account) {
@@ -160,6 +161,19 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 				return true, "当日卡死已熔断（" + until.Format("01-02 15:04") +
 					" 自动恢复；面板「解除熔断」或「立即补发该号」可提前解除）"
 			}
+		}
+		// 2026-09-23 分享日常（shenbu）：自有闸门（池状态 + 今日满额），与抓鬼同款但只对本 kind。
+		// 注意：shenbu 的池未启用时这里拦下 —— 与"池停用不自动补发"的既有口径一致。
+		if strings.EqualFold(kind, "shenbu") {
+			if ok, why := a.poolAllowsDispatch(kind); !ok {
+				return true, why
+			}
+			if a.St != nil {
+				if r, ok := a.St.Get(account); ok && r.DailyFull(a.shareDailyKey()) {
+					return true, "今日大唐神捕已满/不可用（等跨日）"
+				}
+			}
+			return false, ""
 		}
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
@@ -356,10 +370,11 @@ func (a *API) chainInflightActive(acc string) bool {
 }
 
 // restoreInflightCountByKind 恢复引擎"刚补发、还没跑起来"的号数（同样受 TTL 约束），
-// 按**命令种类**过滤（2026-09-23 R1）：
+// 按**命令种类**过滤（2026-09-23 R1/R3）：
 //
-//	kind=ghost  → 只算 intent=ghost 的补发；
-//	kind=newbie → 算 start_chain 类补发（newbie / zhuaogui 两种意图都是 start_chain）。
+//	kind=ghost   → 只算 intent=ghost 的补发；
+//	kind=newbie  → 算 start_chain 类补发（newbie / zhuaogui 两种意图都是 start_chain）；
+//	kind=shenbu  → 算 share_daily_start 类补发（intent=shenbu）。
 //
 // restorer 的补发不经过 LaunchTask，靠它自己的 Status().LastDispatchAt 记账，
 // 否则"补发 + 直派"互相看不见，闸门仍会被连续放行。
@@ -385,6 +400,9 @@ func (a *API) restoreInflightCountByKind(kind autotask.Kind) int {
 				if kind == autotask.KindNewbie && r.Online && isTasking(r) {
 					continue
 				}
+				if kind == autotask.KindShenbu && r.Online && dailyRunningOf(r, a.shareDailyKey()) {
+					continue
+				}
 			}
 		}
 		n++
@@ -393,13 +411,15 @@ func (a *API) restoreInflightCountByKind(kind autotask.Kind) int {
 }
 
 // restoreKindMatches 恢复记录的意图 kind 是否属于该池（命令口径：ghost → 抓鬼；
-// newbie/zhuaogui → start_chain 类）。
+// newbie/zhuaogui → start_chain 类；shenbu → share_daily_start）。
 func restoreKindMatches(intentKind string, poolKind autotask.Kind) bool {
 	switch poolKind {
 	case autotask.KindGhost:
 		return intentKind == string(intent.KindGhost)
 	case autotask.KindNewbie:
 		return intentKind == string(intent.KindNewbie) || intentKind == string(intent.KindZhuaogui)
+	case autotask.KindShenbu:
+		return intentKind == string(intent.KindShenbu)
 	}
 	return false
 }
@@ -433,6 +453,8 @@ func (a *API) poolQuota(kind autotask.Kind, manual bool) int {
 		inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
 	case autotask.KindNewbie:
 		inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
+	case autotask.KindShenbu:
+		inflight = a.dailyInflightCount() + a.restoreInflightCountByKind(autotask.KindShenbu)
 	}
 	if q := st.Target - st.Online - inflight; q > 0 {
 		return q
@@ -479,6 +501,8 @@ func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 			inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
 		case autotask.KindNewbie:
 			inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
+		case autotask.KindShenbu:
+			inflight = a.dailyInflightCount() + a.restoreInflightCountByKind(autotask.KindShenbu)
 		}
 		return false, fmt.Sprintf("%s 池配额已用满（在跑 %d + 在途 %d ≥ 目标 %d，不自动补发）",
 			kind, st.Online, inflight, st.Target)
@@ -546,6 +570,9 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			continue
 		}
 		if kind == autotask.KindNewbie && a.chainInflightActive(acc) {
+			continue
+		}
+		if kind == autotask.KindShenbu && a.dailyInflightActive(acc) {
 			continue
 		}
 		z := pa.Zone(gameAddr)
@@ -641,6 +668,26 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			}
 			out = append(out, autotask.Candidate{Account: acc, Online: true, Level: level,
 				Reason: fmt.Sprintf("孵化（%s，图 %d）", hatchKindLabel(plan.Kind), plan.MapID)})
+
+		case autotask.KindShenbu:
+			// 大唐神捕（分享日常）：**等级 ≥ 服务端票条件（默认 40）+ 今日未满 + 没在跑别的链**。
+			// 与抓鬼的分工（用户口径 2026-09-23"填补抓鬼满额后的空档"）：抓鬼未满且意图=抓鬼
+			// 的号归抓鬼；本候选只收"神捕意图 / 无意图 / **抓鬼已满**"的号（满额的号抓鬼池
+			// 已经不派它了）。轮转调度（随机起点 + 跑满自动转）P2 再接。
+			if level < a.shareDailyMinLevel() {
+				continue // 等级未知(0)/不足：服务端按票条件拒（≥40），别白跑
+			}
+			if _, has := r.DailyOf(a.shareDailyKey()); has && r.DailyFull(a.shareDailyKey()) {
+				continue // 今日神捕已满/不可用（等跨日）
+			}
+			if k := kinds[acc]; k != "" && k != intent.KindShenbu {
+				ghostFull := (a.St != nil && a.St.GhostDoneToday(acc)) || ghostDailyFull(r)
+				if !(k == intent.KindGhost && ghostFull) {
+					continue // 别的链在用（新手链 / 抓鬼未满）→ 让路
+				}
+			}
+			out = append(out, autotask.Candidate{Account: acc, Online: hasLive && r.Online, Level: level,
+				Reason: fmt.Sprintf("大唐神捕（%d 级）", level)})
 		}
 	}
 	return out
@@ -705,10 +752,10 @@ func (a *API) usableInZone(acc string) bool {
 
 // poolCounts 号池分区统计（可用数 / 在跑数）：面板"往对应池里拉号"与目标缺口显示用。
 func (a *API) poolCounts(kind autotask.Kind) (usable, running int) {
-	if kind == autotask.KindHatch {
-		// 孵化没有独立分区（号本来就在新手池/抓鬼池里）：usable = 当前可拉起的孵化候选数
-		// （在线 + 抓鬼已满 + 有蛋，判据与自动任务同一套），running = 活跃孵化会话数。
-		return len(a.autotaskCandidates(autotask.KindHatch)), a.autotaskOnlineCount(kind)
+	if kind == autotask.KindHatch || kind == autotask.KindShenbu {
+		// 孵化与大唐神捕都**没有独立分区**（号本来就在新手池/抓鬼池里）：
+		// usable = 当前可拉起的候选数（判据与自动任务同一套），running = 该策略在跑数。
+		return len(a.autotaskCandidates(kind)), a.autotaskOnlineCount(kind)
 	}
 	if a.Accounts == nil {
 		return 0, 0
@@ -765,6 +812,8 @@ func (a *API) autotaskOnlineCount(kind autotask.Kind) int {
 		if kind == autotask.KindGhost && !r.GhostActive() {
 			continue // 在线但无活跃抓鬼会话 = 没真在跑（卡死/会话丢失/已停），不计入保持数
 		}
+		// 大唐神捕（shenbu）暂按"在线 + 意图"计（与新手链同款，见上：心跳 daily 块落地前
+		// 拿不到活跃会话）；口径保守（宁可少派，不会超发），后续收紧为"活跃会话 + 意图兜底"。
 		n++
 	}
 	return n
@@ -924,6 +973,11 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 	case autotask.KindHatch:
 		// 孵化：按号推导蛋种/蛋编号/目标图 → 分组下发 hatch_start（载荷组装与会话记账见 hatch.go）
 		return a.launchHatch(accs)
+
+	case autotask.KindShenbu:
+		// 大唐神捕（分享日常，2026-09-23 接入）：载荷 = 基座 newbie_full + shenbu_nav 声明
+		// （发送时组装，见 chainpayload.go:ShareDaily）；命令与 ghost_start 同构。
+		return a.launchShareDaily(accs)
 	}
 	return false, "未知策略: " + string(kind)
 }
@@ -976,7 +1030,7 @@ func (a *API) handleAutoTaskStart(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(body["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu"})
 		return
 	}
 	prev := a.AutoTask.States()[kind].Config
@@ -1005,6 +1059,9 @@ func (a *API) handleAutoTaskStart(w http.ResponseWriter, r *http.Request) {
 	if kind == autotask.KindHatch {
 		msg += fmt.Sprintf("；单次孵化限时 %d 分钟（到期中控下发 hatch_stop）", cfg.MaxMinutes)
 	}
+	if kind == autotask.KindShenbu {
+		msg += fmt.Sprintf("；分享日常日限 %d（随命令下发）", a.chainPayloads().ShareDailyLimit())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "state": a.AutoTask.States()[kind], "msg": msg,
 	})
@@ -1018,7 +1075,7 @@ func (a *API) handleAutoTaskStop(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(readBody(r)["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu"})
 		return
 	}
 	a.AutoTask.Stop(kind)
@@ -1029,6 +1086,13 @@ func (a *API) handleAutoTaskStop(w http.ResponseWriter, r *http.Request) {
 		// 孵化是有时长的动作：停策略顺手给在孵化的号收工（否则号会一直游荡没人管到期）
 		if n := a.hatchStopAll(kind.Label() + "定时任务已停止"); n > 0 {
 			msg += fmt.Sprintf("；已给 %d 个在孵化的号下发 hatch_stop 收工", n)
+		}
+	}
+	if kind == autotask.KindShenbu {
+		// 分享日常也是有时长的动作（跑到日限才停）：停策略顺手给在跑的号收工
+		//（否则号会一直跑到 10/10，用户观感"停不住"）。
+		if n := a.shareDailyStopAll(kind.Label() + "定时任务已停止"); n > 0 {
+			msg += fmt.Sprintf("；已给 %d 个在跑的号下发 share_daily_stop 收工", n)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": a.AutoTask.States()[kind], "msg": msg})
@@ -1042,7 +1106,7 @@ func (a *API) handleAutoTaskRun(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(readBody(r)["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu"})
 		return
 	}
 	a.AutoTask.RunNow(kind)

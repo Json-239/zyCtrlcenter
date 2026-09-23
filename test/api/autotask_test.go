@@ -24,8 +24,8 @@ func TestAutoTaskEndpoints(t *testing.T) {
 		t.Fatalf("应返回 ok:true: %v", body)
 	}
 	tasks, _ := body["tasks"].([]any)
-	if len(tasks) != 3 {
-		t.Fatalf("应有三套独立策略（新手链/抓鬼/孵化）: %v", body["tasks"])
+	if len(tasks) != 4 {
+		t.Fatalf("应有四套独立策略（新手链/抓鬼/孵化/大唐神捕）: %v", body["tasks"])
 	}
 	if _, ok := body["candidates"].(map[string]any); !ok {
 		t.Fatalf("应回带候选数（面板显示「可拉 N 个」）: %v", body)

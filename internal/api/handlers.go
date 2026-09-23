@@ -270,6 +270,15 @@ func (a *API) restoreCommand(g restorer.Group) (map[string]any, error) {
 			cmd["role"] = "solo"
 			cmd["daily_limit"] = a.chainPayloads().GhostDailyLimit()
 		}
+		if g.Command == "share_daily_start" {
+			// 分享日常（大唐神捕，2026-09-23）：补发与「启动」同口径 —— 带 share_key/daily_limit/done
+			//（done 取心跳 daily 块的已做次数，重新补发不丢进度）。
+			cmd["share_key"] = a.shareDailyKey()
+			cmd["daily_limit"] = a.chainPayloads().ShareDailyLimit()
+			if done := a.shareDailyDoneMap(g.Accounts); len(done) > 0 {
+				cmd["done"] = done
+			}
+		}
 	}
 	return cmd, nil
 }

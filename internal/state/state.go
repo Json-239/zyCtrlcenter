@@ -6,6 +6,7 @@ package state
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,13 +47,13 @@ type Robot struct {
 	// LevelPending / LevelPendingN 等级"大幅回退"待确认（连续 LevelPendingN 次上报同一新值才真切换，
 	// 见 event.applyLevel）：单次错值不覆盖已确认等级、不触发意图切换。
 	// json:"-"：纯内部防抖状态，不进 status 接口/面板。
-	LevelPending  int            `json:"-"`
-	LevelPendingN int            `json:"-"`
-	MapID         int            `json:"mapid"`
-	Fight         bool           `json:"fight"`
-	Pos           []int          `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
-	PosGrid       []int          `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
-	Fpp           int            `json:"fpp,omitempty"`
+	LevelPending  int   `json:"-"`
+	LevelPendingN int   `json:"-"`
+	MapID         int   `json:"mapid"`
+	Fight         bool  `json:"fight"`
+	Pos           []int `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
+	PosGrid       []int `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
+	Fpp           int   `json:"fpp,omitempty"`
 	// Money / Deposit / Reserve 货币详情（机器人经 90353 全量 / 90073 增量解析后心跳上报）：
 	// Money=银两(服务端 keys.MONEY=9560) / Deposit=钱庄存款(9561) / Reserve=储备金(9617)。
 	// MapView「选择机器人」列表显示用；0 值不序列化（前端显示"-"）。
@@ -63,15 +64,19 @@ type Robot struct {
 	// 未领=空）。双倍**有时长**（1/2/4 小时）且每周总量受限 —— 2026-09-23 用户口径
 	// "有领双的必须优先抓鬼"：调度侧据此把该号抓鬼候选置顶、超编回收/派游荡时避开。
 	DoubleClaimDate string         `json:"double_claim_date,omitempty"`
-	RoleID        int            `json:"role_id,omitempty"`
-	Ghost         map[string]any `json:"ghost,omitempty"`
+	RoleID          int            `json:"role_id,omitempty"`
+	Ghost           map[string]any `json:"ghost,omitempty"`
 	// FightStats 今日战斗统计（机器人上报：total/wild/ghost/dur_ms/in_fight；上大屏用）。
 	// 与 ghost 同口径：跨日由机器人端按日期归零（stat_begin 的 date 字段）。
-	FightStats map[string]any `json:"fight_stats,omitempty"`
-	GhostTarget   []int          `json:"ghost_target,omitempty"`
+	FightStats  map[string]any `json:"fight_stats,omitempty"`
+	GhostTarget []int          `json:"ghost_target,omitempty"`
 	// Hatch 孵化会话（机器人上报原样透传）：{active,kind,egg_item,mapid,battles,hatched,reason,since_ms}。
 	// 与 ghost 同口径：字段存在但 active=false 不算在孵化。
 	Hatch map[string]any `json:"hatch,omitempty"`
+	// Daily 分享日常进度（机器人上报原样透传，2026-09-23 契约）：
+	// 单条 {share_key,done,limit,state} 或数组（多日常）；老版机器人不带上报 → nil（未知）。
+	// 判据/总览用 DailyEntries()/DailyFull() 解析（形状容错，空值安全）。
+	Daily any `json:"daily,omitempty"`
 	// GhostRequiredLevel 服务端要求的抓鬼等级（来自 ghost_offline.required_level）。
 	// 低于它的号不再派抓鬼（等级当天不会变，所以不做当日失效）。
 	GhostRequiredLevel int `json:"ghost_required_level,omitempty"`
@@ -146,6 +151,83 @@ func (r Robot) HatchActive() bool {
 	}
 	en, ok := r.Hatch["active"].(bool)
 	return ok && en
+}
+
+// DailyEntry 一条"分享日常"进度（机器人心跳 daily 块解析结果，2026-09-23 契约）。
+type DailyEntry struct {
+	ShareKey string `json:"share_key"`
+	Done     int    `json:"done"`  // 今日已完成次数
+	Limit    int    `json:"limit"` // 日限（0=未知/不限）
+	State    string `json:"state"` // 机器人给的相位（如 RUNNING/DONE；仅展示与判满用）
+}
+
+// DailyEntries 解析心跳 daily 块（兼容单对象与数组；无数据/形状不对 → nil）。
+//
+// 契约（方案 §7）：机器人上报 {share_key, done, limit, state}，可选多日常数组。
+// 老版机器人不带 daily → nil（判据侧按"未知"保守处理，不判 shenbu）。
+func (r Robot) DailyEntries() []DailyEntry {
+	if r.Daily == nil {
+		return nil
+	}
+	parseOne := func(m map[string]any) (DailyEntry, bool) {
+		key, _ := m["share_key"].(string)
+		if key == "" {
+			return DailyEntry{}, false
+		}
+		e := DailyEntry{ShareKey: key, Done: numToInt(m["done"]), Limit: numToInt(m["limit"])}
+		e.State, _ = m["state"].(string)
+		return e, true
+	}
+	out := []DailyEntry{}
+	switch v := r.Daily.(type) {
+	case map[string]any:
+		if e, ok := parseOne(v); ok {
+			out = append(out, e)
+		}
+	case []any:
+		for _, it := range v {
+			if m, ok := it.(map[string]any); ok {
+				if e, ok := parseOne(m); ok {
+					out = append(out, e)
+				}
+			}
+		}
+	case []map[string]any:
+		for _, m := range v {
+			if e, ok := parseOne(m); ok {
+				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
+// DailyOf 取某玩法的进度条目（没有返回 false）。
+func (r Robot) DailyOf(shareKey string) (DailyEntry, bool) {
+	if shareKey == "" {
+		return DailyEntry{}, false
+	}
+	for _, e := range r.DailyEntries() {
+		if e.ShareKey == shareKey {
+			return e, true
+		}
+	}
+	return DailyEntry{}, false
+}
+
+// DailyFull 该玩法今日是否已满/不可用（state=DONE 或 limit>0 且 done ≥ limit）。
+//
+// **无数据 = false（未知）**：本函数只表达"明确满了"；"未知"与"未满"的区分由调用方
+// 用 DailyOf 的 ok 判断（intent.DailyInfo.Known）。
+func (r Robot) DailyFull(shareKey string) bool {
+	e, ok := r.DailyOf(shareKey)
+	if !ok {
+		return false
+	}
+	if strings.EqualFold(e.State, "DONE") {
+		return true
+	}
+	return e.Limit > 0 && e.Done >= e.Limit
 }
 
 // Walking 是否正在"游荡"（或正在孵化 —— 孵化内部就是游荡到孵化图打暗雷）。

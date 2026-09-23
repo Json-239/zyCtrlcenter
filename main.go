@@ -176,6 +176,7 @@ func main() {
 			return skipHook(kind, account)
 		},
 		GhostDailyLimit: func() int { return payloads.GhostDailyLimit() },
+		ShareDaily:      func() (string, int) { return payloads.ShareDailyKey(), payloads.ShareDailyLimit() },
 		Log:             log.Printf,
 	})
 	go restore.Run(ctx)

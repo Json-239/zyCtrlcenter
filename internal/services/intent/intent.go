@@ -5,6 +5,8 @@
 //
 //   - 判据对齐参考实现：等级 < NewbieMaxLevel(默认 31) 且新手链未完成 → 新手链优先；
 //     ≥31 或已完成 → 抓鬼；**等级未知时判"待定"**（等机器人上线报一次等级，不瞎跑）。
+//   - 2026-09-23 分享日常（大唐神捕）：等级 ≥ ShareDailyMinLevel(40) 且心跳明确上报"今日未满"
+//     且开关启用 → shenbu；否则回落旧判据（详见 DecideDaily）。
 //   - 一个账号同一时刻只有一条链（切换 = 先停旧链再上新，Apply 会把 prev 还给调用方）。
 //   - 选号/上线前用 Conflict() 再校验一次：同账号要跑别的链就是冲突（两侧双保险）。
 //
@@ -32,10 +34,29 @@ const (
 	KindGhost Kind = "ghost"
 	// KindIdle 空闲/游荡（不跑任务链）
 	KindIdle Kind = "idle"
+	// KindShenbu 大唐神捕（分享日常体系，2026-09-23 接入）：等级达标 + 该玩法今日未满 →
+	// 跑神捕；判据由 Decider.ShareDailyEnabled 显式打开（默认关，灰度期 P2 再开）。
+	KindShenbu Kind = "shenbu"
 )
 
 // DefaultNewbieMaxLevel 新手链等级阈值（与参考实现 start_chain_done_level / NEWBIE_MAX_LEVEL 一致）。
 const DefaultNewbieMaxLevel = 31
+
+// DefaultShareDailyMinLevel 分享日常等级门槛默认值（大唐神捕票条件：等级 ≥40，20283.xml:7-17）。
+const DefaultShareDailyMinLevel = 40
+
+// DefaultShareDailyKey 分享日常默认玩法键（随 share_daily_start 下发；与客户端口径一致）。
+const DefaultShareDailyKey = "share_daily_大唐神捕"
+
+// DailyInfo 一个账号"分享日常"的运行时信息（判据输入；**零值 = 未知 → 不判 shenbu**）。
+//
+// 为什么要有 Known：机器人新版心跳才带 daily 块（{share_key,done,limit,state}）。
+// 老版上报（没有 daily）时"是否满额"无从判断，此时必须保守回落旧判据（≥31 → 抓鬼），
+// 否则一旦网关/机器人版本不齐，生产上所有 ≥40 号会被判成神捕、抓鬼池瞬间空掉。
+type DailyInfo struct {
+	Known bool // 心跳里有该玩法的计数（机器人已上报）
+	Full  bool // 今日已满/不可用（state=DONE 或 done ≥ limit）
+}
 
 // ErrNotDecided 等级未知：调用方先别登记意图（也不要覆盖已有意图）。
 var ErrNotDecided = errors.New("等级未知：等机器人上线报一次等级再判（不瞎跑）")
@@ -53,6 +74,13 @@ type Decider struct {
 	NewbieMaxLevel  int
 	NewbieChainID   string
 	ZhuaoguiChainID string
+	// ShareDaily* 分享日常判据（2026-09-23 大唐神捕）：
+	//   - ShareDailyEnabled=false（默认）→ **不做** shenbu 判定，行为与旧版完全一致（≥31 全判抓鬼）；
+	//   - 打开后：等级 ≥ ShareDailyMinLevel（默认 40）且心跳明确上报"该玩法今日未满"→ 判 shenbu。
+	// 灰度顺序（P2）：先开本开关 + 神捕池，再逐批放号。
+	ShareDailyEnabled  bool
+	ShareDailyMinLevel int
+	ShareDailyKey      string
 }
 
 func (d Decider) normalized() Decider {
@@ -65,12 +93,39 @@ func (d Decider) normalized() Decider {
 	if d.ZhuaoguiChainID == "" {
 		d.ZhuaoguiChainID = "zhuaogui"
 	}
+	if d.ShareDailyMinLevel <= 0 {
+		d.ShareDailyMinLevel = DefaultShareDailyMinLevel
+	}
+	if d.ShareDailyKey == "" {
+		d.ShareDailyKey = DefaultShareDailyKey
+	}
 	return d
 }
 
 // Decide 判定该账号该跑哪条链（level<=0 = 未知 → 待定）。
+//
+// 不带分享日常信息（等价于"未知"）→ 保持旧判据；要判 shenbu 请用 DecideDaily。
 func (d Decider) Decide(level int, chainDone bool) Decision {
+	return d.DecideDaily(level, chainDone, DailyInfo{})
+}
+
+// DecideDaily 同上，附该号"分享日常"的运行时信息（心跳 daily 块解析结果）。
+//
+// 判据（2026-09-23 方案 §4.3，G2）：
+//
+//	等级 ≥ ShareDailyMinLevel(40) + 今日未满 + 开关启用 → 大唐神捕（shenbu）
+//	31~39（或神捕不可用/满额/未知）            → 抓鬼
+//	< 31 且未毕业                              → 新手链
+//	等级未知                                   → 待定（不登记、不覆盖已有意图）
+func (d Decider) DecideDaily(level int, chainDone bool, day DailyInfo) Decision {
 	d = d.normalized()
+	graduated := chainDone || (level > 0 && level >= d.NewbieMaxLevel)
+	if graduated && d.ShareDailyEnabled && day.Known && !day.Full && level >= d.ShareDailyMinLevel {
+		return Decision{
+			Known: true, Kind: KindShenbu,
+			Reason: fmt.Sprintf("等级 %d ≥ %d 且大唐神捕今日未满 → 大唐神捕", level, d.ShareDailyMinLevel),
+		}
+	}
 	switch {
 	case chainDone:
 		return Decision{Known: true, Kind: KindGhost, Reason: "新手链已完成 → 转抓鬼"}
@@ -88,6 +143,9 @@ func (d Decider) Decide(level int, chainDone bool) Decision {
 		return Decision{Known: false, Reason: "等级未知：等机器人上线报一次等级再判（不瞎跑）"}
 	}
 }
+
+// ShareDailyKeyOf 返回归一化后的分享日常玩法键（下发给机器人用）。
+func (d Decider) ShareDailyKeyOf() string { return d.normalized().ShareDailyKey }
 
 // Intent 一个账号当前意图。
 type Intent struct {

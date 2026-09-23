@@ -148,6 +148,16 @@ func InstallGhostNav(t *testing.T, chainDir string) {
 	InstallChainFixture(t, chainDir, "zhongkui_nav", "chains/zhongkui_nav.mini.json")
 }
 
+// InstallShareDailyNav 装齐"分享日常（大唐神捕）"载荷需要的**两份**链数据：
+// 基座（newbie_full：坐标/网格/路由）+ 专属声明（shenbu_nav：task_order 全 4 个任务号）。
+//
+// 口径同抓鬼：专属文件只放玩法声明，发送时由中控组装（见 chainpayload.go:ShareDaily）。
+func InstallShareDailyNav(t *testing.T, chainDir string) {
+	t.Helper()
+	InstallChainFixture(t, chainDir, "newbie_full", "chains/newbie_full.mini.json")
+	InstallChainFixture(t, chainDir, "shenbu_nav", "chains/shenbu_nav.mini.json")
+}
+
 // WriteChainFile 往链目录写一份自定义链数据（用例要构造"地址不全"等异常形状时用），返回路径。
 func WriteChainFile(t *testing.T, chainDir, id string, body any) string {
 	t.Helper()

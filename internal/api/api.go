@@ -34,10 +34,11 @@
 //	POST /api/reset           重置重跑
 //	POST /api/robots/manage   动态添加/移除机器人（可选鉴权）
 //	POST /api/robot/restart   重启机器人进程（可选鉴权）
-//	GET  /api/autotask        定时自动任务状态（新手链/抓鬼/孵化三套策略 + 候选数 + 待恢复名单）
+//	GET  /api/autotask        定时自动任务状态（新手链/抓鬼/孵化/大唐神捕策略 + 候选数 + 待恢复名单）
 //	POST /api/autotask/start  启动/改参数某套定时任务（可选鉴权）
 //	POST /api/autotask/stop   停止某套定时任务（可选鉴权）
 //	POST /api/autotask/run    立即跑一轮（可选鉴权）
+//	GET  /api/daily/overview  分享日常轮转总览（号 × 日常 × 进度；轮转顺序 P2 再填）
 //	POST /api/random_walk     下发游荡（目标图/随机图 + 白名单 + 档位 + 限时；可选鉴权）
 //	POST /api/random_walk/stop    停止游荡（可选鉴权）
 //	GET  /api/roampool        游荡池 keeper 状态（在游荡/空闲/任务池缺口/最近动作）
@@ -73,24 +74,24 @@ import (
 	"zyctrlcenter/internal/services/waterline"
 	"zyctrlcenter/internal/services/zones"
 	"zyctrlcenter/internal/state"
-	"zyctrlcenter/internal/taskname"
 	"zyctrlcenter/internal/store"
+	"zyctrlcenter/internal/taskname"
 )
 
 // Deps API 的依赖集合（装配在 main.go，避免 New 参数越加越长）。
 type Deps struct {
-	Cfg      *config.Config
-	St       *state.State
-	Store    *store.Store
-	Ctrl     *ctrl.Server
-	Log      *logging.Logger
-	Proc     *process.Manager
-	Zones    *zones.Registry
-	Maps     *maplib.Table      // 地图名表（mapid → 名称）
-	Grids    *maplib.GridReader // 地图网格（阻挡位图，地图可视化用）
-	TaskNames *taskname.Table   // 任务号 → 任务名（只读游戏配置 <GameConfigDir>/task/*.xml）
-	Accounts *accounts.Pool     // 账号池
-	Verify   *accountverify.Manager
+	Cfg       *config.Config
+	St        *state.State
+	Store     *store.Store
+	Ctrl      *ctrl.Server
+	Log       *logging.Logger
+	Proc      *process.Manager
+	Zones     *zones.Registry
+	Maps      *maplib.Table      // 地图名表（mapid → 名称）
+	Grids     *maplib.GridReader // 地图网格（阻挡位图，地图可视化用）
+	TaskNames *taskname.Table    // 任务号 → 任务名（只读游戏配置 <GameConfigDir>/task/*.xml）
+	Accounts  *accounts.Pool     // 账号池
+	Verify    *accountverify.Manager
 	// Restorer 恢复引擎（P1，可为 nil：面板只显示意图，不给"立即补发"）
 	Restorer *restorer.Runner // 批量可用性验证任务（后台跑 + 进度查询 + 停止）
 	// AutoTask 定时自动任务引擎（可为 nil：面板只显示不可用；main 用 AutoTaskDeps 装配）
@@ -128,13 +129,19 @@ type API struct {
 	// onlineInflight 批量上线（robot_manage add）"已下发未确认"在途表（2026-09-23 P2）：
 	// 池容量闸用它防"上一批还在登录路上，下一批又按旧在线数放行"（连批叠加超发）。
 	onlineInflight dispatchInflightTable
+	// dailyInflight 分享日常（shenbu / share_daily_start）"已派发未确认"在途表（2026-09-23）：
+	// 与抓鬼同口径 —— 防"定时补号 + 恢复引擎补发 + 手动启动"在几十秒空窗里重复派同一号。
+	dailyInflight dispatchInflightTable
+	// daily 分享日常会话记账（账号 → 玩法键；停策略时按它下发 share_daily_stop 收工）。
+	daily *dailySessions
 	// throttle 注册自适应限速器（进程内一份；见 handlers_create.go）。
 	throttle *CreateThrottle
 }
 
 // New 创建 API。
 func New(d Deps) *API {
-	return &API{Deps: d, hatch: newHatchSessions(), throttle: NewCreateThrottle(createRateConfigOf(d.Cfg))}
+	return &API{Deps: d, hatch: newHatchSessions(), daily: newDailySessions(),
+		throttle: NewCreateThrottle(createRateConfigOf(d.Cfg))}
 }
 
 // chainPayloads 取载荷提供者（未显式注入时按 Cfg 懒建，测试/嵌入式用法不必装配）。
@@ -170,11 +177,14 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/logs/clear", a.requireToken(a.handleLogsClear))
 	mux.HandleFunc("GET /api/intents", a.handleIntents)
 	mux.HandleFunc("POST /api/intents/restore", a.requireToken(a.handleIntentsRestore))
-	// 定时自动任务（新手链 / 抓鬼 / 孵化 三套独立策略）+ 卡死自动重登恢复
+	// 定时自动任务（新手链 / 抓鬼 / 孵化 / 大唐神捕 各套独立策略）+ 卡死自动重登恢复
 	mux.HandleFunc("GET /api/autotask", a.handleAutoTaskGet)
 	mux.HandleFunc("POST /api/autotask/start", a.requireToken(a.handleAutoTaskStart))
 	mux.HandleFunc("POST /api/autotask/stop", a.requireToken(a.handleAutoTaskStop))
 	mux.HandleFunc("POST /api/autotask/run", a.requireToken(a.handleAutoTaskRun))
+	// 分享日常（大唐神捕）轮转总览：号 × 日常 × 进度（数据源=心跳 daily 块 + 意图/池；
+	// 轮转顺序 P2 再填，先给结构 + 空值安全）
+	mux.HandleFunc("GET /api/daily/overview", a.handleDailyOverview)
 	// 游荡（通用入口：孵化去半月岛 / 其它巡游图）——命令带链载荷，机器人端 random_walk.py 执行
 	// mapid=数字(指定图) 或 "random"(随机图)；maps=白名单；mode=档位；minutes=限时
 	mux.HandleFunc("POST /api/random_walk", a.requireToken(a.handleRandomWalk))

@@ -2,7 +2,8 @@
 //
 // 口径对齐参考实现 robot/ctrlcenter/routers/auto_onboard.py：
 //   - 每 N 分钟（我们默认 0~5 分钟随机）从账号池挑号 → 上线 → 启动任务；
-//   - **三套策略互相独立**：newbie（新手链）/ ghost（抓鬼）/ hatch（孵化），各自启停、各自参数；
+//   - **各套策略互相独立**：newbie（新手链）/ ghost（抓鬼）/ hatch（孵化）/ shenbu（大唐神捕），
+//     各自启停、各自参数；
 //   - 没号可挑且开了"自动注册"→ 注册新号（下一轮自然被挑到）；
 //   - 有"同时在线上限"（max_online）：达到上限就等空槽，不硬拉。
 //
@@ -22,20 +23,25 @@ import (
 	"time"
 )
 
-// Kind 策略种类（三套策略完全独立）。
+// Kind 策略种类（各套策略完全独立）。
 type Kind string
 
 const (
 	KindNewbie Kind = "newbie" // 新手链
 	KindGhost  Kind = "ghost"  // 抓鬼
 	KindHatch  Kind = "hatch"  // 孵化（坐骑蛋/元气蛋：抓鬼已满的有蛋号去孵化图游荡打暗雷）
+	// KindShenbu 大唐神捕（分享日常体系：2026-09-23 方案 §4.3；命令 share_daily_start，
+	// 与抓鬼同构 —— 载荷在发送时由中控组装：基座 newbie_full + shenbu_nav 声明）。
+	KindShenbu Kind = "shenbu"
 )
 
 // Kinds 固定顺序（面板与日志都用它，保证输出稳定）。
-var Kinds = []Kind{KindNewbie, KindGhost, KindHatch}
+var Kinds = []Kind{KindNewbie, KindGhost, KindHatch, KindShenbu}
 
 // Valid 是否是受支持的策略。
-func (k Kind) Valid() bool { return k == KindNewbie || k == KindGhost || k == KindHatch }
+func (k Kind) Valid() bool {
+	return k == KindNewbie || k == KindGhost || k == KindHatch || k == KindShenbu
+}
 
 // Label 中文名（日志/面板用）。
 func (k Kind) Label() string {
@@ -46,6 +52,8 @@ func (k Kind) Label() string {
 		return "抓鬼"
 	case KindHatch:
 		return "孵化"
+	case KindShenbu:
+		return "大唐神捕"
 	}
 	return string(k)
 }
@@ -71,15 +79,15 @@ type Candidate struct {
 // Config 一个策略的配置（面板 start 时传入；运行中可再次 Start 覆盖）。
 type Config struct {
 	Kind            Kind `json:"kind"`
-	IntervalSec     int  `json:"interval_sec"`      // 基础间隔（秒）
-	JitterSec       int  `json:"jitter_sec"`        // 随机增量 0~JitterSec（"5 分钟之内随机"= 0 + 300）
-	BatchMin        int  `json:"batch_min"`         // 每轮最少挑几个
-	BatchMax        int  `json:"batch_max"`         // 每轮最多挑几个
-	TargetOnline    int  `json:"target_online"`     // **保持在线数**（0=不限；每轮只补差额）
-	MaxOnline       int  `json:"max_online"`        // 硬上限（0=不限）：到顶就等空槽，不硬拉
-	RegisterEnabled bool `json:"register_enabled"`  // 没号可挑时自动注册
-	RegisterCount   int  `json:"register_count"`    // 每次注册几个
-	LaunchDelaySec  int  `json:"launch_delay_sec"`  // 上线后等几秒再下发（0=默认 8s）
+	IntervalSec     int  `json:"interval_sec"`     // 基础间隔（秒）
+	JitterSec       int  `json:"jitter_sec"`       // 随机增量 0~JitterSec（"5 分钟之内随机"= 0 + 300）
+	BatchMin        int  `json:"batch_min"`        // 每轮最少挑几个
+	BatchMax        int  `json:"batch_max"`        // 每轮最多挑几个
+	TargetOnline    int  `json:"target_online"`    // **保持在线数**（0=不限；每轮只补差额）
+	MaxOnline       int  `json:"max_online"`       // 硬上限（0=不限）：到顶就等空槽，不硬拉
+	RegisterEnabled bool `json:"register_enabled"` // 没号可挑时自动注册
+	RegisterCount   int  `json:"register_count"`   // 每次注册几个
+	LaunchDelaySec  int  `json:"launch_delay_sec"` // 上线后等几秒再下发（0=默认 8s）
 	// MaxMinutes 单次动作的时长上限（**目前只有孵化用**）：到期由壳层下发 hatch_stop 收工。
 	// 0 = 用默认（DefaultHatchMinutes）。
 	MaxMinutes int `json:"max_minutes,omitempty"`
@@ -146,12 +154,12 @@ type State struct {
 // Deps 依赖注入（壳层提供真实实现；测试注入假的）。
 type Deps struct {
 	Now         func() time.Time
-	Rand        func(n int) int                                 // 返回 [0,n)；n<=0 → 0
-	Candidates  func(kind Kind) []Candidate                     // "该做但没在做"的号
-	OnlineCount func(kind Kind) int                             // 该策略当前在线数（MaxOnline 用）
-	Online      func(kind Kind, accs []string) (int, error)     // 上线（机器人 add）；返回成功数
-	Register    func(kind Kind, count int) ([]string, error)    // 自动注册；返回**计划/已建**的号（应尽快返回）
-	Launch      func(kind Kind, accs []string) bool             // 下发任务命令
+	Rand        func(n int) int                              // 返回 [0,n)；n<=0 → 0
+	Candidates  func(kind Kind) []Candidate                  // "该做但没在做"的号
+	OnlineCount func(kind Kind) int                          // 该策略当前在线数（MaxOnline 用）
+	Online      func(kind Kind, accs []string) (int, error)  // 上线（机器人 add）；返回成功数
+	Register    func(kind Kind, count int) ([]string, error) // 自动注册；返回**计划/已建**的号（应尽快返回）
+	Launch      func(kind Kind, accs []string) bool          // 下发任务命令
 	// Tick 每轮回调（Run 每 5 秒一次；**与策略是否启用无关**）：壳层用它做"有时长的会话"的
 	// 到期收工/完成清理（当前是孵化：max_minutes 到期下发 hatch_stop）。可为 nil。
 	Tick func(now time.Time)
@@ -183,7 +191,7 @@ type Runner struct {
 	st map[Kind]*state
 }
 
-// New 创建执行器（三套策略默认都是"未启动"）。
+// New 创建执行器（各套策略默认都是"未启动"）。
 func New(d Deps) *Runner {
 	if d.Now == nil {
 		d.Now = time.Now
@@ -204,7 +212,7 @@ func New(d Deps) *Runner {
 // Start 启动（或改参数后重启）某个策略；会**立即跑一轮**（参考实现 next_at=now 同口径）。
 func (r *Runner) Start(kind Kind, cfg Config) error {
 	if !kind.Valid() {
-		return fmt.Errorf("未知策略: %s（只支持 newbie / ghost / hatch）", kind)
+		return fmt.Errorf("未知策略: %s（只支持 newbie / ghost / hatch / shenbu）", kind)
 	}
 	cfg.Kind = kind
 	cfg = cfg.WithDefaults()
@@ -260,6 +268,7 @@ func (r *Runner) NoteRegister(kind Kind, created int) {
 		r.record(kind, Round{At: now, Msg: "自动注册一个都没成功（可能被同 IP 风控），30 分钟后再试"})
 	}
 }
+
 // States 运行态快照（面板用；新→旧排列轮次）。
 func (r *Runner) States() map[Kind]State {
 	r.mu.Lock()

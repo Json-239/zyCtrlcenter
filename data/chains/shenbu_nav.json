@@ -1,0 +1,35 @@
+{
+  "chain_id": "shenbu_nav",
+  "name": "大唐神捕（分享日常）",
+  "start_task": 2028301,
+  "end_task": 2028399,
+  "grid_cell": 16,
+  "task_order": [
+    {
+      "task_index": 2028301,
+      "name": "大唐神捕",
+      "catcher_npc": "13297",
+      "catcher_name": "张忍慎",
+      "next": [2028399]
+    },
+    {
+      "task_index": 2028302,
+      "name": "大唐神捕（走路遇怪）",
+      "next": [2028311]
+    },
+    {
+      "task_index": 2028311,
+      "name": "大唐神捕（匪首老大）",
+      "catcher_npc": "13597",
+      "catcher_name": "匪首老大",
+      "next": [2028399]
+    },
+    {
+      "task_index": 2028399,
+      "name": "回复张忍慎",
+      "catcher_npc": "13297",
+      "catcher_name": "张忍慎",
+      "next": []
+    }
+  ]
+}

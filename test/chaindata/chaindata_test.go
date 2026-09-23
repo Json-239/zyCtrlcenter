@@ -198,6 +198,9 @@ func npcPositions(c *chainlib.Chain, npc string) [][3]int {
 func TestAllNpcPositionsAudit(t *testing.T) {
 	dir, gr := chainsDir(t), gridReader(t)
 	for id, c := range loadChains(t, dir) {
+		if len(c.NPCs) == 0 {
+			continue // 声明型链（坐标在基座链里、发送时组装；如 shenbu_nav）→ 本文件无 NPC 可校
+		}
 		grids := gridKeys(c)
 		var blockedInUsed, blockedElsewhere int
 		samples := []string{}
@@ -303,6 +306,10 @@ func TestDynamicNpcBaselineUnchanged(t *testing.T) {
 	for id, c := range loadChains(t, dir) {
 		if len(c.TaskOrder) == 0 {
 			continue // 导航数据（无任务节点）不适用
+		}
+		if len(c.NPCs) == 0 {
+			continue // 声明型链（坐标由基座链提供、发送时组装；如 shenbu_nav）：
+			// 本文件 npcs 为空，"任务 NPC 无坐标"不代表它是动态 NPC（坐标在基座里）
 		}
 		got := []string{}
 		for npc := range taskNpcs(c) {

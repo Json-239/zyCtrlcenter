@@ -126,6 +126,9 @@ type Deps struct {
 	// GhostDailyLimit 抓鬼每日上限（nil → 50）：随 ghost_start 一起补发，与「启动」路径同口径
 	// （参考实现 intent_restore 也是 role + limit + chain）。
 	GhostDailyLimit func() int
+	// ShareDaily 分享日常（shenbu）补发参数（nil = 不补发该 kind）：返回 (share_key, daily_limit)。
+	// 与 GhostDailyLimit 同款 —— 补发 share_daily_start 必须带玩法键与日限，否则机器人端无从归属。
+	ShareDaily func() (shareKey string, dailyLimit int)
 
 	RetrySec    int
 	MaxAttempts int
@@ -215,6 +218,10 @@ func commandFor(it intent.Intent) (cmd string, chainID string) {
 			id = "newbie_full"
 		}
 		return "start_chain", id
+	case intent.KindShenbu:
+		// 分享日常（大唐神捕）：命令与 ghost_start 同构；share_key/daily_limit/done 在
+		// groupCommand 里补齐（Deps.ShareDaily），链载荷走 Payload(kind, chainID)。
+		return "share_daily_start", ""
 	}
 	return "", ""
 }
@@ -380,9 +387,41 @@ func (r *Runner) groupCommand(g Group) (map[string]any, error) {
 				}
 				cmd["daily_limit"] = limit
 			}
+			if g.Command == "share_daily_start" && r.d.ShareDaily != nil {
+				// 分享日常（大唐神捕）：补发与「启动」同口径 —— 带 share_key/daily_limit/done
+				//（done 取心跳 daily 块的已做次数，重新补发不丢进度）。
+				if key, limit := r.d.ShareDaily(); key != "" {
+					cmd["share_key"] = key
+					if limit > 0 {
+						cmd["daily_limit"] = limit
+					}
+					if done := shareDailyDoneOf(r.d.Robot, g.Accounts, key); len(done) > 0 {
+						cmd["done"] = done
+					}
+				}
+			}
 		}
 	}
 	return cmd, nil
+}
+
+// shareDailyDoneOf 每号"今日已做次数"（心跳 daily 块；有值才带）——
+// 补发 share_daily_start 时带上它，重新下发不丢进度（与 ghost_start 的 done 同口径）。
+func shareDailyDoneOf(robot func(account string) (state.Robot, bool), accs []string, shareKey string) map[string]int {
+	out := map[string]int{}
+	if robot == nil || shareKey == "" {
+		return out
+	}
+	for _, acc := range accs {
+		r, ok := robot(acc)
+		if !ok {
+			continue
+		}
+		if e, ok := r.DailyOf(shareKey); ok && e.Done > 0 {
+			out[acc] = e.Done
+		}
+	}
+	return out
 }
 
 // Status 恢复状态快照（按账号排序；面板用）。

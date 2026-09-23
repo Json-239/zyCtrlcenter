@@ -6,7 +6,7 @@
 - `GET /` 只返回一行 JSON 提示；未知路径返回 **404 JSON**（不是 HTML）
 - 实现：`internal/api/`
 
-## 1. 路由总表（35 API + 1 WS + 入口）
+## 1. 路由总表（36 API + 1 WS + 入口）
 
 | 方法 | 路径 | 请求体 | 返回概要 |
 |---|---|---|---|
@@ -33,8 +33,8 @@
 | POST | `/api/accounts/create` | 指定账号 `{accounts}`；或**按编号** `{prefix, start?, count, suffix?, pad?, auto_start?}`；另有 `{zone?, password?, password_len?, batch_size?, concurrency?, interval_ms?, batch_interval_ms?, agent_key?, timeout_sec?, persist?}` | `{ok, mode:"create", results[{account,status,ok,ret_code,exists,usable,password?,err_id,retryable,role_name,level,msg}], created, existing, password_mismatch, failed, first, last, names_count, batch_size, concurrency, pool_updated, msg}` **建号/校验**：先验证再注册（status=`created/existing/password_mismatch/failed`）（**可选鉴权**） |
 | POST | `/api/accounts/verify` | 带 `accounts`=同步（≤200）；不带=**批量任务**（`zone?, scope?=zone\|unverified\|unusable\|unknown\|all, limit?=0 表示不限, skip_online?`；面板默认 `scope=zone` 本区全部） | `{ok, zone, game_addr, coding, version, summary{total,exists,usable,unusable,not_exists,error}, results…, pool_updated, mode}` 账号验证（**可选鉴权**） |
 | POST | `/api/robots/batch` | `{action:"online"\|"offline", accounts?, zone?, limit?, chunk?, interval_ms?, only_usable?}` | `{ok, requested, sent, chunks, accounts[], skipped_online[], skipped_no_password[], msg}` 批量上下线（面板点选/勾选来的账号会**自动去空白/空串/保序去重**，已在线的跳过）（**可选鉴权**） |
-| POST | `/api/intents/restore` | `{account?}` | `{ok, sent, commands, skipped, actions[{account,command,chain_id,reason,sent,msg?}], msg}` **立即按意图补发一次**（`start_chain`/`ghost_start`）：冷却/重试上限/熔断仍生效，跳过在跑/跑完/离线的号；**同命令 + 同链的号合并成一条下发**（抓鬼载荷 2MB 级，逐号一条 = N×2MB），所以 `sent`=覆盖账号数、`commands`=实际命令数；抓鬼补发同样带 `chain` + `role=solo` + `daily_limit`；载荷取不到（基座/专属文件缺失、地址不全）→ 该批不下发并在 `actions[].msg` 说明（**可选鉴权**） |
-| GET | `/api/intents` | — | `{ok, count, counts{newbie|zhuaogui|ghost|idle}, intents[{account,kind,chain_id,zone,source,reason,since}], newbie_max_level, newbie_chain_id, zhuaogui_chain_id}` **账号意图表（只读）**：等级<31 → 新手链优先，≥31 或已完成 → 抓鬼，等级未知不登记；一个账号同一时刻只有一条链（P0；P1 按它补发命令） |
+| POST | `/api/intents/restore` | `{account?}` | `{ok, sent, commands, skipped, actions[{account,command,chain_id,reason,sent,msg?}], msg}` **立即按意图补发一次**（`start_chain`/`ghost_start`/`share_daily_start`）：冷却/重试上限/熔断仍生效，跳过在跑/跑完/离线的号；**同命令 + 同链的号合并成一条下发**（抓鬼载荷 2MB 级，逐号一条 = N×2MB），所以 `sent`=覆盖账号数、`commands`=实际命令数；抓鬼补发同样带 `chain` + `role=solo` + `daily_limit`；分享日常补发带 `share_key` + `daily_limit` + `done?`；载荷取不到（基座/专属文件缺失、地址不全）→ 该批不下发并在 `actions[].msg` 说明（**可选鉴权**） |
+| GET | `/api/intents` | — | `{ok, count, counts{newbie|zhuaogui|ghost|shenbu|idle}, intents[{account,kind,chain_id,zone,source,reason,since}], newbie_max_level, newbie_chain_id, zhuaogui_chain_id}` **账号意图表（只读）**：等级<31 → 新手链优先，≥31 或已完成 → 抓鬼，等级未知不登记；分享日常开关开启时 ≥40 且心跳报"今日未满" → 大唐神捕（`kind=shenbu`）；一个账号同一时刻只有一条链（P0；P1 按它补发命令） |
 | GET | `/api/logs` | `?n=200` | `{logs:[…]}` 当天运行历史尾部（`n` 上限 5000） |
 | POST | `/api/logs/clear` | — | `{ok, removed_runs, removed_bot, msg}`（**可选鉴权**） |
 | GET | `/api/protocols` | — | `{ok, updated, current{version,coding,ctrl_addr,web_port,robot_exe,connected}, sections[3]}` 协议映射（只读） |
@@ -45,10 +45,11 @@
 | POST | `/api/robot/restart` | — | `{ok, msg}` 重启机器人进程（单进程）（**可选鉴权**） |
 | POST | `/api/robot/reload_scripts` | `{modules?["quest_engine",…]}` | `{ok, modules, msg}` **脚本热更**：机器人进程内 `importlib.reload` 指定模块，免重启铺脚本补丁（省略 `modules` = 机器人端默认 `quest_engine`）；建议任务间隙触发（会重置模块级缓存）（**可选鉴权**） |
 | WS | `/ws` | — | 实时事件推送（见 §4） |
-| GET | `/api/autotask` | — | `{ok, tasks[newbie,ghost], candidates{newbie,ghost}, reghost[]}` **定时自动任务（只读）**：两套独立策略的状态（配置/启用/下一轮/最近 12 轮）+ 候选数（"该做但没在做"的号）+ 卡死待恢复名单；口径见 [定时自动任务](../02-架构/定时自动任务.md) |
+| GET | `/api/autotask` | — | `{ok, tasks[newbie,ghost,hatch,shenbu], candidates{…}, pools{…}, hatch_sessions[], reghost[]}` **定时自动任务（只读）**：各套独立策略的状态（配置/启用/下一轮/最近 12 轮）+ 候选数（"该做但没在做"的号）+ 池视图（可用/在跑/目标/缺口）+ 卡死待恢复名单；口径见 [定时自动任务](../02-架构/定时自动任务.md) |
 | POST | `/api/autotask/start` | `{kind, interval_sec?, jitter_sec?, batch_min?, batch_max?, max_online?, register_enabled?, register_count?, launch_delay_sec?}` | `{ok, state, msg}` 启动/改参数某套策略（不传的字段沿用上次；**可选鉴权**） |
-| POST | `/api/autotask/stop` | `{kind}` | `{ok, state, msg}` 停止（同时撤销"等下发"队列）（**可选鉴权**） |
+| POST | `/api/autotask/stop` | `{kind}` | `{ok, state, msg}` 停止（同时撤销"等下发"队列；`kind=shenbu` 时给在跑的号补发 `share_daily_stop` 收工）（**可选鉴权**） |
 | POST | `/api/autotask/run` | `{kind}` | `{ok, rounds[], state, msg}` 立即跑一轮（仍受同时在线上限）（**可选鉴权**） |
+| GET | `/api/daily/overview` | — | `{ok, share_keys[], rows[{account,level,queue[{share_key,done,limit,state}],current,order[]}]}` **分享日常轮转总览（只读）**：数据源 = 机器人心跳 `daily` 块 + 意图表 + 中控会话记账；老版机器人没有 `daily` 块 → `queue=[]`、`current=""`（空值安全）；轮转顺序（`order`）P2 再填 |
 | POST | `/api/reghost/cancel` | `{account}` | `{ok, canceled, msg}` 取消该号的"卡死自动重登恢复"（**可选鉴权**） |
 | WS | `/ws` | — | 实时事件推送（见 §4） |
 

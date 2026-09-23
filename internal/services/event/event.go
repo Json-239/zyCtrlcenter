@@ -60,6 +60,10 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 	if cfg != nil {
 		dec.NewbieMaxLevel = cfg.NewbieMaxLevel
 		dec.NewbieChainID = cfg.DefaultChainID
+		// 分享日常判据（2026-09-23）：默认关（CTRL_SHARE_DAILY=1 才判 shenbu）
+		dec.ShareDailyEnabled = cfg.ShareDailyEnabled
+		dec.ShareDailyMinLevel = cfg.ShareDailyMinLevel
+		dec.ShareDailyKey = cfg.ShareDailyKey
 	}
 	return &Handler{
 		Cfg:      cfg,
@@ -356,11 +360,14 @@ func (h *Handler) onRobotOnline(ev map[string]any) {
 }
 
 // decideIntent 按判据登记/切换意图（等级未知时不登记、也不覆盖已有意图）。
+//
+// 2026-09-23 分享日常：附该号心跳 daily 块（判据 ≥40 且今日未满 → 大唐神捕）；
+// 老版机器人没有 daily → "未知" → 回落旧判据（≥31 全判抓鬼），行为不变。
 func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, source string) {
 	if h.Intents == nil {
 		return
 	}
-	dec := h.Intents.Decider().Decide(level, chainDone)
+	dec := h.Intents.Decider().DecideDaily(level, chainDone, h.dailyInfoOf(account))
 	prev, changed, err := h.Intents.Apply(account, dec, zone, source)
 	if err != nil || !changed {
 		return
@@ -372,6 +379,22 @@ func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, 
 	h.Store.LogEvent(map[string]any{"type": "intent", "account": account, "zone": zone,
 		"kind": string(dec.Kind), "prev": string(prev.Kind), "chain_id": dec.ChainID, "msg": msg})
 	h.Log.Printf("[INTENT] %s %s", account, msg)
+}
+
+// dailyInfoOf 该号分享日常的判据输入（心跳 daily 块；没有 = 未知 → 不判 shenbu）。
+func (h *Handler) dailyInfoOf(account string) intent.DailyInfo {
+	if h.St == nil || h.Intents == nil {
+		return intent.DailyInfo{}
+	}
+	r, ok := h.St.Get(account)
+	if !ok {
+		return intent.DailyInfo{}
+	}
+	key := h.Intents.Decider().ShareDailyKeyOf()
+	if _, has := r.DailyOf(key); !has {
+		return intent.DailyInfo{Known: false} // 老版上报/还没跑到：未知
+	}
+	return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 }
 
 func (h *Handler) onRobotOffline(ev map[string]any) {
@@ -487,6 +510,12 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 					}
 					r.Hatch = m
 				}
+			}
+			// 分享日常进度（2026-09-23 契约，原样透传）：{share_key,done,limit,state} 或数组；
+			// 判据（intent.DecideDaily）与 /api/daily/overview 用 DailyOf/DailyFull 解析，
+			// 形状容错；老版机器人不带 → 保持 nil（判据侧按"未知"保守处理）。
+			if v, ok := st["daily"]; ok {
+				r.Daily = v
 			}
 			if v, ok := st["hp"]; ok {
 				r.HP = toIntSlice(v) // [当前, 上限]

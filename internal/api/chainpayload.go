@@ -45,6 +45,7 @@ type Payloads struct {
 	mu    sync.Mutex
 	cache map[string]cachedChain
 	ghost map[string]cachedGhost // 组装结果（键 = 基座版本 + 专属版本）
+	daily map[string]cachedGhost // 分享日常组装结果（同口径）
 }
 
 type cachedChain struct {
@@ -58,7 +59,7 @@ type cachedGhost struct {
 
 // NewPayloads 创建载荷提供者。
 func NewPayloads(cfg *config.Config) *Payloads {
-	return &Payloads{cfg: cfg, cache: map[string]cachedChain{}, ghost: map[string]cachedGhost{}}
+	return &Payloads{cfg: cfg, cache: map[string]cachedChain{}, ghost: map[string]cachedGhost{}, daily: map[string]cachedGhost{}}
 }
 
 // GhostNavChainID 抓鬼专属字段所在文件（配置项 CTRL_GHOST_NAV_CHAIN，默认 zhongkui_nav）。
@@ -89,6 +90,69 @@ func (p *Payloads) GhostDailyLimit() int {
 		return 50
 	}
 	return p.cfg.GhostDailyLimit
+}
+
+// ShareDailyChainID 分享日常专属声明文件（配置项 CTRL_SHARE_DAILY_CHAIN，默认 shenbu_nav）。
+func (p *Payloads) ShareDailyChainID() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.ShareDailyChainID) == "" {
+		return "shenbu_nav"
+	}
+	return strings.TrimSpace(p.cfg.ShareDailyChainID)
+}
+
+// ShareDailyKey 分享日常玩法键（配置项 CTRL_SHARE_DAILY_KEY，默认 share_daily_大唐神捕）。
+func (p *Payloads) ShareDailyKey() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.ShareDailyKey) == "" {
+		return "share_daily_大唐神捕"
+	}
+	return strings.TrimSpace(p.cfg.ShareDailyKey)
+}
+
+// ShareDailyLimit 分享日常日限（配置项 CTRL_SHARE_DAILY_LIMIT，默认 10）。
+func (p *Payloads) ShareDailyLimit() int {
+	if p == nil || p.cfg == nil || p.cfg.ShareDailyDailyLimit <= 0 {
+		return 10
+	}
+	return p.cfg.ShareDailyDailyLimit
+}
+
+// ShareDaily 分享日常（大唐神捕）的链载荷：基座链（坐标/网格/路由）+ 专属声明（task_order 等）。
+//
+// 与抓鬼导航同口径（方案 §4.2/§7）：机器人端只认 cmd["chain"]；专属文件只放**玩法声明**
+// （task_order 必须列全分支任务号 —— 少列会让后续环节被机器人当"链外任务"静默忽略，R1），
+// npcs/map_grids/dijkstra 从 GhostBaseChainID（默认 newbie_full）自动复用。
+//
+// 硬校验（宁可明确报错，也不发一份"跑不动/少环节"的载荷）：task_order 非空且每条能解析出
+// task_index、基座 npcs/dijkstra 非空。文件缺失/解析失败同样硬失败（调用方一条命令都不发）。
+func (p *Payloads) ShareDaily() (*chainlib.Chain, error) {
+	baseID, navID := p.GhostBaseChainID(), p.ShareDailyChainID()
+	base, baseVer, err := p.byIDVersioned(baseID)
+	if err != nil {
+		return nil, fmt.Errorf("分享日常的基座链不可用（%s）：%w", baseID, err)
+	}
+	nav, navVer, err := p.byIDVersioned(navID)
+	if err != nil {
+		return nil, fmt.Errorf("分享日常声明文件不可用（%s，配置项 CTRL_SHARE_DAILY_CHAIN）：%w", navID, err)
+	}
+	key := baseVer + "|" + navVer
+	p.mu.Lock()
+	if c, ok := p.daily[key]; ok {
+		p.mu.Unlock()
+		return c.chain, nil
+	}
+	p.mu.Unlock()
+
+	out := assembleShareDaily(base, nav)
+	if err := validateShareDaily(out, baseID, navID); err != nil {
+		return nil, err
+	}
+	if out.ChainID == "" {
+		out.ChainID = navID
+	}
+	p.mu.Lock()
+	p.daily = map[string]cachedGhost{key: {chain: out}} // 只留最新一份（组装结果随两文件版本变化）
+	p.mu.Unlock()
+	return out, nil
 }
 
 // Ghost 抓鬼导航数据：基座链（坐标/网格/路由）+ 抓鬼专属（刷鬼图/落点/地图名）。
@@ -127,11 +191,15 @@ func (p *Payloads) Ghost() (*chainlib.Chain, error) {
 // For 按意图 kind 取"要随命令下发的载荷"（restorer.Deps.Payload 用）。
 //
 //   - ghost → 抓鬼导航数据（不给就是原地不动，所以必须给）；
+//   - shenbu → 分享日常链载荷（基座 + 声明组装；不给机器人拿不到 task_order 与导航）；
 //   - 其它 kind → nil：新手链/捉鬼链的补发只带 chain_id，机器人端有链缓存与网格缓存
 //     （quest_engine 的 g_chain_cache / g_chain_grid_cache），避免每条补发都塞 2MB。
 func (p *Payloads) For(kind, chainID string) (any, error) {
-	if strings.EqualFold(strings.TrimSpace(kind), "ghost") {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "ghost":
 		return p.Ghost()
+	case "shenbu":
+		return p.ShareDaily()
 	}
 	return nil, nil
 }
@@ -305,6 +373,80 @@ func mergeRawMap(first, second map[string]json.RawMessage) map[string]json.RawMe
 		out[k] = v
 	}
 	return out
+}
+
+// assembleShareDaily 基座 + 专属声明 → 一份完整分享日常链载荷。
+//
+// 合并规则（对比抓鬼：这里**保留任务链字段**——机器人端按 task_order 建"链内任务集合"）：
+//   - npcs / map_grids / dijkstra：按 key 合并，专属优先（专属可只补差量）；
+//   - task_order / task_hints / start_task / end_task / name：取专属（玩法声明；
+//     task_order 绝不与基座新手链混用）；
+//   - maps / grid_cell / item_meta 等：基座打底，专属覆盖。
+func assembleShareDaily(base, nav *chainlib.Chain) *chainlib.Chain {
+	out := &chainlib.Chain{
+		ChainID:   nav.ChainID,
+		Name:      nav.Name,
+		StartTask: nav.StartTask,
+		EndTask:   nav.EndTask,
+		NPCs:      mergeRawMap(base.NPCs, nav.NPCs),
+		TaskHints: mergeRawMap(base.TaskHints, nav.TaskHints),
+		TaskOrder: nav.TaskOrder,
+		GridCell:  base.GridCell,
+		MapGrids:  mergeRawMap(base.MapGrids, nav.MapGrids),
+		Dijkstra:  mergeRawMap(base.Dijkstra, nav.Dijkstra),
+		Maps:      base.Maps,
+		Extra:     map[string]json.RawMessage{},
+	}
+	if out.ChainID == "" {
+		out.ChainID = base.ChainID
+	}
+	if nav.GridCell != 0 {
+		out.GridCell = nav.GridCell
+	}
+	if len(nav.Maps) > 0 {
+		out.Maps = nav.Maps
+	}
+	for k, v := range base.Extra {
+		out.Extra[k] = v
+	}
+	for k, v := range nav.Extra {
+		out.Extra[k] = v
+	}
+	return out
+}
+
+// validateShareDaily 分享日常载荷硬校验（与抓鬼同风格：宁可明确报错，不发"跑不动/少环节"的载荷）：
+//
+//  1. task_order 非空 —— 少列任务号会让后续环节被机器人当"链外任务"静默忽略（R1）；
+//  2. task_order 每条必须能解析出 task_index（形状错=声明坏了，早点报错）；
+//  3. npcs / dijkstra 非空（基座链选错或为空）。
+func validateShareDaily(nav *chainlib.Chain, baseID, navID string) error {
+	if len(nav.TaskOrder) == 0 {
+		return fmt.Errorf("分享日常声明文件 %s 缺 task_order（必须列全该玩法全部分支任务号，"+
+			"否则后续环节会被机器人当「链外任务」静默忽略）", navID)
+	}
+	bad := 0
+	for _, raw := range nav.TaskOrder {
+		var o map[string]any
+		if err := json.Unmarshal(raw, &o); err != nil {
+			bad++
+			continue
+		}
+		if _, ok := o["task_index"]; !ok {
+			bad++
+		}
+	}
+	if bad > 0 {
+		return fmt.Errorf("分享日常声明文件 %s 的 task_order 有 %d 条缺 task_index（形状不对）："+
+			"每条应形如 {\"task_index\":2028301,\"catcher_npc\":\"13297\",\"next\":[...]}", navID, bad)
+	}
+	if len(nav.NPCs) == 0 {
+		return fmt.Errorf("分享日常载荷缺 npcs（NPC 坐标）：基座链 %s 不对或者为空", baseID)
+	}
+	if len(nav.Dijkstra) == 0 {
+		return fmt.Errorf("分享日常载荷缺 dijkstra（跨图路由）：基座链 %s 不对或者为空", baseID)
+	}
+	return nil
 }
 
 // validateGhostNav 地址完备性硬校验：宁可明确报错，也不要发一份"导航不了"的载荷。

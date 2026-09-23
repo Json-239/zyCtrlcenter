@@ -106,6 +106,7 @@ func newTestEnvInDir(t *testing.T, token, dataDir string) *testEnv {
 				return skipHook(kind, account)
 			},
 			GhostDailyLimit: func() int { return payloads.GhostDailyLimit() },
+			ShareDaily:      func() (string, int) { return payloads.ShareDailyKey(), payloads.ShareDailyLimit() },
 		}),
 		Payloads: payloads,
 	})

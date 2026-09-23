@@ -1,0 +1,271 @@
+// 分享日常（大唐神捕，shenbu）的中控侧契约（2026-09-23，方案 §7 / 清单 G3-G5）：
+//
+//   - 命令：share_daily_start{accounts, share_key, chain_id, chain, daily_limit, done?}
+//     —— 载荷 = 基座 newbie_full（坐标/网格/路由）+ shenbu_nav 声明（task_order 全 4 个任务号）；
+//   - 载荷缺失 → **硬失败**（一条命令都不发）；
+//   - 停策略 → 给在跑的号下发 share_daily_stop 收工（与 hatch_stop 同款）；
+//   - 补发（/api/intents/restore）同口径：带 share_key/daily_limit/done，多号合并成一条；
+//   - GET /api/daily/overview 空值安全（没有心跳 = 空数组，不瞎编）；池视图按 kind 自动获得。
+package api_test
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"zyctrlcenter/internal/services/autotask"
+	"zyctrlcenter/internal/services/intent"
+	"zyctrlcenter/test/testsupport"
+)
+
+// 下发 share_daily_start：命令形状 + 载荷完整性（task_order 全 4 个任务号，坐标/网格/路由从基座复用）。
+func TestLaunchShareDailyCarriesPayload(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallShareDailyNav(t, env.cfg.ChainDir)
+
+	ok, msg := env.api.LaunchTask(autotask.KindShenbu, []string{"sd1@xy3.com"})
+	if !ok {
+		t.Fatalf("下发大唐神捕应成功: %s", msg)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "share_daily_start" {
+		t.Fatalf("应收 share_daily_start: %v", cmd)
+	}
+	if cmd["share_key"] != "share_daily_大唐神捕" {
+		t.Fatalf("应带玩法键 share_key: %v", cmd["share_key"])
+	}
+	if cmd["chain_id"] != "shenbu_nav" {
+		t.Fatalf("应带链声明文件名（无 chain_id 时按文件名补）: %v", cmd["chain_id"])
+	}
+	if cmd["daily_limit"] != float64(10) {
+		t.Fatalf("应带 daily_limit=10（大唐神捕服务端口径）: %v", cmd["daily_limit"])
+	}
+	chain, _ := cmd["chain"].(map[string]any)
+	if len(chain) == 0 {
+		t.Fatalf("必须带 chain 载荷（不带机器人拿不到 task_order 与导航）: %v", cmd)
+	}
+	// R1 防护：task_order 必须列全 4 个分支任务号（少列会被机器人当「链外任务」静默忽略）
+	order := asSlice(chain["task_order"])
+	want := map[float64]bool{2028301: false, 2028302: false, 2028311: false, 2028399: false}
+	for _, it := range order {
+		o, _ := it.(map[string]any)
+		idx, _ := o["task_index"].(float64)
+		if _, known := want[idx]; !known {
+			t.Fatalf("task_order 出现未知任务号 %v（应只有 2028301/2028302/2028311/2028399）: %v", idx, o)
+		}
+		want[idx] = true
+	}
+	for idx, seen := range want {
+		if !seen {
+			t.Fatalf("task_order 少列任务号 %v（少列会让后续环节被静默忽略）: %v", idx, order)
+		}
+	}
+	// 坐标/网格/路由从基座 newbie_full 复用（专属文件只放声明）
+	npcs, _ := chain["npcs"].(map[string]any)
+	if len(npcs) == 0 {
+		t.Fatalf("chain.npcs 不能为空（基座链提供）: %v", chain)
+	}
+	grids, _ := chain["map_grids"].(map[string]any)
+	if len(grids) == 0 {
+		t.Fatalf("chain.map_grids 不能为空（基座链提供）: %v", chain)
+	}
+	if dj, _ := chain["dijkstra"].(map[string]any); len(dj) == 0 {
+		t.Fatalf("chain.dijkstra 不能为空（基座链提供）: %v", chain)
+	}
+	if extra := rb.TryReadCmd(200 * time.Millisecond); extra != nil {
+		t.Fatalf("只该收到一条 share_daily_start: %v", extra)
+	}
+}
+
+// 链数据缺失 → 硬失败：ok=false + 明确原因，且**一条命令都不发**。
+func TestLaunchShareDailyMissingPayloadFailsLoudly(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	// 刻意不装链数据（基座/声明都不存在）
+
+	ok, msg := env.api.LaunchTask(autotask.KindShenbu, []string{"sd2@xy3.com"})
+	if ok {
+		t.Fatalf("载荷缺失应硬失败: %s", msg)
+	}
+	if !strings.Contains(msg, "分享日常链数据不可用") {
+		t.Fatalf("报错要说清原因（面板直接显示）: %s", msg)
+	}
+	if cmd := rb.TryReadCmd(200 * time.Millisecond); cmd != nil {
+		t.Fatalf("硬失败不该发任何命令: %v", cmd)
+	}
+}
+
+// 停策略 → 给在跑的号下发 share_daily_stop 收工（否则号会一直跑到日限）。
+func TestAutoTaskStopSendsShareDailyStop(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallShareDailyNav(t, env.cfg.ChainDir)
+
+	if ok, msg := env.api.LaunchTask(autotask.KindShenbu, []string{"sd3@xy3.com"}); !ok {
+		t.Fatalf("下发大唐神捕应成功: %s", msg)
+	}
+	if cmd := rb.ReadCmd(t, 2*time.Second); cmd["cmd"] != "share_daily_start" {
+		t.Fatalf("先应收到 share_daily_start: %v", cmd)
+	}
+	_, res := postJSON(t, env.srv.URL+"/api/autotask/stop", map[string]any{"kind": "shenbu"}, nil)
+	if res["ok"] != true {
+		t.Fatalf("停止 shenbu 策略应成功: %v", res)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "share_daily_stop" {
+		t.Fatalf("停策略应给在跑的号下发 share_daily_stop: %v", cmd)
+	}
+	accs := asSlice(cmd["accounts"])
+	if len(accs) != 1 || accs[0] != "sd3@xy3.com" {
+		t.Fatalf("收工命令应带在跑的账号: %v", cmd["accounts"])
+	}
+}
+
+// 补发（按意图）与「启动」同口径：带 share_key/daily_limit/done，多号合并成一条。
+func TestIntentsRestoreShareDailyMergesAndCarriesKey(t *testing.T) {
+	t.Setenv("CTRL_SHARE_DAILY", "1") // 判据开关（默认关）：打开后 45 级 + 未满 → 判 shenbu
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallShareDailyNav(t, env.cfg.ChainDir)
+	// 池启用（restorer 补发前有池状态闸：池没启用不自动补发）
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, IntervalSec: 300, BatchMin: 1, BatchMax: 1, TargetOnline: 10,
+	}); err != nil {
+		t.Fatalf("启动神捕池失败: %v", err)
+	}
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{
+			map[string]any{"account": "sd4@xy3.com", "level": 45, "online": true, "state": "IDLE", "task_index": 0,
+				"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": 3, "limit": 10, "state": "RUNNING"}},
+			map[string]any{"account": "sd5@xy3.com", "level": 46, "online": true, "state": "IDLE", "task_index": 0,
+				"daily": []any{map[string]any{"share_key": "share_daily_大唐神捕", "done": 0, "limit": 10, "state": "IDLE"}}},
+		},
+		"_zone": testsupportZone()})
+	if it, ok := env.ev.Intents.Get("sd4@xy3.com"); !ok || it.Kind != intent.KindShenbu {
+		t.Fatalf("45 级 + 神捕未满应登记 shenbu 意图: %+v", it)
+	}
+	_, res := postJSON(t, env.srv.URL+"/api/intents/restore", map[string]any{}, nil)
+	if res["ok"] != true || res["sent"] != float64(2) || res["commands"] != float64(1) {
+		t.Fatalf("两个神捕号应合并成 1 条命令（sent=2 账号 / commands=1 命令）: %v", res)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "share_daily_start" || cmd["share_key"] != "share_daily_大唐神捕" {
+		t.Fatalf("补发必须是带 share_key 的 share_daily_start: %v", cmd)
+	}
+	if cmd["chain_id"] != "shenbu_nav" || cmd["daily_limit"] != float64(10) {
+		t.Fatalf("补发同口径：带 chain_id 与 daily_limit: %v", cmd)
+	}
+	chain, _ := cmd["chain"].(map[string]any)
+	if len(asSlice(chain["task_order"])) != 4 {
+		t.Fatalf("补发也要带完整 task_order（4 个任务号）: %v", chain["task_order"])
+	}
+	done, _ := cmd["done"].(map[string]any)
+	if done["sd4@xy3.com"] != float64(3) {
+		t.Fatalf("补发应带各号已做次数（重新下发不丢进度）: %v", done)
+	}
+	accs := asSlice(cmd["accounts"])
+	if len(accs) != 2 {
+		t.Fatalf("一条命令应覆盖两个账号: %v", cmd["accounts"])
+	}
+	if extra := rb.TryReadCmd(200 * time.Millisecond); extra != nil {
+		t.Fatalf("合并后机器人只该收到一条命令: %v", extra)
+	}
+}
+
+// GET /api/daily/overview：没有心跳 = 空数组 + 玩法键（空值安全，不瞎编）。
+func TestDailyOverviewEmptySafe(t *testing.T) {
+	env := newTestEnv(t, "")
+	res := getJSON(t, env.srv.URL+"/api/daily/overview")
+	if res["ok"] != true {
+		t.Fatalf("接口应 ok: %v", res)
+	}
+	if rows := asSlice(res["rows"]); len(rows) != 0 {
+		t.Fatalf("没有心跳时应给空数组: %v", res["rows"])
+	}
+	keys := asSlice(res["share_keys"])
+	if len(keys) != 1 || keys[0] != "share_daily_大唐神捕" {
+		t.Fatalf("应带玩法键（前端表头用）: %v", res["share_keys"])
+	}
+}
+
+// GET /api/daily/overview：带心跳 daily 块的号 → queue/current/order 结构齐全（order 先空）。
+func TestDailyOverviewShowsQueueAndCurrent(t *testing.T) {
+	t.Setenv("CTRL_SHARE_DAILY", "1")
+	env := newTestEnv(t, "")
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": "sd6@xy3.com", "level": 45, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": 4, "limit": 10, "state": "RUNNING"}}},
+		"_zone": testsupportZone()})
+
+	res := getJSON(t, env.srv.URL+"/api/daily/overview")
+	rows := asSlice(res["rows"])
+	if len(rows) != 1 {
+		t.Fatalf("在线且有 daily 数据的号应出一行: %v", res["rows"])
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["account"] != "sd6@xy3.com" || row["level"] != float64(45) {
+		t.Fatalf("行应带账号与等级: %v", row)
+	}
+	queue := asSlice(row["queue"])
+	if len(queue) != 1 {
+		t.Fatalf("queue 应有一条进度: %v", row["queue"])
+	}
+	q0, _ := queue[0].(map[string]any)
+	if q0["share_key"] != "share_daily_大唐神捕" || q0["done"] != float64(4) || q0["limit"] != float64(10) {
+		t.Fatalf("queue 条目应带 share_key/done/limit/state: %v", q0)
+	}
+	if row["current"] != "share_daily_大唐神捕" {
+		t.Fatalf("意图在神捕 → current 应为玩法键: %v", row["current"])
+	}
+	if len(asSlice(row["order"])) != 0 {
+		t.Fatalf("轮转顺序 P2 再填，现在应为空数组: %v", row["order"])
+	}
+}
+
+// /api/autotask 的池与任务视图按 kind 自动扩展：shenbu 必须在（前端策略卡直接获得）。
+func TestAutoTaskViewsIncludeShenbu(t *testing.T) {
+	env := newTestEnv(t, "")
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	pools, _ := res["pools"].(map[string]any)
+	if _, ok := pools["shenbu"]; !ok {
+		t.Fatalf("池视图应含 shenbu（kind 驱动自动获得）: %v", pools)
+	}
+	tasks := asSlice(res["tasks"])
+	found := false
+	for _, it := range tasks {
+		st, _ := it.(map[string]any)
+		if st["kind"] == "shenbu" {
+			found = true
+			if st["label"] != "大唐神捕" {
+				t.Fatalf("shenbu 的中文名应为大唐神捕: %v", st)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("任务视图应含 shenbu: %v", res["tasks"])
+	}
+}
+
+// 候选：抓鬼已满的 45 级号（意图仍是 ghost）应进 shenbu 候选 —— 填补抓鬼满额后的空档。
+func TestShenbuCandidateForGhostFullAccount(t *testing.T) {
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com" // 夹具账号：36 级（心跳 45 会覆盖）、该区 usable
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": acc, "level": 45, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+				"count_date": time.Now().Format("20060102")}}},
+		"_zone": testsupportZone()})
+
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := res["candidates"].(map[string]any)
+	if cands["shenbu"] != float64(1) {
+		t.Fatalf("抓鬼满额的 45 级号应进大唐神捕候选（填补空档）: %v", cands)
+	}
+}

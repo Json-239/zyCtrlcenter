@@ -64,8 +64,9 @@ func (a *API) handleProtocols(w http.ResponseWriter, r *http.Request) {
 				"columns": []string{"方法", "路径", "返回概要"},
 				"rows": [][]string{
 					{"GET", "/api/status", "机器人表（含区，行带 paused/restore_capped+cap_until+cap_reason 等标记）+ 通道/进程状态 + 当前区 + 失败清单 + 卡死熔断名单 restore_capped[]"},
-										{"GET", "/api/autotask", "定时自动任务（三套独立策略：新手链/抓鬼/孵化）+ 候选数 + 待恢复名单（reghost[]：含 waiting_* / done / failed / capped=当日卡死熔断等次日）"},
-					{"POST", "/api/autotask/start|stop|run", "启停某套定时任务 / 立即跑一轮（可选鉴权）"},
+{"GET", "/api/autotask", "定时自动任务（各套独立策略：新手链/抓鬼/孵化/大唐神捕）+ 候选数 + 待恢复名单（reghost[]：含 waiting_* / done / failed / capped=当日卡死熔断等次日）"},
+{"POST", "/api/autotask/start|stop|run", "启停某套定时任务 / 立即跑一轮（可选鉴权）"},
+{"GET", "/api/daily/overview", "分享日常轮转总览（号 × 日常 × 进度；数据源=心跳 daily 块 + 意图/池；轮转顺序 P2 再填）"},
 					{"POST", "/api/reghost/cancel", "取消某号的卡死自动重登恢复（可选鉴权）"},
 					{"POST", "/api/reghost/resume", "{account?} 解除「当日卡死熔断」（省略=全部）：清熔断表+当日卡死计数+重登记录，号回到自动通道（跨日 0 点本会自动解除）（可选鉴权）"},
 					{"GET", "/api/tasknames?id=", "任务号 → 任务名（读游戏配置 task/*.xml；面板把编号翻成人话）"},

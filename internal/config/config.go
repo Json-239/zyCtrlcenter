@@ -77,6 +77,28 @@ type Config struct {
 	// 可用环境变量 CTRL_GHOST_DAILY_LIMIT 覆盖。
 	GhostDailyLimit int
 
+	// ---- 分享日常（P0：大唐神捕；2026-09-23 方案 §4.3/§7 契约）----
+	//
+	// ShareDailyEnabled 分享日常（shenbu 策略）总开关：**默认关**——只有显式打开后，
+	// 意图判据才会把"等级 ≥ ShareDailyMinLevel 且该玩法今日未满"的号判成 shenbu；
+	// 关闭时行为与旧版完全一致（≥31 全部判抓鬼）。灰度期（P2）再配合池一起打开。
+	// 可用环境变量 CTRL_SHARE_DAILY=1 打开。
+	ShareDailyEnabled bool
+	// ShareDailyChainID 分享日常的**专属声明文件**名（data/chains/<id>.json，默认 shenbu_nav）。
+	// 与抓鬼导航同口径：坐标/网格/路由从 GhostBaseChainID（默认 newbie_full）复用，
+	// 专属文件只放玩法声明（task_order 必须列全分支任务号——少列会让后续环被静默忽略）。
+	// 可用环境变量 CTRL_SHARE_DAILY_CHAIN 覆盖。
+	ShareDailyChainID string
+	// ShareDailyKey 下发给机器人的玩法键（share_daily_start.share_key；默认 share_daily_大唐神捕）。
+	// 可用环境变量 CTRL_SHARE_DAILY_KEY 覆盖。
+	ShareDailyKey string
+	// ShareDailyDailyLimit 分享日常日限（随命令下发；大唐神捕服务端口径 10）。
+	// 可用环境变量 CTRL_SHARE_DAILY_LIMIT 覆盖。
+	ShareDailyDailyLimit int
+	// ShareDailyMinLevel 分享日常等级门槛（大唐神捕票条件：等级 ≥40）。
+	// 可用环境变量 CTRL_SHARE_DAILY_MIN_LEVEL 覆盖。
+	ShareDailyMinLevel int
+
 	// AutoRegister* 定时任务的"没号时自动注册"用（默认按本项目的账号命名口径：
 	// robot + 7 位序号 + @xy3.com，如 robot0001000@xy3.com）。可用环境变量
 	// CTRL_AUTO_REGISTER_PREFIX / _SUFFIX / _PAD 覆盖。
@@ -254,22 +276,27 @@ func absPath(p string) string {
 
 func build(base string, opts *cliOpts) *Config {
 	c := &Config{
-		WebHost:            env("CTRL_WEB_HOST", "127.0.0.1"),
-		WebPort:            envInt("CTRL_WEB_PORT", DefaultWebPort),
-		CtrlHost:           env("CTRL_CTRL_HOST", "127.0.0.1"),
-		CtrlPort:           envInt("CTRL_CTRL_PORT", DefaultCtrlPort),
-		BaseDir:            base,
-		DefaultChainID:     "newbie_full",
-		GhostNavChainID:    env("CTRL_GHOST_NAV_CHAIN", "zhongkui_nav"),
-		GhostBaseChainID:   env("CTRL_GHOST_BASE_CHAIN", "newbie_full"),
-		GhostDailyLimit:    envInt("CTRL_GHOST_DAILY_LIMIT", 50),
-		AutoRegisterPrefix: env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
-		AutoRegisterSuffix: env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
-		AutoRegisterPad:    envInt("CTRL_AUTO_REGISTER_PAD", 7),
-		GameVersion:        env("CTRL_GAME_VERSION", "58740022"),
-		AutoRemoveOnDone:   true,
-		NewbieMaxLevel:     envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
-		AutoRestore:        envBool("CTRL_AUTO_RESTORE", false),
+		WebHost:              env("CTRL_WEB_HOST", "127.0.0.1"),
+		WebPort:              envInt("CTRL_WEB_PORT", DefaultWebPort),
+		CtrlHost:             env("CTRL_CTRL_HOST", "127.0.0.1"),
+		CtrlPort:             envInt("CTRL_CTRL_PORT", DefaultCtrlPort),
+		BaseDir:              base,
+		DefaultChainID:       "newbie_full",
+		GhostNavChainID:      env("CTRL_GHOST_NAV_CHAIN", "zhongkui_nav"),
+		GhostBaseChainID:     env("CTRL_GHOST_BASE_CHAIN", "newbie_full"),
+		GhostDailyLimit:      envInt("CTRL_GHOST_DAILY_LIMIT", 50),
+		ShareDailyEnabled:    envBool("CTRL_SHARE_DAILY", false),
+		ShareDailyChainID:    env("CTRL_SHARE_DAILY_CHAIN", "shenbu_nav"),
+		ShareDailyKey:        env("CTRL_SHARE_DAILY_KEY", "share_daily_大唐神捕"),
+		ShareDailyDailyLimit: envInt("CTRL_SHARE_DAILY_LIMIT", 10),
+		ShareDailyMinLevel:   envInt("CTRL_SHARE_DAILY_MIN_LEVEL", 40),
+		AutoRegisterPrefix:   env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
+		AutoRegisterSuffix:   env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
+		AutoRegisterPad:      envInt("CTRL_AUTO_REGISTER_PAD", 7),
+		GameVersion:          env("CTRL_GAME_VERSION", "58740022"),
+		AutoRemoveOnDone:     true,
+		NewbieMaxLevel:       envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
+		AutoRestore:          envBool("CTRL_AUTO_RESTORE", false),
 		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
 		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),
 		LiveCountURL:         env("CTRL_LIVECOUNT_URL", ""),
@@ -280,7 +307,7 @@ func build(base string, opts *cliOpts) *Config {
 		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
 		// 2026-09-22 用户口径：幽冥界 24 是抓鬼专属，游荡排除（显式选图拒绝 + 白名单剔除）
 		// 2026-09-23 追加牢房 653/654/655（654/655 有网格会被随机抽中，进去出不来）
-		RoamExcludeMaps:      envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 653, 654, 655}),
+		RoamExcludeMaps: envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 653, 654, 655}),
 		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
 		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
 		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),
