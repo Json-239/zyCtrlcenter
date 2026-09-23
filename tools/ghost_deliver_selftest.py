@@ -149,9 +149,11 @@ check("S8 校准扫 GHOST_TASK_MIN~GHOST_TASK_MAX, 无写死 2019510 查表",
       and "GHOST_DAILY_ROOT" not in ghost_src)
 
 # S9: 启动校准与增量日志都改用新函数
+# 2026-09-23 跨夜修复后启动块改为三态规则, 调用形式变为内联 getattr(见
+#   tools/ghost_crossday_selftest.py 的 D4~D9 动态用例), 这里只要求"确实在用它"。
 check("S9 启动校准/增量日志改用 __srv_ghost_done",
       ghost_src.count("__srv_ghost_done(") >= 2
-      and "_srv = __srv_ghost_done(_tl)" in ghost_src)
+      and "__srv_ghost_done(getattr(robot_object" in ghost_src)
 
 
 # ================================================================ 动态执行

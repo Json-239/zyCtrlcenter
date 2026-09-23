@@ -307,10 +307,22 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 	return out
 }
 
+// todayKey 本地日期键（YYYYMMDD）：跨夜判定"机器人快照是否今天的"用
+// （中控与机器人同机部署，口径一致；服务端 0 点切日）。
+func todayKey() string { return time.Now().Format("20060102") }
+
 // ghostDailyFull 今日抓鬼是否已满（机器人上报的 ghost.done/limit；缺数据时不判满）。
+//
+// 2026-09-23 跨夜误判修复：快照必须"今天的"才判满 —— 号抓满转游荡后快照停在
+// DONE/50，跨夜（服务端 0 点已清零）若仍按旧快照判满，候选过滤会一直跳过该号、
+// 不给派抓鬼（现场 139 个号在 00:00~06:28 被旧计数误判）。机器人已在心跳
+// ghost.count_date 上报计数日期；缺字段（旧版上报）时保持旧行为。
 func ghostDailyFull(r state.Robot) bool {
 	if r.Ghost == nil {
 		return false
+	}
+	if cd := toStr(r.Ghost["count_date"]); cd != "" && cd != todayKey() {
+		return false // 跨夜旧快照：视为未知，不判满
 	}
 	done := toInt(r.Ghost["done"], 0)
 	limit := toInt(r.Ghost["limit"], 50)

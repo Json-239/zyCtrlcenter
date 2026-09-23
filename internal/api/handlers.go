@@ -396,6 +396,11 @@ func (a *API) ghostDoneMap(accounts []string) map[string]int {
 		if !ok || r.Ghost == nil {
 			continue
 		}
+		// 2026-09-23 跨夜修复：旧快照（count_date 非今天）的 done 不下发 —— 服务端
+		//   0 点已清零，旧值会让机器人误判满额（机器人端也会忽略，这里双保险）。
+		if cd := toStr(r.Ghost["count_date"]); cd != "" && cd != todayKey() {
+			continue
+		}
 		if n := toInt(r.Ghost["done"], 0); n > 0 {
 			out[acc] = n
 		}
