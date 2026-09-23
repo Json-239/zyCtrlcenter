@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""游荡"禁游荡图不得就地游荡" + 链缺失兜底 自检 —— 2026-09-23
+"""游荡"禁游荡图不得就地游荡" + 链缺失兜底 + 图内死点修复 自检 —— 2026-09-23
 
 背景（现场根因，2026-09-23 实测）:
   用户报"幽冥界(图24) 还有游荡机器人"。排查发现 83 个号 133 条
@@ -22,6 +22,18 @@
      - __reach_chain_view: 抽签前的可达试算用"本次将生效的链"(命令链∪旧链)，
        与 set_quest_chain 同口径（机器人内无链命令也能算对）；
      - 白名单 vs 排除图一致性 warning（每进程一次）。
+
+D. 图内死点修复（2026-09-23b，用户报"少数游荡号卡在目标图死点，反复刷
+   `地图 X 无可行路径 (x,y)→(x,y), 取消行走`，位置不动"）:
+   - __pick_walk_point: 候选点除"非阻挡格"外还要**与当前位置连通**（试算一次
+     quest_engine.__build_path，与真走同寻路/同缓存）→ 不通换点(≤3 次)；
+     试算不可用(异常) → 退回旧行为直接返回候选点（不把号钉死）；
+   - __snap_walkable: 当前位置在网格外/阻挡格 → 夹回网格取最近可走格(半径 40 格)，
+     写回 m_pose；吸附失败 → 换图/停止；
+   - __note_walk_progress + __roam_switch_map: 同目标图连续 3 次"无进展"(20s 节流)
+     → warn + 换图（随机模式在白名单/世界白名单内另抽，**只读配置不改白名单**）；
+     没有候选图 → 停止游荡（复用既有失败停止风格）；
+   - 选点全失败 → 5s 冷却（试算是真寻路，死点号每帧重试会白烧 CPU）。
 
 用法:
   python tools/roam_no_insite_selftest.py <script 目录 或 random_walk.py 路径>
@@ -127,6 +139,29 @@ def main():
           "if not isinstance(new, dict):" in qe and "new = old" in qe)
     check("quest_engine.__find_dijkstra_route: chain 缺失回退跨图表缓存",
           "g_chain_dijkstra_cache if g_chain_dijkstra_cache else None" in qe)
+
+    # ---------------------------------------------------------------- D. 图内死点修复
+    check("random_walk 定义 __grid_for(选点/吸附共用网格)", "def __grid_for(" in rw)
+    check("random_walk 定义 __snap_walkable(网格外/阻挡吸附)", "def __snap_walkable(" in rw)
+    check("random_walk 定义 __note_walk_progress(连续无进展计数)",
+          "def __note_walk_progress(" in rw)
+    check("random_walk 定义 __roam_switch_map(连续失败换图/停止)",
+          "def __roam_switch_map(" in rw)
+    check("常量: 试算3次/吸附40格/换图阈值3/失败节流20s/重试冷却5s",
+          "ROAM_PATH_CHECK_TRIES = 3" in rw and "ROAM_SNAP_RADIUS = 40" in rw
+          and "ROAM_FAILS_TO_SWITCH = 3" in rw and "ROAM_FAIL_GAP_MS = 20000" in rw
+          and "ROAM_PICK_RETRY_MS = 5000" in rw)
+    check("选点连通试算复用 quest_engine.__build_path(与 __do_walk 同寻路, 非新写)",
+          "quest_engine.__build_path(quest, w.mapid," in rw)
+    check("__random_walk_move 入口: 无进展计数 + 吸附",
+          "__note_walk_progress(w, cur, now_ms)" in rw
+          and "__snap_walkable(grid, cur[0], cur[1])" in rw)
+    check("__random_walk_move 兜底选点也带 from_pos(试算口径一致)",
+          "__pick_walk_point(quest, w, from_pos=cur)" in rw)
+    check("选点全失败 → 5s 冷却(防死点号每帧烧试算 CPU)",
+          "w.walk_next_try_ms = now_ms + ROAM_PICK_RETRY_MS" in rw)
+    check("换图后 state=IDLE(不是 nav: 否则 tick 不会重新 __goto_map)",
+          'w.state = "IDLE"\t# 用 IDLE(不是 nav)' in rw)
 
     # ================================================================ B. 执行: random_walk 纯函数
     ns = {}
@@ -330,6 +365,231 @@ def main():
         check("端到端: 不可达的 45 不在可达集", 45 not in (reach or set()))
         t = resolve("random", _cands, _cands, current_map=24, rng=_SeqRng(), reachable=reach)
         check("端到端: 抽签落在可达集内(不会抽到 45)", t[0] in (11, 25, 609) and not t[2], t)
+
+    # ================================================================ D. 图内死点修复
+    # fixture 网格(20x12):
+    #   x=5 竖墙(y=2..9, 左右只能从 y=0/1/10/11 绕行) + 右下角封闭口袋
+    #   (x=15..18, y=3..8, 口字环全阻挡) —— 主区与口袋互不连通, 用来测连通试算/吸附。
+    def _mk_fixture_grid():
+        w0, h0 = 20, 12
+        rows = []
+        for y in range(h0):
+            row = ["0"] * w0
+            if 2 <= y <= 9:
+                row[5] = "1"
+            rows.append(row)
+        for y in (2, 9):
+            for x in range(14, 20):
+                rows[y][x] = "1"
+        for y in range(3, 9):
+            rows[y][14] = "1"
+            rows[y][19] = "1"
+        return {"w": w0, "h": h0, "rows": ["".join(r) for r in rows]}
+
+    FIX_MAP = 777
+    FIX_GRID = _mk_fixture_grid()
+    try:
+        sys.path.insert(0, script_dir)
+        import robot_path as _rp
+        check("图内死点: 可导入 robot_path(真实寻路)", True)
+    except Exception as _e:
+        _rp = None
+        check("图内死点: 可导入 robot_path(真实寻路)", False, str(_e))
+
+    if _rp is not None:
+        _rp_finder = _rp.GridPathFinder(_rp.MapGrid(FIX_MAP, FIX_GRID))
+        qe_stub = types.ModuleType("quest_engine")
+        _bp_calls = []
+
+        def _stub_chain_grid(quest, mapid):
+            return FIX_GRID if int(mapid) == FIX_MAP else None
+
+        def _stub_build_path(quest, mapid, fx, fy, tx, ty):
+            # 与生产 __build_path 同实现: 复用 robot_path.GridPathFinder(带缓存)
+            _bp_calls.append((mapid, fx, fy, tx, ty))
+            if int(mapid) != FIX_MAP:
+                return None
+            return _rp_finder.find_path(fx, fy, tx, ty)
+
+        def _stub_get_quest(robot_object, create=False):
+            return types.SimpleNamespace(chain={"map_grids": {str(FIX_MAP): FIX_GRID}})
+
+        _feas_hook = {"v": None}
+        qe_stub.__chain_grid_for = _stub_chain_grid
+        qe_stub.__build_path = _stub_build_path
+        qe_stub.get_quest = _stub_get_quest
+        qe_stub.roam_feasible_maps = lambda quest, fm, cands: _feas_hook["v"]
+        ns["quest_engine"] = qe_stub
+        ns["__quest"] = _stub_get_quest
+        ns["random"] = __import__("random")
+        ns["hashlib"] = __import__("hashlib")
+        ns["robot_path"] = _rp
+        # ROAM_* 常量注入(默认参数/函数体都引用它们; 从源码解析实际值, 改常量自检跟着变)
+        import re as _re
+        for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
+            ns[_m.group(1)] = int(_m.group(2))
+        check("图内死点: ROAM_* 常量齐全(6 个)",
+              len([k for k in ns if k.startswith("ROAM_")]) == 6,
+              sorted(k for k in ns if k.startswith("ROAM_")))
+
+        for name in ("__grid_for", "__snap_walkable", "__note_walk_progress",
+                     "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point"):
+            frag = _extract_func(rw, name)
+            check("提取 random_walk.%s(D 段)" % name, frag is not None)
+            if frag:
+                try:
+                    exec(frag, ns)
+                except Exception as e:  # noqa
+                    check("exec random_walk.%s(D 段)" % name, False, str(e))
+
+        def _mk_w(mapid, rng_box):
+            ww = _W()
+            ww.mapid = mapid
+            ww.account = "selftest"
+            ww.min_bot_dist = 200
+            ww.range = rng_box
+            ww.rng = None
+            ww.maps = []
+            ww.map_req = "map"
+            return ww
+
+        _snap = ns.get("__snap_walkable")
+        _pick = ns.get("__pick_walk_point")
+        _prog = ns.get("__note_walk_progress")
+        _switch = ns.get("__roam_switch_map")
+        _fgrid = ns.get("__grid_for")
+        # 位置锚点(像素 → 格): 主区 (40,40)=格(2,2); 口袋中心 (272,88)=格(17,5)
+        _grid = _rp.MapGrid(FIX_MAP, FIX_GRID)
+
+        # ---- D1. __snap_walkable ----
+        if _snap is not None:
+            r = _snap(_grid, 40, 40)
+            check("吸附: 已在可走格 → 原样返回(不产生位移)", r == (40, 40), r)
+            r = _snap(_grid, 5 * 16 + 8, 5 * 16 + 8)   # 竖墙格(5,5)
+            check("吸附: 阻挡格 → 最近可走格(格距=1 且可走)",
+                  r is not None and not _grid.blocked(*_grid.to_grid(r[0], r[1]))
+                  and abs(_grid.to_grid(r[0], r[1])[0] - 5)
+                  + abs(_grid.to_grid(r[0], r[1])[1] - 5) == 1, r)
+            r = _snap(_grid, 30 * 16 + 8, 5 * 16 + 8)  # 越界(W=20)
+            check("吸附: 网格外 → 夹回网格内找可走格",
+                  r is not None and 0 <= _grid.to_grid(r[0], r[1])[0] < 20
+                  and not _grid.blocked(*_grid.to_grid(r[0], r[1])), r)
+            _all_blocked = _rp.MapGrid(FIX_MAP, {"w": 6, "h": 6,
+                                                "rows": ["1" * 6] * 6})
+            check("吸附: 整片不可走 → None(调用方换图/停止)",
+                  _snap(_all_blocked, 40, 40) is None)
+
+        # ---- D2. __note_walk_progress ----
+        if _prog is not None:
+            w2 = _mk_w(FIX_MAP, [[0, 0], [64, 64]])
+            w2.walk_fail = 0
+            w2.walk_fail_ms = 0
+            check("无进展计数: 首次(无基准)算有进展", _prog(w2, (40, 40), 1000) is True)
+            check("无进展计数: 位置没动且未过节流 → 不计数",
+                  _prog(w2, (40, 40), 1500) is False and w2.walk_fail == 0, w2.walk_fail)
+            check("无进展计数: 过 20s 节流 → +1",
+                  _prog(w2, (40, 40), 1000 + 20001) is False and w2.walk_fail == 1,
+                  w2.walk_fail)
+            check("无进展计数: 再过 20s → +2",
+                  _prog(w2, (40, 40), 1000 + 40002) is False and w2.walk_fail == 2,
+                  w2.walk_fail)
+            check("无进展计数: 位移 > 12px → 清零(有进展)",
+                  _prog(w2, (200, 40), 1000 + 41000) is True and w2.walk_fail == 0,
+                  w2.walk_fail)
+
+        # ---- D3. __roam_switch_map ----
+        if _switch is not None:
+            del disp_calls[:]
+            cfg.robot_roam_world_maps = [11, 25, 45, 609]
+            _feas_hook["v"] = None
+            w3 = _mk_w(45, [[48, 48], [300, 300]])
+            w3.map_req = "random"
+            w3.walk_fail = 3
+            w3.maps = []
+            before_world = list(cfg.robot_roam_world_maps)
+            r = _switch(types.SimpleNamespace(m_mapid=45), None, w3, 999999, "连续无进展")
+            check("换图: 随机模式 → 换到白名单内另一张(非当前图/非排除图)",
+                  r is True and w3.mapid in (11, 25, 609) and w3.mapid != 45, w3.mapid)
+            check("换图: state=IDLE(交给 tick 重新跨图) + 计数清零",
+                  w3.state == "IDLE" and w3.walk_fail == 0, (w3.state, w3.walk_fail))
+            check("换图: 不动白名单配置(只读)",
+                  cfg.robot_roam_world_maps == before_world and w3.maps == [],
+                  (cfg.robot_roam_world_maps, w3.maps))
+            # 可达过滤(roam_feasible_maps 可用时只在可达集里挑)
+            _feas_hook["v"] = set([11])
+            w4 = _mk_w(45, [[48, 48], [300, 300]])
+            w4.map_req = "random"
+            w4.walk_fail = 3
+            r = _switch(types.SimpleNamespace(m_mapid=45), None, w4, 999999, "连续无进展")
+            check("换图: 只在 roam_feasible_maps 可达集里挑", r is True and w4.mapid == 11,
+                  w4.mapid)
+            _feas_hook["v"] = None
+            # 白名单模式(孵化图): 只在 w.maps 内换
+            del disp_calls[:]
+            w5 = _mk_w(6, [[48, 48], [300, 300]])
+            w5.map_req = "map"
+            w5.maps = [6, 17, 34, 40]
+            w5.walk_fail = 3
+            r = _switch(types.SimpleNamespace(m_mapid=6), None, w5, 999999, "连续无进展")
+            check("换图: 白名单游荡只在白名单内换(不动 maps)",
+                  r is True and w5.mapid in (17, 34, 40) and w5.maps == [6, 17, 34, 40],
+                  (w5.mapid, w5.maps))
+            # 单一指定图(无白名单) → 停止游荡(既有失败停止风格)
+            del disp_calls[:]
+            w6 = _mk_w(6, [[48, 48], [300, 300]])
+            w6.map_req = "map"
+            w6.maps = []
+            w6.walk_fail = 3
+            r = _switch(types.SimpleNamespace(m_mapid=6), None, w6, 999999, "位置不可走且吸附失败")
+            check("换图: 无候选图(单一指定图) → 停止游荡",
+                  r is False and len(disp_calls) == 1
+                  and disp_calls[0].get("cmd") == "random_walk_stop", disp_calls)
+            check("换图: 无候选时不改目标图", w6.mapid == 6, w6.mapid)
+            # 排除图不作候选(白名单只剩 24 → 无候选 → 停止)
+            del disp_calls[:]
+            w7 = _mk_w(24, [[48, 48], [300, 300]])
+            w7.map_req = "map"
+            w7.maps = [24]
+            r = _switch(types.SimpleNamespace(m_mapid=24), None, w7, 999999, "连续无进展")
+            check("换图: 排除图(24)不作候选 → 停止游荡",
+                  r is False and len(disp_calls) == 1, disp_calls)
+
+        # ---- D4. __pick_walk_point 连通性试算 ----
+        if _pick is not None and _snap is not None:
+            # ①主区内选点: 全部连通(试算通过才返回)
+            w8 = _mk_w(FIX_MAP, [[16, 16], [80, 80]])
+            _calls0 = len(_bp_calls)
+            oks = []
+            for _ in range(15):
+                pt = _pick(None, w8, min_dist=0, from_pos=(40, 40))
+                oks.append(pt is not None and _rp_finder.find_path(40, 40, pt[0], pt[1])
+                           is not None)
+            check("选点: 主区内 15/15 返回且都连通(试算拦截生效)",
+                  all(oks) and len(oks) == 15, oks.count(True))
+            check("选点: 连通试算真的调用了 __build_path",
+                  len(_bp_calls) > _calls0, len(_bp_calls) - _calls0)
+            # ②只从"封闭口袋"范围选点(与起点不连通) → 试算 3 次后判失败
+            w9 = _mk_w(FIX_MAP, [[15 * 16 + 8, 3 * 16 + 8], [18 * 16 + 8, 8 * 16 + 8]])
+            _calls1 = len(_bp_calls)
+            pt = _pick(None, w9, min_dist=0, from_pos=(40, 40))
+            check("选点: 范围全不可达 → 返回 None(不返回走不到的点)", pt is None, pt)
+            check("选点: 试算次数 ≤ ROAM_PATH_CHECK_TRIES(3)",
+                  len(_bp_calls) - _calls1 <= 3, len(_bp_calls) - _calls1)
+            # ③试算不可用(异常) → 退回旧行为(直接返回候选点, 不把号钉死)
+            _orig_bp = qe_stub.__build_path
+
+            def _raise_bp(quest, mapid, fx, fy, tx, ty):
+                raise RuntimeError("grid broken")
+
+            qe_stub.__build_path = _raise_bp
+            pt = _pick(None, w9, min_dist=0, from_pos=(40, 40))
+            check("选点: 校验不可用(异常) → 退回旧行为(仍返回候选点)", pt is not None, pt)
+            qe_stub.__build_path = _orig_bp
+            # ④无参照起点(跨图落地点选取) → 不做连通校验(旧行为)
+            _calls2 = len(_bp_calls)
+            pt = _pick(None, w9, min_dist=0, from_pos=None)
+            check("选点: from_pos 为空(选落地点) → 不试算(旧行为)",
+                  pt is not None and len(_bp_calls) == _calls2, pt)
 
     nfail = 0
     for name, ok, detail in results:
