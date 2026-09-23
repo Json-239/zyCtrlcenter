@@ -1,0 +1,224 @@
+# -*- coding: utf-8 -*-
+"""跳转点"与当前位置连通"筛选自检 —— 2026-09-23f
+
+背景（现场，只读取证）:
+  游荡跨图刷屏残余（patrol=0 的号）：`地图 X 无可行路径 (x,y)→(152,246), 取消行走`
+  —— 目标(152,246)是**跳转点 start_x/start_y**。旧兜底（2026-08-31）只把目标点校正到
+  "离目标最近的可走格"(robot_path.nearest_walkable) 再寻路；但当该可走格与当前位置
+  **不在同一连通域**（目标贴墙 → 最近可走格在墙的另一侧；或出入口跳转点天生不在同一
+  连通域，见 tools/roam_map_connectivity_scan.py 的 7/43 图）→ 校正后仍无解 → 每次补发
+  都"跨图重试→失败→就地游荡"的空转 + 刷屏。
+
+修复（quest_engine.py 2026-09-23f，最小改动）:
+  - 新增模块级 `__nearest_connected_cell(grid, from_x, from_y, to_x, to_y, max_radius=40)`:
+    ①从起点格泛洪(8 邻、不斜穿墙角，与 robot_path.GridPathFinder._astar 同判据)得可达集;
+    ②从目标格向外扩环，取第一个"可走且在可达集里"的格 = 能走到的最接近目标的合法位置
+    （服务端 detect_skip_range 有 scope，走到附近合法位置也可能触发跳转）。
+  - `__do_walk` 的"A* 无解 → 就近可走格校正"里：path2 仍为 None 时调用它再试一次
+    （不取代旧逻辑；找不到/不连通 → 保持原 NO_LEGAL_ROUTE 报错路径）。
+
+用法:
+  python tools/hop_connectivity_selftest.py <script 目录 或 quest_engine.py 路径>
+"""
+import os
+import sys
+import types
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+def _resolve(path):
+    if os.path.isdir(path):
+        return path
+    return os.path.dirname(path)
+
+
+def _extract_func(src, name):
+    lines = src.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("def %s(" % name):
+            out = [ln]
+            for ln2 in lines[i + 1:]:
+                if ln2.strip() and not ln2[0].isspace():
+                    break
+                out.append(ln2)
+            return "\n".join(out)
+    return None
+
+
+# 20x12 格(320x192 px):
+#   x=5 竖墙(y=2..9) —— 左右只能从 y=0/1/10/11 绕行;
+#   右下封闭口袋(x=15..18, y=3..8, 口字环全阻挡) —— 与主区互不连通。
+FIX_MAP = 777
+
+
+def _mk_fixture_grid():
+    w0, h0 = 20, 12
+    rows = []
+    for y in range(h0):
+        row = ["0"] * w0
+        if 2 <= y <= 9:
+            row[5] = "1"
+        rows.append(row)
+    for y in (2, 9):
+        for x in range(14, 20):
+            rows[y][x] = "1"
+    for y in range(3, 9):
+        rows[y][14] = "1"
+        rows[y][19] = "1"
+    return {"w": w0, "h": h0, "rows": ["".join(r) for r in rows]}
+
+
+FIX_GRID = _mk_fixture_grid()
+MAIN_POSE = (40, 40)                  # 主区: 格(2,2)
+WALL_POSE = (5 * 16 + 8, 5 * 16 + 8)  # 竖墙格(5,5) = (88,88)
+SNAP_POSE = (4 * 16 + 8, 5 * 16 + 8)  # 起点校正期望: 最近可走格(4,5) = (72,88)
+TARGET_MAIN = (10 * 16 + 8, 6 * 16 + 8)   # 主区可走目标 = (168,104)
+POCKET_POSE = (17 * 16 + 8, 5 * 16 + 8)   # 口袋中心 = (280,88) 与主区不连通
+POCKET_NEAR_MAIN = (13 * 16 + 8, 5 * 16 + 8)  # 口袋左外侧主区格(13,5)=(216,88)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("用法: python tools/hop_connectivity_selftest.py <script 目录 或 quest_engine.py 路径>")
+        return 2
+    script_dir = _resolve(sys.argv[1])
+    qe_path = os.path.join(script_dir, "quest_engine.py")
+    if not os.path.exists(qe_path):
+        print("[FAIL] 找不到 %s" % qe_path)
+        return 2
+    qe = open(qe_path, encoding="utf-8", errors="replace").read()
+
+    results = []
+
+    def check(name, cond, detail=""):
+        results.append((name, bool(cond), detail))
+
+    # ============================================================ A. 源码形状
+    check("quest_engine 定义 __nearest_connected_cell(跳转点连通筛选)",
+          "def __nearest_connected_cell(" in qe)
+    check("__do_walk 就近可走格校正里：path2 无解时调用连通筛选(不取代旧逻辑)",
+          "if path2 is None:" in qe
+          and "_alt = __nearest_connected_cell(_g2, from_x, from_y, to_x, to_y)" in qe)
+    check("连通筛选命中后用新目标重试寻路并改写 _nx/_ny",
+          "path2b = __build_path(quest, robot_object.m_mapid," in qe
+          and "_nx, _ny = _ax, _ay" in qe)
+    check("泛洪判据与 A* 同源(8 邻、斜向要求两正交格可走)",
+          "grid.blocked(cx + _dx, cy) or grid.blocked(cx, cy + _dy)" in qe)
+    check("目标扩环有上限(默认 max_radius=40, 防整图扫描)",
+          "def __nearest_connected_cell(grid, from_x, from_y, to_x, to_y, max_radius=40):" in qe)
+    check("原 NO_LEGAL_ROUTE 报错路径保留(找不到才走原路径)",
+          '地图 %d 无可行路径 (%d,%d)→(%d,%d), 取消行走' in qe)
+
+    # ============================================================ B. 执行(真实 robot_path)
+    try:
+        sys.path.insert(0, script_dir)
+        import robot_path as _rp
+        check("可导入 robot_path(真实寻路)", True)
+    except Exception as _e:  # noqa
+        _rp = None
+        check("可导入 robot_path(真实寻路)", False, str(_e))
+
+    if _rp is not None:
+        grid = _rp.MapGrid(FIX_MAP, FIX_GRID)
+        finder = _rp.GridPathFinder(grid)
+        ns = {"robot_path": _rp}
+        frag = _extract_func(qe, "__nearest_connected_cell")
+        check("提取 quest_engine.__nearest_connected_cell", frag is not None)
+        if frag:
+            try:
+                exec(frag, ns)
+            except Exception as e:  # noqa
+                check("exec quest_engine.__nearest_connected_cell", False, str(e))
+        ncc = ns.get("__nearest_connected_cell")
+
+        if ncc is not None:
+            # B1. 目标可走且同连通域 → 就是目标格本身(r=0)
+            r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], TARGET_MAIN[0], TARGET_MAIN[1])
+            check("同域可走目标 → 返回目标格自身(不绕路)",
+                  r == grid.to_grid(*TARGET_MAIN), r)
+
+            # B2. 目标落在阻挡格(竖墙) → 返回墙这侧最近的可走格(旧逻辑会选墙另一侧)
+            r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], WALL_POSE[0], WALL_POSE[1])
+            check("目标在阻挡格 → 返回'可达且离目标最近'的格(墙这侧)",
+                  r == (4, 5), r)
+            check("B2 返回格确实与当前位置连通",
+                  r is not None and finder.find_path(
+                      MAIN_POSE[0], MAIN_POSE[1], r[0] * 16 + 8, r[1] * 16 + 8) is not None, r)
+
+            # B3. 目标在断开的口袋里 → 返回"能走到的最接近目标的合法位置"
+            #     (13,5) 与 (17,1) 到目标都是 64px(等距), 扫描序取 (17,1) —— 两者都在主区
+            r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], POCKET_POSE[0], POCKET_POSE[1])
+            check("目标在别的连通域 → 返回可达的最近格(与目标等距 64px 的 (17,1))",
+                  r == (17, 1), r)
+            check("B3 返回格确实与当前位置连通",
+                  r is not None and finder.find_path(
+                      MAIN_POSE[0], MAIN_POSE[1], r[0] * 16 + 8, r[1] * 16 + 8) is not None, r)
+
+            # B4. 起点落阻挡格 → 先校正起点(nearest_walkable)再泛洪
+            r = ncc(grid, WALL_POSE[0], WALL_POSE[1], TARGET_MAIN[0], TARGET_MAIN[1])
+            check("起点阻挡 → 先校正到 (4,5)/(6,5) 再筛选(仍返回同域目标)",
+                  r == grid.to_grid(*TARGET_MAIN), r)
+            check("B4 返回格与校正后的起点连通",
+                  finder.find_path(SNAP_POSE[0], SNAP_POSE[1],
+                                   TARGET_MAIN[0], TARGET_MAIN[1]) is not None)
+
+            # B5. 超出扩环上限 → None(调用方保持原 NO_LEGAL_ROUTE 路径)
+            r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], POCKET_POSE[0], POCKET_POSE[1],
+                    max_radius=2)
+            check("扩环超上限仍找不到 → None(不硬拉/不绕远)", r is None, r)
+
+            # B6. 网格外目标(超出整个网格) → None
+            r = ncc(grid, MAIN_POSE[0], MAIN_POSE[1], 3000, 3000)
+            check("目标在网格外(整图外) → None", r is None, r)
+
+            # B7. 整片不可走 → None
+            _all_blocked = _rp.MapGrid(FIX_MAP, {"w": 6, "h": 6, "rows": ["1" * 6] * 6})
+            r = ncc(_all_blocked, 40, 40, 40, 40)
+            check("整片不可走 → None(调用方报错)", r is None, r)
+
+            # B8. 真实生产网格抽查: map45 的跳转点(离线只读, 有链数据才测)
+            try:
+                import json
+                _repo = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+                chain_fp = os.path.join(_repo, "data", "chains", "zhongkui_nav.json")
+                if os.path.exists(chain_fp):
+                    _ch = json.load(open(chain_fp, encoding="utf-8"))
+                    _g45 = (_ch.get("map_grids") or {}).get("45")
+                    if _g45:
+                        _grid45 = _rp.MapGrid(45, _g45)
+                        # 现场: (1074,907) 走不到 (152,246)
+                        _old = _rp.GridPathFinder(_grid45).find_path(1074, 907, 152, 246)
+                        _c = ncc(_grid45, 1074, 907, 152, 246)
+                        _new = None
+                        if _c is not None:
+                            _new = _rp.GridPathFinder(_grid45).find_path(
+                                1074, 907, _c[0] * 16 + 8, _c[1] * 16 + 8)
+                        check("真实 map45 现场: 原目标不可达 → 筛选给出'可达的最近格'",
+                              _old is None and _c is not None and _new is not None,
+                              (_old, _c, _new is not None))
+                    else:
+                        check("真实 map45 现场: 链里有 map45 网格", False, "链数据无 map45")
+                else:
+                    check("真实网格抽查: 有 data/chains/zhongkui_nav.json(可选)", True,
+                          "跳过(无链数据)")
+            except Exception as _e2:
+                check("真实网格抽查(可选)未抛异常", False, str(_e2))
+
+    nfail = 0
+    for name, ok, detail in results:
+        if ok:
+            print("[PASS] %s" % name)
+        else:
+            nfail += 1
+            print("[FAIL] %s %s" % (name, ("(%s)" % (detail,)) if detail else ""))
+    print("=== 结果: %s (共 %d 项断言, 失败 %d 项) ===" % (
+        "PASS" if nfail == 0 else "FAIL", len(results), nfail))
+    return 0 if nfail == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
