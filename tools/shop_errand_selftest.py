@@ -54,6 +54,10 @@ check("储备金单价 211/228/80/100", (
 	se.SHOP_ITEMS[101008]["price"], se.SHOP_ITEMS[101009]["price"]) == (211, 228, 80, 100))
 check("13031(无衣, 不卖货) 不在 NPC 表", 13031 not in se.SHOP_NPCS)
 check("NPC 表含真杂货商 13021 + 兜底 13008/13220", all(n in se.SHOP_NPCS for n in (13021, 13008, 13220)))
+check("start: 手动采购对抓鬼号有闸(errand/food 拒绝)", '手动采购仅限空闲号' in open(
+	os.path.join(SCRIPT, "shop_errand.py"), encoding="utf-8").read())
+check("start: 采购前停空闲游荡", "m_collect_walk" in open(
+	os.path.join(SCRIPT, "shop_errand.py"), encoding="utf-8").read())
 check("单次上限 SHOP_MAX_COUNT=500", se.SHOP_MAX_COUNT == 500)
 check("失败通知码含 552/63/1248/1255/1278", all(n in se.SHOP_FAIL_NOTICES for n in (552, 63, 1248, 1255, 1278)))
 
