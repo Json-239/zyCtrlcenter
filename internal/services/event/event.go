@@ -422,6 +422,11 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 					r.Ghost = m
 				}
 			}
+			if v, ok := st["fight_stats"]; ok {
+				if m, ok := v.(map[string]any); ok {
+					r.FightStats = m
+				}
+			}
 			if v, ok := st["ghost_target"]; ok {
 				r.GhostTarget = toIntSlice(v)
 			}

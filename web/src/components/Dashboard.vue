@@ -41,6 +41,19 @@ const curZone = computed(() => state.status.current || {})
 const robots = computed(() => state.status.robots)
 const counts = computed(() => state.status.counts)
 const failed = computed(() => state.status.task_failed || { count: 0, items: [] })
+// 2026-09-23 今日战斗（机器人上报 fight_stats 聚合；跨日由机器人端归零）
+const fightStats = computed(() => {
+  const rs = state.status.robots || []
+  let total = 0, wild = 0, ghost = 0, durMs = 0, inFight = 0
+  for (const r of rs) {
+    const f = r.fight_stats
+    if (!f) continue
+    total += f.total || 0; wild += f.wild || 0; ghost += f.ghost || 0
+    durMs += f.dur_ms || 0
+    if (f.in_fight) inFight += 1
+  }
+  return { total, wild, ghost, inFight, avgSec: total ? durMs / total / 1000 : 0 }
+})
 const exeExists = computed(() => !!state.status.robot_exe_exists)
 const robotRunning = computed(() => !!state.status.robot_running)
 
@@ -643,7 +656,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
 
 <template>
   <!-- 第一行统计卡：信息与原来一致，改成 el-card + 图标 + 大字号数字（数字跳动动画保留） -->
-  <div class="grid cols-4 stat-grid">
+  <div class="grid cols-5 stat-grid">
     <el-card class="stat-card" shadow="never">
       <div class="label"><el-icon><UserFilled /></el-icon>在线 / 机器人（握手口径）</div>
       <div class="value">
@@ -677,6 +690,16 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <div class="label"><el-icon><WarningFilled /></el-icon>需要处理</div>
       <div class="value" :class="{ warnText: failed.count }">{{ failed.count }}</div>
       <div class="sub">{{ failed.count ? '重复出错 ≥ 2 次的账号' : '一切正常' }}</div>
+    </el-card>
+    <!-- 2026-09-23 战斗统计卡（fightStats 聚合：场次/野怪/抓鬼/耗时；数据来自机器人心跳） -->
+    <el-card class="stat-card" shadow="never">
+      <div class="label"><el-icon><Aim /></el-icon>今日战斗</div>
+      <div class="value">
+        {{ fightStats.total }}<span class="unit">场</span>
+        <span class="unit">·</span>
+        <span class="unit">野怪 {{ fightStats.wild }} / 抓鬼 {{ fightStats.ghost }}</span>
+      </div>
+      <div class="sub">平均 {{ fightStats.avgSec.toFixed(1) }} 秒/场 · 战斗中 {{ fightStats.inFight }} 个</div>
     </el-card>
   </div>
 

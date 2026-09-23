@@ -40,6 +40,9 @@ type Robot struct {
 	Fpp           int            `json:"fpp,omitempty"`
 	RoleID        int            `json:"role_id,omitempty"`
 	Ghost         map[string]any `json:"ghost,omitempty"`
+	// FightStats 今日战斗统计（机器人上报：total/wild/ghost/dur_ms/in_fight；上大屏用）。
+	// 与 ghost 同口径：跨日由机器人端按日期归零（stat_begin 的 date 字段）。
+	FightStats map[string]any `json:"fight_stats,omitempty"`
 	GhostTarget   []int          `json:"ghost_target,omitempty"`
 	// Hatch 孵化会话（机器人上报原样透传）：{active,kind,egg_item,mapid,battles,hatched,reason,since_ms}。
 	// 与 ghost 同口径：字段存在但 active=false 不算在孵化。
