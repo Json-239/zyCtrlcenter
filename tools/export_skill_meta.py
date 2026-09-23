@@ -133,6 +133,31 @@ def main():
     lines.append("}")
     lines.append("")
     lines.append("")
+    # 2026-09-23 角色外形表（config/rolemsg.csv）：role_index → 种族/性别
+    #   —— 用户口径"男仙用雷/风、女仙用水/火"（按性别配系别）依赖它。
+    lines.append("# 角色外形表：role_index → 种族(race)/性别(sex)/角色名（来源 config/rolemsg.csv）")
+    lines.append("ROLE_META = {")
+    try:
+        _rl = open(os.path.join(os.path.dirname(SKILL_ROOT), "rolemsg.csv"),
+                   encoding="utf-8", errors="replace").read().splitlines()
+        _race_map = {"人族": "human", "魔族": "demon", "仙族": "immortal", "鬼族": "ghost"}
+        _sex_map = {"男": "male", "女": "female"}
+        for _ln in _rl[4:]:
+            _p = _ln.split(",")
+            if len(_p) > 5 and _p[0].strip().isdigit():
+                lines.append('    %d: {"race": "%s", "sex": "%s", "name": "%s"},' % (
+                    int(_p[0].strip()), _race_map.get(_p[3].strip(), ""),
+                    _sex_map.get(_p[4].strip(), ""), _p[5].strip()))
+    except Exception as _e:
+        print("★rolemsg 解析失败: %s" % _e)
+    lines.append("}")
+    lines.append("")
+    lines.append("")
+    lines.append("def role_of(role_index):")
+    lines.append('\t"""角色外形号 → {race, sex, name}（查不到 → 空 dict）。"""')
+    lines.append("\treturn ROLE_META.get(int(role_index or 0)) or {}")
+    lines.append("")
+    lines.append("")
     lines.append("def race_of(skill_index):")
     lines.append('\t"""技能所属种族（无此技能 → \"\"）。"""')
     lines.append("\tm = SKILL_META.get(int(skill_index or 0))")
