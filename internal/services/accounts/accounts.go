@@ -14,6 +14,7 @@ package accounts
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -126,6 +127,9 @@ type Pool struct {
 	dirty bool
 	// batch 正在"批量写窗口"里（Update 内）：窗口内一律不重载
 	batch bool
+	// rnd 选号平局用的随机源（2026-09-23 选号轮换）：同一 last_online 的号靠它打散顺序，
+	// 避免"每次补号都从同一小批里挑"。nil = 用 math/rand；测试用 SetRand 注入固定序列。
+	rnd func(int) int
 }
 
 // New 创建账号池（path 通常为 <数据目录>/accounts.json）。
@@ -135,6 +139,13 @@ func New(path string) *Pool {
 
 // Path 池文件路径。
 func (p *Pool) Path() string { return p.path }
+
+// SetRand 注入选号平局用的随机源（测试固定随机用；nil = 恢复默认 math/rand）。
+func (p *Pool) SetRand(fn func(int) int) {
+	p.mu.Lock()
+	p.rnd = fn
+	p.mu.Unlock()
+}
 
 // Load 读取池文件（不存在视为空池，不报错）。
 func (p *Pool) Load() error {
@@ -442,11 +453,19 @@ func (p *Pool) Stats(zone string) map[string]int {
 
 // Pick 选号：从池里挑 limit 个（可按区可用过滤），用于批量上线。
 // exclude 里的账号会被跳过（例如已经在线/已选过的）。
+//
+// 排序口径（2026-09-23 选号轮换；旧实现是"按账号名升序取前 N"—— 会让名字最前的那批号被
+// 反复选中，新手号/号段靠后的号永远轮不到）：
+//  1. 从没上过线（LastOnline<=0）排最前；
+//  2. 其余按 LastOnline 升序（最久没上的优先）；
+//  3. 同值用随机源打破平局（先整体洗牌再稳定排序 → 平局组内顺序随机）。
+//
+// LastOnline 的维护见 TouchOnline（上线下发成功后回写；不更新会退化成"固定一批号"）。
 func (p *Pool) Pick(zone string, limit int, onlyUsable bool, exclude map[string]bool) []string {
 	p.refresh()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	names := make([]string, 0, len(p.accounts))
+	cands := make([]*Account, 0, len(p.accounts))
 	for _, a := range p.accounts {
 		if exclude[a.Name] {
 			continue
@@ -454,13 +473,89 @@ func (p *Pool) Pick(zone string, limit int, onlyUsable bool, exclude map[string]
 		if onlyUsable && !a.UsableIn(zone) {
 			continue
 		}
-		names = append(names, a.Name)
+		cands = append(cands, a)
 	}
-	sort.Strings(names)
-	if limit > 0 && len(names) > limit {
-		names = names[:limit]
+	shuffleAccounts(cands, p.rndOr())
+	sort.SliceStable(cands, func(i, j int) bool {
+		return onlineLess(cands[i].LastOnline, cands[j].LastOnline)
+	})
+	if limit > 0 && len(cands) > limit {
+		cands = cands[:limit]
 	}
-	return names
+	out := make([]string, 0, len(cands))
+	for _, a := range cands {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+// TouchOnline 记"这些号刚被下发上线"（LastOnline=ts，unix 秒；只往大改，防时钟回拨）——
+// 供选号轮换按"最久未上线优先"挑号（见 Pick）。池里没有的号跳过（保持"池 = 导入/显式添加"的
+// 口径）；整批一次落盘（不按号逐个写盘）。
+//
+// 2026-09-23 补的**唯一运行期写入点**：此前 last_online 只由 tools/import_accounts.py 在导入时
+// 拷贝一次（源库那侧最后一次批量更新停在 2026-09-10/11），运行期没有任何写入 —— 不补的话
+// "最久未上线优先"会退化成静态顺序（同一批号被反复拉起、压下去又被立刻补回来）。
+func (p *Pool) TouchOnline(names []string, ts int64) int {
+	if ts <= 0 || len(names) == 0 {
+		return 0
+	}
+	p.refresh()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, name := range names {
+		a, ok := p.accounts[name]
+		if !ok {
+			continue
+		}
+		if a.LastOnline < ts {
+			a.LastOnline = ts
+		}
+		n++
+	}
+	if n > 0 {
+		p.dirty = true
+		_ = p.saveLocked()
+	}
+	return n
+}
+
+// ---------------------------------------------------------------- 选号轮换小工具
+
+// onlineLess 选号排序：从没上过线（<=0）最前；其余按 last_online 升序（最久没上的优先）。
+func onlineLess(a, b int64) bool {
+	if a <= 0 || b <= 0 {
+		return a <= 0 && b > 0
+	}
+	return a < b
+}
+
+// rndOr 当前随机源（未注入时用 math/rand；并发安全，全局源自带锁）。
+func (p *Pool) rndOr() func(int) int {
+	if p.rnd != nil {
+		return p.rnd
+	}
+	return func(n int) int {
+		if n <= 0 {
+			return 0
+		}
+		return rand.Intn(n)
+	}
+}
+
+// shuffleAccounts 原地 Fisher-Yates（rnd=nil 时不动：保持输入顺序的确定性）。
+func shuffleAccounts(accs []*Account, rnd func(int) int) {
+	if rnd == nil {
+		return
+	}
+	for i := len(accs) - 1; i > 0; i-- {
+		j := rnd(i + 1)
+		if j < 0 || j > i {
+			j = i // 防呆：随机源给了越界值也不出错
+		}
+		accs[i], accs[j] = accs[j], accs[i]
+	}
 }
 
 // SelectForVerify 选出一批**待验证**账号（账号名升序；exclude 里的跳过，例如"正在线跑着"的号）。

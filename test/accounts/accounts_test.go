@@ -98,6 +98,107 @@ func TestPickForBatchOnline(t *testing.T) {
 	}
 }
 
+// 2026-09-23 选号轮换（反例钉死旧行为）：旧实现"按账号名升序取前 N" → 名字最靠前的
+// robot0001000 永远先被挑走（现场：上线/补号长期集中在号段开头那批）。
+// 新口径 = **从没上过线最前 + 最久未上线优先 + 同值随机平局**。
+func TestPickPrefersLongestOffline(t *testing.T) {
+	pool := testsupport.NewTestAccounts(t)
+	// 0001000：名字最前但"刚上过线"；0001002：名字靠后但"很久没上" —— 都可用
+	pool.SetFields("robot0001000@xy3.com", func(a *accounts.Account) { a.LastOnline = 5000 })
+	pool.SetFields("robot0001002@xy3.com", func(a *accounts.Account) { a.LastOnline = 100 })
+
+	got := pool.Pick(zone, 1, true, nil)
+	if len(got) != 1 || got[0] != "robot0001002@xy3.com" {
+		t.Fatalf("应挑最久未上线的号（旧实现会挑名字最前的 0001000）: %v", got)
+	}
+
+	// 新增一个"从没上过线"的可用号（last_online=0）→ 必须排在最久未上线号之前
+	pool.Add([]string{"robot0009999@xy3.com"}, "pw9999", zone, "")
+	pool.SetZoneState("robot0009999@xy3.com", zone, accounts.ZoneState{Verified: true, Usable: true, Msg: "登录成功"})
+	if got := pool.Pick(zone, 1, true, nil); len(got) != 1 || got[0] != "robot0009999@xy3.com" {
+		t.Fatalf("从没上过线的号应排最前: %v", got)
+	}
+	if got := pool.Pick(zone, 2, true, nil); len(got) != 2 ||
+		got[0] != "robot0009999@xy3.com" || got[1] != "robot0001002@xy3.com" {
+		t.Fatalf("顺序应为「从未上线 → 最久未上线」: %v", got)
+	}
+}
+
+// 同 last_online 用注入的随机源打破平局：不同序列给出不同顺序；更旧的号永远优先（平局随机
+// 不会越过"最久未上线优先"的边界）。
+func TestPickTieBreakUsesInjectedRand(t *testing.T) {
+	pool := testsupport.NewTestAccounts(t)
+	pool.SetFields("robot0001000@xy3.com", func(a *accounts.Account) { a.LastOnline = 900 })
+	pool.SetFields("robot0001002@xy3.com", func(a *accounts.Account) { a.LastOnline = 900 })
+
+	pool.SetRand(func(n int) int { return n - 1 }) // 原地不换 = 保持池内顺序
+	a := pool.Pick(zone, 1, true, nil)
+	pool.SetRand(func(n int) int { return 0 }) // 每步与 0 交换 = 反序
+	b := pool.Pick(zone, 1, true, nil)
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("平局组里应各挑 1 个: a=%v b=%v", a, b)
+	}
+	if a[0] == b[0] {
+		t.Fatalf("不同随机源应给出不同的平局顺序: a=%v b=%v", a, b)
+	}
+	for _, n := range []string{a[0], b[0]} {
+		if n != "robot0001000@xy3.com" && n != "robot0001002@xy3.com" {
+			t.Fatalf("挑出的号必须来自候选: a=%v b=%v", a, b)
+		}
+	}
+
+	// 把 0001000 调得更旧 → 不再平局：无论随机序列怎么给，都必须先挑它
+	pool.SetFields("robot0001000@xy3.com", func(x *accounts.Account) { x.LastOnline = 1 })
+	for _, rnd := range []func(int) int{
+		func(int) int { return 0 },
+		func(n int) int { return n - 1 },
+	} {
+		pool.SetRand(rnd)
+		if got := pool.Pick(zone, 1, true, nil); len(got) != 1 || got[0] != "robot0001000@xy3.com" {
+			t.Fatalf("更旧的号必须优先（随机不越过该边界）: %v", got)
+		}
+	}
+}
+
+// TouchOnline = 运行期唯一会写 last_online 的入口（上线下发成功后回写；旧代码没有写入点，
+// 导致"最久未上线优先"会退化成静态顺序）。用例覆盖：跳过池外号、只往大改、落盘可恢复、
+// 且与 Pick 联动（刚记过的号排到后面）。
+func TestTouchOnlineStampsLastOnline(t *testing.T) {
+	pool, path := testsupport.NewTestAccountsWithPath(t)
+
+	if n := pool.TouchOnline([]string{"robot0001000@xy3.com", "robot0001002@xy3.com",
+		"robot9999999@xy3.com"}, 424242); n != 2 {
+		t.Fatalf("池外号应跳过（只记 2 个），实际 %d", n)
+	}
+	for _, name := range []string{"robot0001000@xy3.com", "robot0001002@xy3.com"} {
+		acc, _ := pool.Get(name)
+		if acc.LastOnline != 424242 {
+			t.Fatalf("%s 的 last_online 应记为 424242: %d", name, acc.LastOnline)
+		}
+	}
+	// 只往大改（防时钟回拨把"最近上过线"抹掉）
+	pool.TouchOnline([]string{"robot0001000@xy3.com"}, 100)
+	if acc, _ := pool.Get("robot0001000@xy3.com"); acc.LastOnline != 424242 {
+		t.Fatalf("更小的时间戳不该覆盖（单调）: %d", acc.LastOnline)
+	}
+
+	// 已落盘：重新打开池仍能看到（轮换记账跨重启保留）
+	pool2 := accounts.New(path)
+	if err := pool2.Load(); err != nil {
+		t.Fatalf("重开池失败: %v", err)
+	}
+	if acc, _ := pool2.Get("robot0001000@xy3.com"); acc.LastOnline != 424242 {
+		t.Fatalf("TouchOnline 应落盘（重载后仍是 424242）: %d", acc.LastOnline)
+	}
+
+	// 与 Pick 联动：加一个从没上过线的新号 → 它排最前（刚记过的两个号排后面）
+	pool2.Add([]string{"robot0009999@xy3.com"}, "pw9999", zone, "")
+	pool2.SetZoneState("robot0009999@xy3.com", zone, accounts.ZoneState{Verified: true, Usable: true})
+	if got := pool2.Pick(zone, 1, true, nil); len(got) != 1 || got[0] != "robot0009999@xy3.com" {
+		t.Fatalf("刚被 TouchOnline 记过的号应排到后面: %v", got)
+	}
+}
+
 func TestAddRemoveAndZoneState(t *testing.T) {
 	pool := testsupport.NewTestAccounts(t)
 

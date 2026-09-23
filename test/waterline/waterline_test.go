@@ -135,6 +135,28 @@ func cand(acc string) waterline.Candidate {
 	return waterline.Candidate{Account: acc, Usable: true}
 }
 
+// candAt 一个可用候选（带最近上线时间；0 = 从未上线）。
+func candAt(acc string, lastOnline int64) waterline.Candidate {
+	return waterline.Candidate{Account: acc, Usable: true, LastOnline: lastOnline}
+}
+
+// sameSet got 与 want 是否为同一集合（轮换用例只关心"挑到谁"，平局顺序另有断言）。
+func sameSet(got []string, want ...string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	m := make(map[string]bool, len(got))
+	for _, g := range got {
+		m[g] = true
+	}
+	for _, w := range want {
+		if !m[w] {
+			return false
+		}
+	}
+	return true
+}
+
 // ---------------------------------------------------------------- ComputeAdjust
 
 func TestComputeAdjustDeadZone(t *testing.T) {
@@ -329,16 +351,74 @@ func TestPickOnlineCandidatesFilters(t *testing.T) {
 		cand("g-usable"),
 		{Account: "", Usable: true},
 	}
-	got := waterline.PickOnlineCandidates(pool, 2)
+	// 全部候选 LastOnline=0（从未上线）→ 同一平局组；rnd=nil 不洗牌 → 保持输入顺序
+	got := waterline.PickOnlineCandidates(pool, 2, nil)
 	if len(got) != 2 || got[0] != "b-usable" || got[1] != "f-usable" {
-		t.Fatalf("应按账号升序取前 2 个可用候选: %v", got)
+		t.Fatalf("不可用候选过滤后取前 2 个（rnd=nil 保持输入顺序）: %v", got)
 	}
-	all := waterline.PickOnlineCandidates(pool, 10)
+	all := waterline.PickOnlineCandidates(pool, 10, nil)
 	if len(all) != 3 || all[0] != "b-usable" || all[1] != "f-usable" || all[2] != "g-usable" {
 		t.Fatalf("不可用/已移除/已在线/在忙的号都不能拉: %v", all)
 	}
-	if n := waterline.PickOnlineCandidates(pool, 0); n != nil {
+	if n := waterline.PickOnlineCandidates(pool, 0, nil); n != nil {
 		t.Fatalf("n<=0 应返回空: %v", n)
+	}
+}
+
+// 2026-09-23 选号轮换（反例钉死旧行为）：旧实现"按账号名升序取前 N"会挑 a/b/c 这批名字最靠前
+// 的号 → 补号永远集中在号段开头。新口径 = **从没上过线最前 + 最久未上线优先** → 只该挑 d/e/f。
+func TestPickOnlineCandidatesPrefersLongestOffline(t *testing.T) {
+	pool := []waterline.Candidate{
+		candAt("a-recent", 3000),
+		candAt("b-recent", 3000),
+		candAt("c-recent", 3000),
+		candAt("d-stale", 100),
+		candAt("e-never", 0), // 从未上线：排最前
+		candAt("f-stale", 200),
+	}
+	got := waterline.PickOnlineCandidates(pool, 3, nil)
+	if len(got) != 3 || got[0] != "e-never" || got[1] != "d-stale" || got[2] != "f-stale" {
+		t.Fatalf("应「从未上线最前 + 最久未上线优先」（旧实现会挑 a/b/c）: %v", got)
+	}
+	// 取 4 个：前 3 名不变，第 4 个才轮到最新组（三号 last_online 相同 → 平局）
+	got4 := waterline.PickOnlineCandidates(pool, 4, nil)
+	if len(got4) != 4 || got4[0] != "e-never" || got4[1] != "d-stale" || got4[2] != "f-stale" {
+		t.Fatalf("前 3 名固定（旧号必在新号之前）: %v", got4)
+	}
+	if got4[3] != "a-recent" && got4[3] != "b-recent" && got4[3] != "c-recent" {
+		t.Fatalf("第 4 个应来自最新的并列组: %v", got4)
+	}
+}
+
+// 同 last_online 用注入的随机源打破平局：不同序列给出不同顺序，且都在合法集合内；
+// 平局随机不会越过"更旧优先"的边界（更旧的号一定排在平局组之前）。
+func TestPickOnlineCandidatesTieBreakUsesRand(t *testing.T) {
+	pool := []waterline.Candidate{
+		candAt("t1", 100), candAt("t2", 100), candAt("t3", 100), candAt("t4", 100),
+	}
+	rndA := func(n int) int { return 0 }     // 每步与 0 交换（确定的"另一种顺序"）
+	rndB := func(n int) int { return n - 1 } // 原地不换（等于输入顺序）
+	gotA := waterline.PickOnlineCandidates(pool, 2, rndA)
+	gotB := waterline.PickOnlineCandidates(pool, 2, rndB)
+	if len(gotA) != 2 || len(gotB) != 2 {
+		t.Fatalf("平局组里应各挑 2 个: A=%v B=%v", gotA, gotB)
+	}
+	for _, g := range append(append([]string{}, gotA...), gotB...) {
+		if g != "t1" && g != "t2" && g != "t3" && g != "t4" {
+			t.Fatalf("挑出的号必须都来自候选池: A=%v B=%v", gotA, gotB)
+		}
+	}
+	if gotA[0] == gotB[0] && gotA[1] == gotB[1] {
+		t.Fatalf("不同随机源应给出不同的平局顺序: A=%v B=%v", gotA, gotB)
+	}
+
+	pool2 := []waterline.Candidate{
+		candAt("old1", 50), candAt("old2", 50),
+		candAt("new1", 900), candAt("new2", 900),
+	}
+	got2 := waterline.PickOnlineCandidates(pool2, 2, rndA)
+	if !sameSet(got2, "old1", "old2") {
+		t.Fatalf("只该从最旧的并列组里挑（随机不越过更旧优先）: %v", got2)
 	}
 }
 
@@ -350,7 +430,7 @@ func TestPickSkipsPaused(t *testing.T) {
 		{Account: "b-paused", Usable: true, Paused: true},
 		{Account: "c-ok", Usable: true},
 	}
-	got := waterline.PickOnlineCandidates(pool, 10)
+	got := waterline.PickOnlineCandidates(pool, 10, nil)
 	if len(got) != 2 || got[0] != "a-ok" || got[1] != "c-ok" {
 		t.Fatalf("暂停号不能被自动拉起（补号候选应排除）: %v", got)
 	}
@@ -437,7 +517,9 @@ func TestTickTopUpWhenBelowTarget(t *testing.T) {
 	dir := t.TempDir()
 	f := newFake()
 	f.local = 3
-	f.cands = []waterline.Candidate{cand("a1"), cand("a2"), cand("a3"), cand("a4"), cand("a5"), cand("a6")}
+	// 六个候选的 last_online 递增：最久的 a1 先上（2026-09-23 选号轮换口径）
+	f.cands = []waterline.Candidate{candAt("a1", 1000), candAt("a2", 2000), candAt("a3", 3000),
+		candAt("a4", 4000), candAt("a5", 5000), candAt("a6", 6000)}
 	k := waterline.New(filepath.Join(dir, "waterline.json"), f.deps())
 	cfg := waterline.DefaultConfig() // target 100、死区 3、单轮 5
 	cfg.Enabled = true
@@ -453,7 +535,7 @@ func TestTickTopUpWhenBelowTarget(t *testing.T) {
 		t.Fatalf("一轮只补一次: %v", f.onlineCalls)
 	}
 	if got := f.onlineCalls[0]; len(got) != 5 || got[0] != "a1" || got[4] != "a5" {
-		t.Fatalf("每轮最多补 maxStep=5（按账号升序取）: %v", got)
+		t.Fatalf("每轮最多补 maxStep=5（最久未上线优先，a1 最旧）: %v", got)
 	}
 	if st := k.Status(); len(st.InFlight) != 5 {
 		t.Fatalf("补的号要记在途（防下一轮重复补）: %+v", st.InFlight)

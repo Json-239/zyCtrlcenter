@@ -4,7 +4,7 @@
 - 模块：`internal/services/waterline/waterline.go`
 - 关键函数：
   - 纯函数（可直接单测）：`ComputeAdjust`（死区/限幅）、`PickOffline`（空闲优先 / 忙号进待下线）、
-    `PickOnlineCandidates`（可用性过滤）、`Busy`（不硬断判据）
+    `PickOnlineCandidates`（可用性过滤 + 最久未上线优先轮换）、`Busy`（不硬断判据）
   - 决策与状态：`Keeper.Tick`（一轮：取数 → 算调整 → 执行）、`Keeper.Status`、`Keeper.SetConfig` / `Load`
 - 壳层（不在本模块用例范围）：`internal/api/waterline.go`（取数/候选/上下线，复用批量上下线通路）
 
@@ -22,6 +22,9 @@
   2026-09-23 起 `Busy`（"不该被自动打扰"判据）与前端地图页 26f4660 同口径：SUBMIT（交付中）=
   推进中、ERROR（卡住/停链）= 异常 —— 两者都不算空闲（不硬压、不派活；ERROR 的号进待下线后
   要等它自愈回正常态才按常规处理）。
+- 2026-09-23 起补号选号 = **最久未上线优先**（`Candidate.LastOnline`；0 = 从未上线排最前），
+  同值用 `Deps.Rand` 打破平局 —— 旧口径"按账号名升序取前 N"会让名字最前的号固化在线。
+  `rnd=nil` 时不做平局洗牌（保持输入顺序，便于确定性单测）。
 - 假 `Offline` 会像真实壳层一样把号标记为离线（壳层会 `MarkRemoved` + 删行），
   假 `Online` **不**立刻上线（真实要等机器人登录上报）——在途记账正是靠这个差异验证。
 
@@ -40,10 +43,12 @@
 | `TestPickOfflineWithoutIdlePreference` | preferIdle=false（随机补选路径） | 按输入顺序取，但忙号仍只进 pending |
 | `TestPickOfflineSubmitAndErrorGoPending` | SUBMIT（交付中）/ ERROR（卡住）与空闲号混排 | 只有空闲号进 now；SUBMIT/ERROR 只进 pending（不硬压） |
 | `TestBusyJudgement` | 空闲 / 抓鬼会话 / 战斗 / DIALOG / WAIT_TASK(有/无任务) / 游荡 / SUBMIT / ERROR / WAIT_GHOST(有无会话) | 只有真在干活或异常的算忙；等待段（WAIT_GHOST 无会话）不算忙 |
-| `TestPickOnlineCandidatesFilters` | 池里有不可用/已移除/已在线/在忙/空账号 | 只回可用离线号，按账号升序、受 n 限幅 |
+| `TestPickOnlineCandidatesFilters` | 池里有不可用/已移除/已在线/在忙/空账号 | 只回可用离线号、受 n 限幅（全为"从未上线"→ 平局；rnd=nil 保输入顺序） |
+| `TestPickOnlineCandidatesPrefersLongestOffline` | 名字在最前但 last_online 很新 vs 名字靠后但很旧/从未上线 | 只挑最旧/从未上线的那批（**反例钉死旧行为**：旧实现会挑名字最前的） |
+| `TestPickOnlineCandidatesTieBreakUsesRand` | 同 last_online 的并列组 + 不同随机源 | 不同序列给出不同平局顺序、都来自候选池；更旧的号永远优先（随机不越界） |
 | `TestTickDisabledDoesNothing` | enabled=false 且差得很远 | 一次动作都不发 |
 | `TestTickSourceSvrThenLocalFallback` | 读数新鲜 / 过期 600s / 完全没有 | svr+fresh / local+不新鲜（svr 值仍展示）/ local+age=-1 |
-| `TestTickTopUpWhenBelowTarget` | 缺 97 人 | 每轮补 5 个（升序取）；在途未落地不重复补；落地后只补未安排的号 |
+| `TestTickTopUpWhenBelowTarget` | 缺 97 人 | 每轮补 5 个（最久未上线优先）；在途未落地不重复补；落地后只补未安排的号 |
 | `TestTickDeadZoneNoAction` | 差 2（< 死区 3） | 不动作，差值如实展示 |
 | `TestTickOfflineIdleNowBusyPendingThenRelease` | 超目标 400，4 空闲 + 1 抓鬼 | 空闲立刻断（4 个，绝不含抓鬼号）；抓鬼号进待下线；下一轮它收工后被断；无号可断时安静 |
 | `TestTickSurplusRevokesPendingWhenBackInDeadZone` | 先超目标（标待下线）→ 读数回到目标附近 | 撤销待下线、不再多断号 |
@@ -57,5 +62,7 @@
 - 不测真实上下线（`robot_manage add/remove` 的实际下发由 `test/api` 覆盖）；本模块只验证"该不该发、发给谁"。
 - 不测 `Keeper.Start` 的 ticker 循环本身（`interval_sec` 生效路径）；轮询逻辑薄，行为等价于按间隔调 `Tick`。
 - 随机补选只验证"顺序被打乱后仍按序取用"的结构，不验证随机分布（注入固定随机源保证可复现）。
+- 选号轮换的"平局随机"同样只验证结构（不同随机源给出不同顺序、且不越过"最久未上线优先"的边界），
+  不验证分布均匀性。
 - 壳层的候选摊平（账号池 + 运行时状态合并）未覆盖：它复用 `accounts.Pool.List` 与 `state.Snapshot`，由
   `test/api`、`test/accounts` 间接覆盖。

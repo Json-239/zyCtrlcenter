@@ -444,6 +444,12 @@ func (a *API) sendOnlineChunks(accounts []string, gameAddr string, chunk, interv
 			time.Sleep(time.Duration(interval) * time.Millisecond)
 		}
 	}
+	// 2026-09-23 选号轮换：把"刚下发上线"记进账号池的 last_online（三个入口共用本通路：
+	// 批量上线 / 定时任务 / 水位补号）——选号（accounts.Pick / waterline 补号）按
+	// "最久未上线优先"挑号，靠这里把刚用过的号排到后面，轮换才会真正轮起来。
+	if len(sent) > 0 && a.Accounts != nil {
+		a.Accounts.TouchOnline(sent, time.Now().Unix())
+	}
 	return sent, chunks, noPwd
 }
 

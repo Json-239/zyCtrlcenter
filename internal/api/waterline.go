@@ -141,6 +141,8 @@ func (a *API) waterlineCandidates() []waterline.Candidate {
 			// 2026-09-23 R3：人工暂停的号不自动拉起（也不自动压号，见 waterline.PickOffline）。
 			Paused: a.St != nil && a.St.IsPaused(acc),
 			Level:  level, ChainDone: chainDone,
+			// 2026-09-23 选号轮换：带上"最近一次上线时间"（补号按最久未上线优先挑）。
+			LastOnline: pa.LastOnline,
 		})
 	}
 	return out

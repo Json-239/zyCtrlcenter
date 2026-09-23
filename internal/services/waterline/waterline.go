@@ -154,6 +154,10 @@ type Candidate struct {
 	Paused    bool // 人工暂停（R3，面板点过「停止」）→ 不自动拉起
 	Level     int
 	ChainDone bool
+	// LastOnline 最近一次上线的 unix 秒（0 = 从未上线）——2026-09-23 选号轮换用：
+	// 补号按"最久未上线优先"挑（旧口径"按账号名升序"会让名字最前的号固化在线）。
+	// 壳层从账号库取（见 api.waterlineCandidates）；运行期由 accounts.TouchOnline 回写。
+	LastOnline int64
 }
 
 // Deps 依赖（壳层提供真实世界；测试注入假的）。
@@ -412,27 +416,62 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 	return now, pending
 }
 
-// PickOnlineCandidates 从号池候选里挑 n 个可上线的（按账号升序，结果稳定）。
+// PickOnlineCandidates 从号池候选里挑 n 个可上线的（**最久未上线优先**，同值随机平局）。
+//
+// 排序口径（2026-09-23 选号轮换；旧实现是"按账号名升序取前 N" —— 补号永远从 robot0001000…
+// 那批开始，号段靠后的号/新手号轮不到）：
+//  1. 从没上过线（LastOnline<=0）排最前；
+//  2. 其余按 LastOnline 升序（最久没上的优先）；
+//  3. 同值用 rnd 打破平局（rnd=nil 时不洗牌、保持输入顺序 —— 便于确定性的单测）。
 //
 // 过滤口径：该区不可用的不拉、被标记移除的不拉（自己压下去的号由壳层豁免）、
 // 已在线的不拉（重复 add 没意义）、在忙的不拉（它已经在线了，正常不会出现在池里）、
 // **人工暂停的不拉**（R3：用户点过「停止」，自动编排不打扰）。
-func PickOnlineCandidates(pool []Candidate, n int) []string {
+func PickOnlineCandidates(pool []Candidate, n int, rnd func(int) int) []string {
 	if n <= 0 {
 		return nil
 	}
-	names := make([]string, 0, len(pool))
+	cands := make([]Candidate, 0, len(pool))
 	for _, c := range pool {
 		if c.Account == "" || !c.Usable || c.Removed || c.Online || c.Busy || c.Paused {
 			continue
 		}
+		cands = append(cands, c)
+	}
+	shuffleCandidates(cands, rnd) // 先洗牌：同值经稳定排序后保留随机序（平局随机）
+	sort.SliceStable(cands, func(i, j int) bool {
+		return onlineLess(cands[i].LastOnline, cands[j].LastOnline)
+	})
+	if len(cands) > n {
+		cands = cands[:n]
+	}
+	names := make([]string, 0, len(cands))
+	for _, c := range cands {
 		names = append(names, c.Account)
 	}
-	sort.Strings(names)
-	if len(names) > n {
-		names = names[:n]
-	}
 	return names
+}
+
+// onlineLess 选号排序：从没上过线（<=0）最前；其余按 last_online 升序（最久没上的优先）。
+func onlineLess(a, b int64) bool {
+	if a <= 0 || b <= 0 {
+		return a <= 0 && b > 0
+	}
+	return a < b
+}
+
+// shuffleCandidates 原地 Fisher-Yates（rnd=nil 时不动：保持输入顺序的确定性）。
+func shuffleCandidates(cands []Candidate, rnd func(int) int) {
+	if rnd == nil {
+		return
+	}
+	for i := len(cands) - 1; i > 0; i-- {
+		j := rnd(i + 1)
+		if j < 0 || j > i {
+			j = i // 防呆：随机源给了越界值也不出错
+		}
+		cands[i], cands[j] = cands[j], cands[i]
+	}
 }
 
 // Busy 该号是否"不该被自动打扰"（不硬断、不拉起、不派游荡的统一判据；与 api.isTasking /
@@ -727,7 +766,7 @@ func (k *Keeper) doOnline(want int, now time.Time) ([]string, error) {
 		}
 		avail = append(avail, c)
 	}
-	picked := PickOnlineCandidates(avail, want)
+	picked := PickOnlineCandidates(avail, want, k.d.Rand)
 	if len(picked) == 0 {
 		return nil, errors.New("号池里没有可上线的号（都不可用/已在线/已被移除）")
 	}

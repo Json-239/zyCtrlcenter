@@ -2,7 +2,7 @@
 
 ## 被测对象
 - 模块：`internal/services/accounts/accounts.go`（账号池）
-- 关键函数：`Load` / `List` / `Stats` / `Pick` / `Add` / `Remove` / `SetZoneState` / `Password` / `Meta`
+- 关键函数：`Load` / `List` / `Stats` / `Pick` / `TouchOnline` / `SetRand` / `Add` / `Remove` / `SetZoneState` / `Password` / `Meta`
 - 业务说明：[docs/05-运维/账号池.md](../../docs/05-运维/账号池.md)
 
 ## 测试文件
@@ -13,6 +13,9 @@
 ## 前置条件
 - 夹具：`test/fixtures/accounts/accounts.sample.json`（**真实账号库裁剪**：3 个号 + 其在 `47.96.8.240:2300` 的 usable/verified 状态）。
 - 全部落 `t.TempDir()`；不联网、不碰真实 `data/`。
+- 2026-09-23 起 `Pick` 选号口径 = **从没上过线最前 + 最久未上线优先（`LastOnline` 升序）+ 同值随机平局**；
+  `SetRand` 注入平局随机源（nil = math/rand）。运行期唯一写 `LastOnline` 的入口是 `TouchOnline`
+  （批量/定时/水位上线下发成功后回写；本仓库三个上线入口共用 `sendOnlineChunks`）。
 
 ## 运行方式
 - 单项：`go test ./test/accounts/ -run TestPickForBatchOnline -v`
@@ -24,6 +27,9 @@
 | `TestLoadAndQueryFromRealFixture` | 加载真实裁剪池 | 3 个号、字段与区状态（usable/verified/msg）正确；Meta 有来源与数量 |
 | `TestFilterAndStats` | 过滤/分页/统计 | 按区可用过滤（2 个）、按角色名关键词命中、limit/offset 生效；统计含 assigned/usable/chain_done |
 | `TestPickForBatchOnline` | 选号 | 只选可用号；可排除已在线；limit 生效；不过滤可用性时全选 |
+| `TestPickPrefersLongestOffline` | 选号轮换（**反例钉死旧行为**） | 名字最前但 last_online 很新 vs 名字靠后但很旧 → 挑最旧的；从没上过线（0）排最前 |
+| `TestPickTieBreakUsesInjectedRand` | 同 last_online 的平局组 + `SetRand` 注入 | 不同随机源给出不同平局顺序；更旧的号永远优先（随机不越界） |
+| `TestTouchOnlineStampsLastOnline` | 运行期写入点（上线下发成功后回写） | 跳过池外号、只往大改、落盘可恢复；与 `Pick` 联动（刚记过的号排后面） |
 | `TestAddRemoveAndZoneState` | 增删与区状态 | 新增标记 added/existed；写入区状态后 `UsableIn` 为真；删除计数正确 |
 | `TestHotReloadAfterReimport` | 外部重新导入（覆盖池文件） | 查询时自动热更新（数量与新号可见），**无需重启** |
 | `TestPasswordFallback` | 取密码 | 池内有密码用它；不在池里回退默认密码 |
