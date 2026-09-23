@@ -117,29 +117,41 @@ def main():
     check("原 NO_LEGAL_ROUTE 报错路径保留(找不到才走原路径)",
           '地图 %d 无可行路径 (%d,%d)→(%d,%d), 取消行走' in qe)
 
-    # 结构: 连通筛选必须是"就近可走格校正"的**独立一层**(与 >8 门槛同级) —— 否则
-    #   "目标格可走但不可达"(现场 map45 (1074,907)→(152,246)、map24 钟馗
-    #   (4712,2776)→(1672,1080)) 这类连门槛都进不去, 筛选形同虚设。
+    # 结构: 连通筛选必须在**真正的"path is None 总兜底位"** —— 即与 `if _near is not None:`
+    #   同级（2026-09-23h 提升）。否则:
+    #   ① 目标格可走但不可达(map45/map24 钟馗) → 旧放置连门槛都进不去;
+    #   ② 目标在**厚阻挡区**(8 格半径内无可走格 → _near=None, 现场 map654 钟馗走位点)
+    #      → 嵌在 if _near 内会整个跳过, 一直刷"无可行路径"。
     def _indent(s):
         return len(s) - len(s.lstrip("\t"))
 
     _abs_line = None
+    _near_line = None
     _guard_line = None
-    for _ln in qe.splitlines():
+    _lines = qe.splitlines()
+    for _i, _ln in enumerate(_lines):
         if _abs_line is None and "if abs(_nx - to_x) + abs(_ny - to_y) > 8:" in _ln:
             _abs_line = _ln
+        # 只看 __do_walk 无解分支里紧跟 `nearest_walkable(_g2, ...)` 的那个 _near 判定
+        #   (force_walk 小步分支里有同名的 _near, 缩进更深, 别抓错; 提升后 _near 判定与
+        #    它的赋值之间隔着 _nx/_ny/path2 的 None 初始化, 所以往后看 4 行)
+        if _near_line is None and "nearest_walkable(_g2, to_x, to_y)" in _ln:
+            for _ln2 in _lines[_i + 1:_i + 5]:
+                if _ln2.strip() == "if _near is not None:":
+                    _near_line = _ln2
+                    break
         if _guard_line is None and _ln.strip().startswith("if path2 is None"):
             _guard_line = _ln
-    check("连通筛选是独立一层(与 >8 门槛同级, 目标格可走也能进)",
-          _abs_line is not None and _guard_line is not None
-          and _indent(_abs_line) == _indent(_guard_line),
-          (_abs_line, _guard_line))
+    check("连通筛选在总兜底位(与 if _near is not None 同级, 厚阻挡区也能进)",
+          _near_line is not None and _guard_line is not None
+          and _indent(_near_line) == _indent(_guard_line),
+          (_near_line, _guard_line))
     check("连通筛选只在非任务链启用(quest.active=False; 游荡/抓鬼/商店)",
           'if path2 is None and not bool(getattr(quest, "active", False)):' in qe)
     check("链任务失败语义保留(active=True → 原 NO_LEGAL_ROUTE 停链报错)",
           "if quest.active:" in qe and "quest.set_state(quest_state.ST_ERROR)" in qe)
-    check("path2 进入门槛前先置 None(门槛不进入时不 NameError)",
-          "\t\t\t\t\tpath2 = None" in qe)
+    check("path2/_nx/_ny 先置 None(总兜底不依赖 _near 是否存在)",
+          "\t\t\t\t_nx, _ny = None, None" in qe and "\t\t\t\tpath2 = None" in qe)
 
     # ============================================================ B. 执行(真实 robot_path)
     try:
