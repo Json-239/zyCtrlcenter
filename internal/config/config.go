@@ -125,7 +125,9 @@ type Config struct {
 
 	// RoamExcludeMaps 游荡排除图（2026-09-22 用户口径）：幽冥界 24 是抓鬼专属（钟馗所在图），
 	// 游荡一律不去 —— 显式选图会被拒绝；随机图/显式 maps 白名单里的该图也会被剔除。
-	// 环境变量 CTRL_ROAM_EXCLUDE_MAPS="24" 可覆盖（留空 = 不排除）。
+	// 2026-09-23 追加牢房 653/654/655（天牢/地牢/水牢）：654/655 有寻路网格，会被随机游荡
+	// 抽中（现场 robot0001108/1176 被抽进地牢出不来）；出口边由链数据补（牢头 npc_jumper）。
+	// 环境变量 CTRL_ROAM_EXCLUDE_MAPS="24,653" 可覆盖（留空 = 不排除）。
 	RoamExcludeMaps []int
 
 	// Create* 建号（注册协议 106→104→700）的**节奏限制**：同 IP 过频会触发风控码 112
@@ -277,7 +279,8 @@ func build(base string, opts *cliOpts) *Config {
 		LiveCountToken:       env("CTRL_LIVECOUNT_TOKEN", ""),
 		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
 		// 2026-09-22 用户口径：幽冥界 24 是抓鬼专属，游荡排除（显式选图拒绝 + 白名单剔除）
-		RoamExcludeMaps:      envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24}),
+		// 2026-09-23 追加牢房 653/654/655（654/655 有网格会被随机抽中，进去出不来）
+		RoamExcludeMaps:      envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 653, 654, 655}),
 		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
 		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
 		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),
