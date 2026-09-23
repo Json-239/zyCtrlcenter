@@ -157,7 +157,9 @@ def main():
           "if _d > ROAM_SNAP_MAX_DIST_PX:" in rw
           and "_d = (((snap[0] - cur[0]) ** 2 + (snap[1] - cur[1]) ** 2)) ** 0.5" in rw)
     check("选点连通试算复用 quest_engine.__build_path(与 __do_walk 同寻路, 非新写)",
-          "quest_engine.__build_path(quest, w.mapid," in rw)
+          ("quest_engine.__build_path(quest, w.mapid," in rw)
+          or ("quest_engine.__build_path(quest, mapid," in rw
+              and "def walk_point_connected(" in rw))
     check("__random_walk_move 入口: 无进展计数 + 吸附",
           "__note_walk_progress(w, cur, now_ms)" in rw
           and "__snap_walkable(grid, cur[0], cur[1])" in rw)
@@ -444,7 +446,9 @@ def main():
         for name in ("__grid_for", "__snap_walkable", "__note_walk_progress",
                      "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point",
                      "__write_pose", "__stop_roam_far_snap", "__dither_point",
-                     "__other_bot_positions", "_cos", "_sin", "__random_walk_move"):
+                     "__other_bot_positions", "_cos", "_sin", "__random_walk_move",
+                     # 2026-09-23d: __connected 抽成模块级公共入口(daily_ghost 巡逻选点共用)
+                     "walk_point_connected"):
             frag = _extract_func(rw, name)
             check("提取 random_walk.%s(D 段)" % name, frag is not None)
             if frag:
