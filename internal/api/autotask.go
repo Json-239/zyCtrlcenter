@@ -169,8 +169,14 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 				return true, why
 			}
 			if a.St != nil {
-				if r, ok := a.St.Get(account); ok && r.DailyFull(a.shareDailyKey()) {
-					return true, "今日大唐神捕已满/不可用（等跨日）"
+				if r, ok := a.St.Get(account); ok {
+					if r.DailyFull(a.shareDailyKey()) {
+						return true, "今日大唐神捕已满/不可用（等跨日）"
+					}
+					if a.shareDailyMoneyShort(r) {
+						return true, fmt.Sprintf("余额不足（%d < 闸值 %d，防传送卡死）",
+							r.Money, a.shareDailyBalanceGate())
+					}
 				}
 			}
 			return false, ""
@@ -677,6 +683,9 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			if level < a.shareDailyMinLevel() {
 				continue // 等级未知(0)/不足：服务端按票条件拒（≥40），别白跑
 			}
+			if a.shareDailyMoneyShort(r) {
+				continue // 余额闸（策略配置 balance_gate；余额未知不拦）：传送费不够 → 派了又停
+			}
 			if _, has := r.DailyOf(a.shareDailyKey()); has && r.DailyFull(a.shareDailyKey()) {
 				continue // 今日神捕已满/不可用（等跨日）
 			}
@@ -1046,6 +1055,11 @@ func (a *API) handleAutoTaskStart(w http.ResponseWriter, r *http.Request) {
 		RegisterCount:   pickInt(toInt(body["register_count"], 0), prev.RegisterCount),
 		LaunchDelaySec:  pickInt(toInt(body["launch_delay_sec"], -1), prev.LaunchDelaySec),
 		MaxMinutes:      pickInt(toInt(body["max_minutes"], 0), prev.MaxMinutes),
+		// 2026-09-23 前端口径：新日常（shenbu/fenghuo）参数。
+		//   - min_level 0 = 未配置（回落全局 CTRL_SHARE_DAILY_MIN_LEVEL / 默认 40）；
+		//   - balance_gate **允许显式 0**（0=不启用余额闸），缺省才沿用原值（toInt(nil, prev)）。
+		MinLevel:    pickInt(toInt(body["min_level"], 0), prev.MinLevel),
+		BalanceGate: toInt(body["balance_gate"], prev.BalanceGate),
 	}
 	if err := a.AutoTask.Start(kind, cfg); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
@@ -1061,6 +1075,12 @@ func (a *API) handleAutoTaskStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if kind == autotask.KindShenbu {
 		msg += fmt.Sprintf("；分享日常日限 %d（随命令下发）", a.chainPayloads().ShareDailyLimit())
+		if cfg.MinLevel > 0 {
+			msg += fmt.Sprintf("、等级门槛 %d", cfg.MinLevel)
+		}
+		if cfg.BalanceGate > 0 {
+			msg += fmt.Sprintf("、余额闸 %d", cfg.BalanceGate)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "state": a.AutoTask.States()[kind], "msg": msg,

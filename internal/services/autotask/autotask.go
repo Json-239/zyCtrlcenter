@@ -91,6 +91,14 @@ type Config struct {
 	// MaxMinutes 单次动作的时长上限（**目前只有孵化用**）：到期由壳层下发 hatch_stop 收工。
 	// 0 = 用默认（DefaultHatchMinutes）。
 	MaxMinutes int `json:"max_minutes,omitempty"`
+	// MinLevel 该策略的最低等级门槛（0 = 未配置，回落全局/默认口径）。
+	// 2026-09-23 前端口径：**shenbu 用**（默认 40，服务端票条件；覆盖全局
+	// CTRL_SHARE_DAILY_MIN_LEVEL）。只影响自动派发（候选/补发闸），不影响手动「启动」。
+	MinLevel int `json:"min_level,omitempty"`
+	// BalanceGate 余额闸（0 = 不启用）：**仅 shenbu 用** —— 候选/派发时过滤
+	// `money > 0 且 money < gate` 的号（防"传送费不够 → 派了又停"）。
+	// 前端面板默认 1000（开元通宝/现金口径）；余额未知（未上报=0）不拦。
+	BalanceGate int `json:"balance_gate,omitempty"`
 }
 
 // DefaultHatchMinutes 孵化单次时长上限（分钟）：打满 30 点灵气约 38 场暗雷，

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/intent"
 	"zyctrlcenter/internal/state"
 )
@@ -141,12 +142,38 @@ func dailyRunningOf(r state.Robot, shareKey string) bool {
 // shareDailyKey 当前玩法键（配置 CTRL_SHARE_DAILY_KEY，默认 share_daily_大唐神捕）。
 func (a *API) shareDailyKey() string { return a.chainPayloads().ShareDailyKey() }
 
-// shareDailyMinLevel 分享日常等级门槛（配置 CTRL_SHARE_DAILY_MIN_LEVEL，默认 40；服务端票条件）。
+// shareDailyMinLevel 分享日常等级门槛（服务端票条件）：
+// 策略配置 `min_level`（面板，覆盖全局）→ 全局 CTRL_SHARE_DAILY_MIN_LEVEL → 默认 40。
+//
+// 只用于**自动派发**（候选/补发闸）；手动「启动」按用户意图走，不再按它过滤。
 func (a *API) shareDailyMinLevel() int {
+	if a.AutoTask != nil {
+		if st, ok := a.AutoTask.States()[autotask.KindShenbu]; ok && st.Config.MinLevel > 0 {
+			return st.Config.MinLevel
+		}
+	}
 	if a.Cfg != nil && a.Cfg.ShareDailyMinLevel > 0 {
 		return a.Cfg.ShareDailyMinLevel
 	}
 	return intent.DefaultShareDailyMinLevel
+}
+
+// shareDailyBalanceGate 神捕余额闸（策略配置 `balance_gate`；0 = 不启用）：
+// 候选/补发时过滤"余额已知且不足"的号（传送费不够 → 派了又停）。
+func (a *API) shareDailyBalanceGate() int {
+	if a.AutoTask == nil {
+		return 0
+	}
+	if st, ok := a.AutoTask.States()[autotask.KindShenbu]; ok {
+		return st.Config.BalanceGate
+	}
+	return 0
+}
+
+// shareDailyMoneyShort 余额不足（余额未知=不拦；闸值 0=不启用）。
+func (a *API) shareDailyMoneyShort(r state.Robot) bool {
+	gate := a.shareDailyBalanceGate()
+	return gate > 0 && r.Money > 0 && r.Money < int64(gate)
 }
 
 // shareDailyDoneMap 每号"今日已做次数"（心跳 daily 块；有值才带 —— 重新下发不丢进度，
@@ -232,14 +259,36 @@ func (a *API) shareDailyStopAll(reason string) int {
 
 // ---------------------------------------------------------------- 面板接口
 
+// shareDailyKindByKey 已知玩法键 → 策略 kind（值域与 autotask.Kind 一致）。
+//
+// 只登记**已确证**的键（依据：方案 §2、config/task/20283.xml 与 20021.xml 分析）；
+// 认不出来返回空串（前端可用 share_key 兜底显示）。
+var shareDailyKindByKey = map[string]string{
+	"share_daily_大唐神捕": string(autotask.KindShenbu),
+	"share_daily_宫廷10": "fenghuo", // 烽火大唐（P1 未接入；先给归属，便于前端按 kind 展示）
+}
+
+// shareDailyKindOf 玩法键 → 策略 kind（总览 queue 项用；认不出返回空串）。
+func (a *API) shareDailyKindOf(shareKey string) string {
+	if shareKey == "" {
+		return ""
+	}
+	if shareKey == a.shareDailyKey() {
+		return string(autotask.KindShenbu)
+	}
+	return shareDailyKindByKey[shareKey]
+}
+
 // handleDailyOverview 分享日常轮转总览（前端「日常轮转」表数据源；方案 §7 契约）：
 //
 //	GET /api/daily/overview
-//	→ {ok, share_keys[], rows:[{account, level, queue:[{share_key,done,limit,state}], current, order}]}
+//	→ {ok, share_keys[], rows:[{account, level, queue:[{share_key,kind,done,limit,state}], current, order}]}
 //
+// queue 项的 `kind` 用策略 kind（ghost/newbie/shenbu/fenghuo，前端按它映射图标/表头；
+// 认不出为空串）；`state` 原样透传机器人上报（大写 DONE/RUNNING 等，前端已兼容）。
 // 数据源 = 机器人心跳 daily 块 + 意图表 + 中控侧会话记账；**轮转顺序（order）P2 再填**
-// （先给空数组，前端按空值渲染"待规划"）。空值安全：老版机器人没有 daily 块 →
-// queue=[]、current=""；离线且既无数据也无意图的行不出（不刷屏）。
+// （值域拟 fixed/random；现在给空数组，前端按"待规划"渲染）。空值安全：老版机器人没有
+// daily 块 → queue=[]、current=""；离线且既无数据也无意图的行不出（不刷屏）。
 func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 	key := a.shareDailyKey()
 	kinds, _ := a.intentKinds()
@@ -255,7 +304,8 @@ func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 			q := make([]any, 0, len(queue))
 			for _, e := range queue {
 				q = append(q, map[string]any{
-					"share_key": e.ShareKey, "done": e.Done, "limit": e.Limit, "state": e.State,
+					"share_key": e.ShareKey, "kind": a.shareDailyKindOf(e.ShareKey),
+					"done": e.Done, "limit": e.Limit, "state": e.State,
 				})
 			}
 			current := ""

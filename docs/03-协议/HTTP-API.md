@@ -38,7 +38,7 @@
 | GET | `/api/logs` | `?n=200` | `{logs:[…]}` 当天运行历史尾部（`n` 上限 5000） |
 | POST | `/api/logs/clear` | — | `{ok, removed_runs, removed_bot, msg}`（**可选鉴权**） |
 | GET | `/api/protocols` | — | `{ok, updated, current{version,coding,ctrl_addr,web_port,robot_exe,connected}, sections[3]}` 协议映射（只读） |
-| POST | `/api/start` | `{chain_id?, chain?, accounts?, auto?}` | **`auto=true` = 按账号意图自动分配**：新手链/捉鬼链意图 → `start_chain(带链数据)`、抓鬼意图 → `ghost_start`（**组装出的导航数据 `chain` + `role:"solo"` + `daily_limit` + `done?`**；基座链或抓鬼专属文件缺失、刷鬼图缺网格/落点 → `ok:false` 且**一条命令都不发**）、无意图 → 回落 `chain_id`、空闲 → 不发；返回 `{mode:"auto", groups{start_chain[],ghost_start[]}, assignments[{account,command,chain_id,reason}], sent, msg}`（大屏「启动」默认走它）；给 `chain_id` 但不给 auto 时：选中的是**导航数据（没有任务节点）→ 直接拒绝**（`ok:false, nav_only:true`），否则按号回带 `warnings[{account,command,chain_id,msg}]`（如"该号已判抓鬼，建议用自动分配"） | `{ok, msg, chain_id, chain_source(request\|file\|none), warnings[]}` |
+| POST | `/api/start` | `{chain_id?, chain?, accounts?, auto?}` | **`auto=true` = 按账号意图自动分配**：新手链/捉鬼链意图 → `start_chain(带链数据)`、抓鬼意图 → `ghost_start`（**组装出的导航数据 `chain` + `role:"solo"` + `daily_limit` + `done?`**；基座链或抓鬼专属文件缺失、刷鬼图缺网格/落点 → `ok:false` 且**一条命令都不发**）、大唐神捕意图（分享日常开关开启时）→ `share_daily_start`（`share_key` + 组装链载荷 + `daily_limit` + `done?`；声明文件缺失/缺 task_order 同样硬失败一条不发）、无意图 → 回落 `chain_id`、空闲 → 不发；返回 `{mode:"auto", groups{start_chain[],ghost_start[],share_daily_start[]}, assignments[{account,command,chain_id,reason}], sent, msg}`（大屏「启动」默认走它）；给 `chain_id` 但不给 auto 时：选中的是**导航数据（没有任务节点）→ 直接拒绝**（`ok:false, nav_only:true`），否则按号回带 `warnings[{account,command,chain_id,msg}]`（如"该号已判抓鬼/大唐神捕，建议用自动分配"） | `{ok, msg, chain_id, chain_source(request\|file\|none), warnings[]}` |
 | POST | `/api/stop` | `{accounts?}` | `{ok, msg}` |
 | POST | `/api/reset` | `{accounts?}` | `{ok, msg}` |
 | POST | `/api/robots/manage` | `{action:"add"\|"remove", accounts}` | `{ok, msg}`（**可选鉴权**） |
@@ -46,10 +46,10 @@
 | POST | `/api/robot/reload_scripts` | `{modules?["quest_engine",…]}` | `{ok, modules, msg}` **脚本热更**：机器人进程内 `importlib.reload` 指定模块，免重启铺脚本补丁（省略 `modules` = 机器人端默认 `quest_engine`）；建议任务间隙触发（会重置模块级缓存）（**可选鉴权**） |
 | WS | `/ws` | — | 实时事件推送（见 §4） |
 | GET | `/api/autotask` | — | `{ok, tasks[newbie,ghost,hatch,shenbu], candidates{…}, pools{…}, hatch_sessions[], reghost[]}` **定时自动任务（只读）**：各套独立策略的状态（配置/启用/下一轮/最近 12 轮）+ 候选数（"该做但没在做"的号）+ 池视图（可用/在跑/目标/缺口）+ 卡死待恢复名单；口径见 [定时自动任务](../02-架构/定时自动任务.md) |
-| POST | `/api/autotask/start` | `{kind, interval_sec?, jitter_sec?, batch_min?, batch_max?, max_online?, register_enabled?, register_count?, launch_delay_sec?}` | `{ok, state, msg}` 启动/改参数某套策略（不传的字段沿用上次；**可选鉴权**） |
+| POST | `/api/autotask/start` | `{kind, interval_sec?, jitter_sec?, batch_min?, batch_max?, max_online?, register_enabled?, register_count?, launch_delay_sec?, min_level?, balance_gate?}` | `{ok, state, msg}` 启动/改参数某套策略（不传的字段沿用上次；**可选鉴权**）。`min_level`/`balance_gate` 仅新日常用：`min_level` = 该策略等级门槛（shenbu 默认 40，**覆盖全局 `CTRL_SHARE_DAILY_MIN_LEVEL`**）；`balance_gate` = 神捕余额闸（**可显式传 0 关闭**；>0 时过滤"余额已知且 < 闸值"的号） |
 | POST | `/api/autotask/stop` | `{kind}` | `{ok, state, msg}` 停止（同时撤销"等下发"队列；`kind=shenbu` 时给在跑的号补发 `share_daily_stop` 收工）（**可选鉴权**） |
 | POST | `/api/autotask/run` | `{kind}` | `{ok, rounds[], state, msg}` 立即跑一轮（仍受同时在线上限）（**可选鉴权**） |
-| GET | `/api/daily/overview` | — | `{ok, share_keys[], rows[{account,level,queue[{share_key,done,limit,state}],current,order[]}]}` **分享日常轮转总览（只读）**：数据源 = 机器人心跳 `daily` 块 + 意图表 + 中控会话记账；老版机器人没有 `daily` 块 → `queue=[]`、`current=""`（空值安全）；轮转顺序（`order`）P2 再填 |
+| GET | `/api/daily/overview` | — | `{ok, share_keys[], rows[{account,level,queue[{share_key,kind,done,limit,state}],current,order[]}]}` **分享日常轮转总览（只读）**：`kind` ∈ `ghost/newbie/shenbu/fenghuo`（认不出为空串）；`state` 原样透传机器人上报（大写）；数据源 = 机器人心跳 `daily` 块 + 意图表 + 中控会话记账；老版机器人没有 `daily` 块 → `queue=[]`、`current=""`（空值安全）；轮转顺序（`order`）P2 再填（拟 `fixed/random`） |
 | POST | `/api/reghost/cancel` | `{account}` | `{ok, canceled, msg}` 取消该号的"卡死自动重登恢复"（**可选鉴权**） |
 | WS | `/ws` | — | 实时事件推送（见 §4） |
 

@@ -220,6 +220,9 @@ func TestDailyOverviewShowsQueueAndCurrent(t *testing.T) {
 	if q0["share_key"] != "share_daily_大唐神捕" || q0["done"] != float64(4) || q0["limit"] != float64(10) {
 		t.Fatalf("queue 条目应带 share_key/done/limit/state: %v", q0)
 	}
+	if q0["kind"] != "shenbu" {
+		t.Fatalf("queue 条目应带策略 kind（前端按它映射图标/表头）: %v", q0)
+	}
 	if row["current"] != "share_daily_大唐神捕" {
 		t.Fatalf("意图在神捕 → current 应为玩法键: %v", row["current"])
 	}
@@ -267,5 +270,174 @@ func TestShenbuCandidateForGhostFullAccount(t *testing.T) {
 	cands, _ := res["candidates"].(map[string]any)
 	if cands["shenbu"] != float64(1) {
 		t.Fatalf("抓鬼满额的 45 级号应进大唐神捕候选（填补空档）: %v", cands)
+	}
+}
+
+// 开关默认关：≥40 号在「自动分配」仍走抓鬼（旧路径），shenbu 分支不可达。
+func TestStartAutoWithoutShareDailyFlagKeepsLegacy(t *testing.T) {
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallGhostNav(t, env.cfg.ChainDir)      // 抓鬼载荷（旧路径要用）
+	testsupport.InstallShareDailyNav(t, env.cfg.ChainDir) // 分享日常载荷也就绪 → 更严格（若误判会真发）
+
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": "sd7@xy3.com", "level": 45, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": 0, "limit": 10, "state": "IDLE"}}},
+		"_zone": testsupportZone()})
+
+	_, body := postJSON(t, env.srv.URL+"/api/start", map[string]any{
+		"auto": true, "accounts": []string{"sd7@xy3.com"}}, nil)
+	if body["ok"] != true || body["mode"] != "auto" {
+		t.Fatalf("应走自动分配: %v", body)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "ghost_start" {
+		t.Fatalf("开关默认关：45 级号（daily 未满）应仍走抓鬼旧路径: %v", cmd)
+	}
+	groups, _ := body["groups"].(map[string]any)
+	if len(asSlice(groups["share_daily_start"])) != 0 {
+		t.Fatalf("默认关时不该有号分给 share_daily_start: %v", groups)
+	}
+}
+
+// 开关开启：45 级 + daily 未满 → 「自动分配」发 share_daily_start（带 share_key/载荷）。
+func TestStartAutoWithShareDailyFlagDispatchesShenbu(t *testing.T) {
+	t.Setenv("CTRL_SHARE_DAILY", "1")
+	env := newTestEnv(t, "")
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	testsupport.InstallShareDailyNav(t, env.cfg.ChainDir)
+
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": "sd8@xy3.com", "level": 45, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": 1, "limit": 10, "state": "IDLE"}}},
+		"_zone": testsupportZone()})
+
+	_, body := postJSON(t, env.srv.URL+"/api/start", map[string]any{
+		"auto": true, "accounts": []string{"sd8@xy3.com"}}, nil)
+	if body["ok"] != true {
+		t.Fatalf("应下发成功: %v", body)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "share_daily_start" || cmd["share_key"] != "share_daily_大唐神捕" {
+		t.Fatalf("开关开启：满足条件的号应走 share_daily_start: %v", cmd)
+	}
+	if cmd["daily_limit"] != float64(10) {
+		t.Fatalf("应带 daily_limit: %v", cmd)
+	}
+	groups, _ := body["groups"].(map[string]any)
+	if len(asSlice(groups["share_daily_start"])) != 1 {
+		t.Fatalf("groups.share_daily_start 应回带该号: %v", groups)
+	}
+}
+
+// 神捕门槛：策略配置 min_level 覆盖全局（CTRL_SHARE_DAILY_MIN_LEVEL，默认 40）。
+func TestShenbuStrategyMinLevelOverridesGlobal(t *testing.T) {
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com"
+	feed := func(level int) {
+		env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+			"robots": []any{map[string]any{"account": acc, "level": level, "online": true,
+				"state": "IDLE", "task_index": 0,
+				"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+					"count_date": time.Now().Format("20060102")}}},
+			"_zone": testsupportZone()})
+	}
+	feed(42)
+	// 策略门槛 50（覆盖全局 40）→ 42 级不进候选
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, MinLevel: 50, TargetOnline: 5, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("启动神捕池失败: %v", err)
+	}
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := res["candidates"].(map[string]any)
+	if cands["shenbu"] != float64(0) {
+		t.Fatalf("策略门槛 50 应覆盖全局 40（42 级不进候选）: %v", cands)
+	}
+	// 门槛降到 40 → 进候选（同一号、同一份心跳）
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, MinLevel: 40, TargetOnline: 5, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("改门槛失败: %v", err)
+	}
+	res = getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ = res["candidates"].(map[string]any)
+	if cands["shenbu"] != float64(1) {
+		t.Fatalf("门槛 40 时 42 级号应进候选: %v", cands)
+	}
+}
+
+// 神捕门槛：策略未配（0）→ 回落全局 CTRL_SHARE_DAILY_MIN_LEVEL。
+func TestShenbuGlobalMinLevelFallback(t *testing.T) {
+	t.Setenv("CTRL_SHARE_DAILY_MIN_LEVEL", "45") // 全局抬到 45
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com"
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{map[string]any{"account": acc, "level": 42, "online": true,
+			"state": "IDLE", "task_index": 0,
+			"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+				"count_date": time.Now().Format("20060102")}}},
+		"_zone": testsupportZone()})
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, TargetOnline: 5, BatchMin: 1, BatchMax: 1, // MinLevel 未配
+	}); err != nil {
+		t.Fatalf("启动神捕池失败: %v", err)
+	}
+	res := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := res["candidates"].(map[string]any)
+	if cands["shenbu"] != float64(0) {
+		t.Fatalf("策略未配门槛时应用全局 45（42 级不进候选）: %v", cands)
+	}
+}
+
+// 神捕余额闸：balance_gate>0 时过滤"余额已知且不足"的号；余额未知不拦、0=不启用。
+func TestShenbuBalanceGateFiltersPoorAccount(t *testing.T) {
+	env := newTestEnv(t, "")
+	acc := "robot0001002@xy3.com"
+	feed := func(money any) {
+		rb := map[string]any{"account": acc, "level": 45, "online": true, "state": "IDLE", "task_index": 0,
+			"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+				"count_date": time.Now().Format("20060102")}}
+		if money != nil {
+			rb["money"] = money
+		}
+		env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+			"robots": []any{rb}, "_zone": testsupportZone()})
+	}
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, MinLevel: 40, BalanceGate: 1000, TargetOnline: 5, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("启动神捕池失败: %v", err)
+	}
+	candN := func() float64 {
+		res := getJSON(t, env.srv.URL+"/api/autotask")
+		cands, _ := res["candidates"].(map[string]any)
+		return cands["shenbu"].(float64)
+	}
+	feed(500) // 余额不足 → 不进候选
+	if n := candN(); n != 0 {
+		t.Fatalf("余额 500 < 闸值 1000 不该进候选: %v", n)
+	}
+	feed(5000) // 余额充足 → 进候选
+	if n := candN(); n != 1 {
+		t.Fatalf("余额 5000 ≥ 闸值 1000 应进候选: %v", n)
+	}
+	feed(nil) // 余额未知（未上报）→ 不拦
+	if n := candN(); n != 1 {
+		t.Fatalf("余额未知不该被余额闸拦下: %v", n)
+	}
+	// 闸值显式设 0（不启用）→ 再喂余额不足也进候选
+	if err := env.api.AutoTask.Start(autotask.KindShenbu, autotask.Config{
+		Kind: autotask.KindShenbu, MinLevel: 40, BalanceGate: 0, TargetOnline: 5, BatchMin: 1, BatchMax: 1,
+	}); err != nil {
+		t.Fatalf("改配置失败: %v", err)
+	}
+	feed(100)
+	if n := candN(); n != 1 {
+		t.Fatalf("余额闸 0=不启用：余额 100 也应进候选: %v", n)
 	}
 }

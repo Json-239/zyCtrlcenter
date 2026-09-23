@@ -403,9 +403,9 @@ func (a *API) handleStart(w http.ResponseWriter, r *http.Request) {
 
 // conditionWarnings 选了具体链但账号当前条件"不该跑这条"时给出人话提示（不阻断下发）。
 //
-// 现状只覆盖一种最容易踩的：该号已判抓鬼（≥31 或链已完成），却手选了剧情链 ——
-// 机器人端会按 already_done 直接跳过（看起来"点了没反应"），提示改用「自动分配」。
-// accounts 为空（=全部号）时不猜，返回空。
+// 现状覆盖两种最容易踩的：该号已判抓鬼（≥31 或链已完成）/ 已判大唐神捕（分享日常，
+// 开关开启时），却手选了剧情链 —— 机器人端会按 already_done 直接跳过（看起来"点了没反应"），
+// 提示改用「自动分配」。accounts 为空（=全部号）时不猜，返回空。
 func (a *API) conditionWarnings(chainID string, accounts []string) []map[string]any {
 	out := []map[string]any{}
 	if len(accounts) == 0 {
@@ -414,13 +414,19 @@ func (a *API) conditionWarnings(chainID string, accounts []string) []map[string]
 	kinds, reasons := a.intentKinds()
 	for _, acc := range accounts {
 		kind, reason := a.decideKind(acc, kinds, reasons)
-		if kind != intent.KindGhost {
+		cmd, label := "", ""
+		switch kind {
+		case intent.KindGhost:
+			cmd, label = "ghost_start", "抓鬼"
+		case intent.KindShenbu:
+			cmd, label = "share_daily_start", "大唐神捕"
+		default:
 			continue
 		}
 		out = append(out, map[string]any{
-			"account": acc, "command": "ghost_start", "chain_id": chainID,
-			"msg": acc + " 当前条件应分配抓鬼（" + reason + "）；本次下发的是 " + chainID +
-				"，机器人端可能直接判 already_done 不跑 —— 建议用「自动分配」或抓鬼入口",
+			"account": acc, "command": cmd, "chain_id": chainID,
+			"msg": acc + " 当前条件应分配" + label + "（" + reason + "）；本次下发的是 " + chainID +
+				"，机器人端可能直接判 already_done 不跑 —— 建议用「自动分配」",
 		})
 	}
 	return out
@@ -468,8 +474,12 @@ func warningsText(warnings []map[string]any) string {
 //
 //	意图=新手链/捉鬼链 → start_chain（带链数据，链数据来源同 handleStart）
 //	意图=抓鬼        → ghost_start（钟馗抓鬼日常，不是剧情链）
+//	意图=大唐神捕     → share_daily_start（分享日常；载荷=基座+shenbu_nav 声明，缺失硬失败）
 //	没有意图（等级未知/未登记）→ 回落请求给的 chain_id（不乱猜）
 //	意图=空闲        → 不发
+//
+// 2026-09-23 分享日常：开关 `CTRL_SHARE_DAILY` 默认关 → 意图表里不会出现 shenbu，
+// 本函数行为与旧版完全一致（=0 时 shenbu 分支不可达）。
 func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts []string, inlineChain any) {
 	kinds, reasons := a.intentKinds()
 	targets := append([]string(nil), accounts...)
@@ -491,7 +501,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	// 意图表里还没有这个号时（刚 add、还没报等级），回退用**账号池里的当前条件**判一次：
 	// ≥31 级或链已完成 → 抓鬼；<31 → 新手链。这样"启动自动分配"永远按当前条件分配**一条**，
 	// 而不是盲目发默认链（≥31 的号发 newbie_full 会被机器人端按 already_done 跳过 = 看起来"没分配"）。
-	var toChain, toGhost []string
+	var toChain, toGhost, toDaily []string
 	skipped := []string{} // 等级门槛拦下的号（不静默：回带原因）
 	assignments := make([]map[string]any, 0, len(targets))
 	for _, acc := range targets {
@@ -511,6 +521,12 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			toGhost = append(toGhost, acc)
 			assignments = append(assignments, map[string]any{
 				"account": acc, "command": "ghost_start", "reason": "抓鬼（" + reason + "）"})
+		case intent.KindShenbu:
+			// 大唐神捕（分享日常，2026-09-23）：手动通道按用户意图派（等级/余额闸只在
+			// 自动通道生效 —— 意图已按门槛判过）。
+			toDaily = append(toDaily, acc)
+			assignments = append(assignments, map[string]any{
+				"account": acc, "command": "share_daily_start", "reason": "大唐神捕（" + reason + "）"})
 		default:
 			toChain = append(toChain, acc)
 			why := "未登记意图且池内无等级 → 用指定链"
@@ -554,6 +570,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	}
 	toGhost = cutByQuota(toGhost, autotask.KindGhost, "抓鬼")
 	toChain = cutByQuota(toChain, autotask.KindNewbie, "新手")
+	toDaily = cutByQuota(toDaily, autotask.KindShenbu, "神捕")
 
 	// 2026-09-23 R1/R2（操作健壮性审计 · 连点去重）：去掉"最近 120 秒内已派发过"的号 ——
 	// 抓鬼原先只在配额不满时才会重复派（配额有余就重发命令 → 机器人端重启会话）；
@@ -561,9 +578,12 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	// 回带原因（不静默）；确需重发请等 TTL 过去，或用「重置重跑」。
 	dropInflight := func(accs []string, kind autotask.Kind, label string) []string {
 		var kept, dropped []string
-		if kind == autotask.KindGhost {
+		switch kind {
+		case autotask.KindGhost:
 			kept, dropped = a.ghostInflight.dropFresh(accs)
-		} else {
+		case autotask.KindShenbu:
+			kept, dropped = a.dailyInflight.dropFresh(accs)
+		default:
 			kept, dropped = a.chainInflight.dropFresh(accs)
 		}
 		if len(dropped) == 0 {
@@ -586,6 +606,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	}
 	toGhost = dropInflight(toGhost, autotask.KindGhost, "抓鬼")
 	toChain = dropInflight(toChain, autotask.KindNewbie, "新手")
+	toDaily = dropInflight(toDaily, autotask.KindShenbu, "神捕")
 
 	// 抓鬼载荷**在发任何命令之前**取齐：导航数据缺失就是硬失败，一条命令都不发
 	// （否则会出现"新手链那组已经发出去了、抓鬼这组失败"的半成功状态）。
@@ -603,6 +624,22 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			return
 		}
 		ghostNav = nav
+	}
+	// 分享日常载荷同口径：声明文件缺失/缺 task_order 也是硬失败（一条都不发）。
+	var dailyNav *chainlib.Chain
+	if len(toDaily) > 0 {
+		nav, err := a.chainPayloads().ShareDaily()
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "mode": "auto", "sent": 0, "accounts": len(targets),
+				"groups":      map[string]any{"start_chain": []string{}, "ghost_start": []string{}, "share_daily_start": toDaily},
+				"assignments": assignments, "chain_id": defaultChainID,
+				"msg": "分享日常链数据不可用，未下发任何命令：" + err.Error() +
+					"（把声明文件放进链目录，或用 CTRL_SHARE_DAILY_CHAIN 指定别的文件名）",
+			})
+			return
+		}
+		dailyNav = nav
 	}
 
 	sent, msgs := 0, []string{}
@@ -666,6 +703,28 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			chanFail = true // 2026-09-23 文案修复：真·传输失败才允许回"通道未连接"
 		}
 	}
+	if len(toDaily) > 0 {
+		// 分享日常（大唐神捕）：与「定时任务/补发」同口径 —— 带 share_key/chain/daily_limit/done。
+		key := a.shareDailyKey()
+		cmd := map[string]any{
+			"cmd": "share_daily_start", "share_key": key, "chain": dailyNav,
+			"daily_limit": a.chainPayloads().ShareDailyLimit(), "accounts": toDaily,
+		}
+		if dailyNav != nil && dailyNav.ChainID != "" {
+			cmd["chain_id"] = dailyNav.ChainID
+		}
+		if done := a.shareDailyDoneMap(toDaily); len(done) > 0 {
+			cmd["done"] = done
+		}
+		if a.Events.SendCmd(cmd, "share_daily_start_auto") {
+			sent++
+			a.markDailyDispatch(toDaily)
+			a.daily.track(toDaily, key)
+			msgs = append(msgs, fmt.Sprintf("%d 个走大唐神捕(%s)", len(toDaily), key))
+		} else {
+			chanFail = true
+		}
+	}
 
 	if len(skipped) > 0 {
 		msgs = append(msgs, fmt.Sprintf("跳过 %d 个（等级不够/不派抓鬼）", len(skipped)))
@@ -686,7 +745,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		"accounts": targets, "sent": sent, "assignments": assignments, "channel_fail": chanFail})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": ok, "mode": "auto", "sent": sent, "accounts": len(targets),
-		"groups":      map[string]any{"start_chain": toChain, "ghost_start": toGhost},
+		"groups":      map[string]any{"start_chain": toChain, "ghost_start": toGhost, "share_daily_start": toDaily},
 		"assignments": assignments, "chain_id": defaultChainID, "skipped": skipped,
 		"channel_fail": chanFail, "msg": msg,
 	})
@@ -747,6 +806,9 @@ func (a *API) intentKinds() (map[string]intent.Kind, map[string]string) {
 //
 // 池内回退的由来（判据与「自动分配」完全一致，勿改）：
 // ≥31 级或链已完成 → 抓鬼；<31 → 新手链；等级未知 → 不瞎判（返回空 kind，由调用方回落指定链）。
+//
+// 2026-09-23 分享日常：开关关闭（默认）时与旧判据完全一致（心跳缺失=未知，不判 shenbu）；
+// 开启后 ≥40 且心跳 daily 明确"今日未满" → 大唐神捕（与 intent.DecideDaily 同源）。
 func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[string]string) (intent.Kind, string) {
 	if kind := kinds[acc]; kind != "" {
 		return kind, reasons[acc]
@@ -775,11 +837,27 @@ func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[s
 			}
 		}
 	}
-	d := a.Events.Intents.Decider().Decide(lv, done)
+	d := a.Events.Intents.Decider().DecideDaily(lv, done, a.dailyInfoOfAccount(acc))
 	if !d.Known {
 		return "", "" // 等级未知：不瞎判，回落请求给的链
 	}
 	return d.Kind, d.Reason + "（按池内记录）"
+}
+
+// dailyInfoOfAccount 该号分享日常的判据输入（心跳 daily 块；没有 = 未知 → 不判 shenbu）。
+func (a *API) dailyInfoOfAccount(acc string) intent.DailyInfo {
+	if a.St == nil || a.Events == nil || a.Events.Intents == nil {
+		return intent.DailyInfo{}
+	}
+	r, ok := a.St.Get(acc)
+	if !ok {
+		return intent.DailyInfo{}
+	}
+	key := a.Events.Intents.Decider().ShareDailyKeyOf()
+	if _, has := r.DailyOf(key); !has {
+		return intent.DailyInfo{} // 老版上报/还没跑到：未知
+	}
+	return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 }
 
 func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
