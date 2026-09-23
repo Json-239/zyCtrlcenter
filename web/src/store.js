@@ -336,10 +336,13 @@ export async function switchZone(key) {
 
 // ---------------- 展示辅助（拟人化）----------------
 
+// 注：ACCEPT/HEAL 来自机器人端抓鬼状态机（script/daily_ghost.py：ACCEPT=在钟馗处接取
+// 任务、HEAL=低血/低蓝疗伤；抓鬼会话活跃时上报的顶层 state 直接取 g.state，见 script/client.py）。
 export const STATE_LABELS = {
   WAIT_TASK: '等任务', NAV: '导航', CLICK: '点击', DIALOG: '对话', FIGHT: '战斗',
-  SHOP: '商店', ALLOC: '加点', WAIT_NEXT: '等下一任务', SUBMIT: '交任务中', WAIT_GHOST: '等刷鬼',
-  DONE: '完成', ERROR: '出错', READY: '就绪', IDLE: '空闲', ONLINE: '在线', OFFLINE: '离线',
+  SHOP: '商店', ALLOC: '加点', WAIT_NEXT: '等下一任务', ACCEPT: '接任务中', SUBMIT: '交任务中',
+  WAIT_GHOST: '等刷鬼', HEAL: '疗伤中', DONE: '完成', ERROR: '出错', READY: '就绪',
+  IDLE: '空闲', ONLINE: '在线', OFFLINE: '离线',
 }
 
 // 状态短语：像人说话（悬停气泡/详情用）
@@ -352,8 +355,10 @@ export const STATE_PHRASES = {
   SHOP: '正在逛商店',
   ALLOC: '正在加点',
   WAIT_NEXT: '等下一个任务',
+  ACCEPT: '正在钟馗处接取抓鬼任务',
   SUBMIT: '正在交任务（抓鬼·交付）',
   WAIT_GHOST: '在钟馗处等鬼刷出来',
+  HEAL: '血量/法力过低，正在疗伤',
   DONE: '这一轮跑完了',
   ERROR: '卡住了，需要看看',
   READY: '已就绪，等派活',
