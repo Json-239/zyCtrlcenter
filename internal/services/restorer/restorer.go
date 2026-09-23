@@ -33,6 +33,10 @@ const (
 	DefaultInterval     = 5 * time.Second
 	ErrRepeatToCircuit  = 3 // 同一错误重复这么多次就熔断，等人工
 	RestoreDelayDefault = 8 * time.Second
+	// DefaultMaxPerRound 单轮最多补发几个号（2026-09-23 P0）：批量上线瞬间"几百个号
+	// 都没在跑"，一轮全补会直接把池子灌爆（生产实测一轮补过 87 个，抓鬼超编到 218）。
+	// 与水位/游荡池的单轮 max_step=5 同口径。
+	DefaultMaxPerRound = 5
 )
 
 // Action 一次补发决策（由 Run 负责下发，Tick 只产出）。
@@ -92,6 +96,10 @@ type Status struct {
 	LastMsg   string    `json:"last_msg,omitempty"`
 	Blocked   bool      `json:"blocked"`
 	BlockTill time.Time `json:"block_till,omitempty"`
+	// LastDispatchAt 最近一次"决定补发"的时间（2026-09-23 P0）：壳层的池闸据此把
+	// "刚补发、还没跑起来"的号算作在途占位（TTL 见 api 侧 ghostInflightTTL），
+	// 避免"上一批还在路上，闸门又放行下一批"。
+	LastDispatchAt time.Time `json:"last_dispatch_at,omitempty"`
 }
 
 // Deps 依赖（除 Send 外都是只读读取，便于测试注入假时钟/假状态）。
@@ -120,6 +128,8 @@ type Deps struct {
 	Interval    time.Duration
 	// Delay 启动后延迟多久才开始补（参考实现 RESTORE_DELAY_SEC=8，等机器人把状态报上来）
 	Delay time.Duration
+	// MaxPerRound 单轮最多补发几个号（0 → DefaultMaxPerRound）：见常量注释（2026-09-23 P0）。
+	MaxPerRound int
 }
 
 // Runner 恢复器。
@@ -148,6 +158,9 @@ func New(d Deps) *Runner {
 	}
 	if d.Delay <= 0 {
 		d.Delay = RestoreDelayDefault
+	}
+	if d.MaxPerRound <= 0 {
+		d.MaxPerRound = DefaultMaxPerRound
 	}
 	return &Runner{d: d, st: map[string]*Status{}}
 }
@@ -217,6 +230,7 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 	}
 	items := r.d.Intents()
 	out := make([]Action, 0, len(items))
+	lim := r.d.MaxPerRound // 2026-09-23 P0：单轮上限（见常量注释）
 	for _, it := range items {
 		cmd, chainID := commandFor(it)
 		if cmd == "" {
@@ -248,6 +262,11 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 			}
 			continue
 		}
+		if lim > 0 && len(out) >= lim {
+			// 2026-09-23 P0：本轮已达单轮上限 → 到此为止。未补的号**状态未被改动**
+			// （不扣 Attempts/不设冷却），下一轮仍在候选里，等池闸与在途记账放行。
+			break
+		}
 		if st.Attempts > 0 && now.Before(st.NextAt) {
 			continue // 冷却中
 		}
@@ -273,6 +292,7 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 		st.Attempts++
 		st.NextAt = now.Add(time.Duration(r.d.RetrySec) * time.Second)
 		st.LastMsg = "已补发 " + cmd
+		st.LastDispatchAt = now // 在途记账（壳层池闸用；TTL 见 api 侧 ghostInflightTTL）
 		if st.Attempts >= r.d.MaxAttempts {
 			st.Blocked = true
 			st.BlockTill = now.Add(time.Duration(r.d.CircuitSec) * time.Second)

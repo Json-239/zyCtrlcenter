@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"zyctrlcenter/internal/accountcreate"
@@ -155,20 +156,174 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	}
 }
 
-// poolAllowsDispatch 池状态闸（2026-09-22 P1）：池未启用 / 已达标（无缺口）→ 不自动补发。
+// ---------------------------------------------------------------- 抓鬼在途记账（2026-09-23 P0）
+//
+// 为什么需要：抓鬼"在跑数"以机器人上报的活跃会话（ghost.enabled）为准，而
+// "命令下发 → 机器人建立会话"之间有几十秒空窗。批量上线时（一次 add 100+ 号），
+// 池闸若只看会话数，每一批新号都会看到"缺口仍在"而被连续放行 —— 生产实测一次
+// 直派/补发 200+（超 target 100，见 docs/04-测试/分析-20260923-抓鬼分配逻辑.md）。
+// 这里把"已派发未确认"的号也计入占用量：配额判断用
+// "活跃会话 + 在途"，避免"上一批还在路上就放行下一批"。
+const ghostInflightTTL = 120 * time.Second
+
+// ghostInflightTable 抓鬼在途表（实例级；挂在 API 上，见 api.go 的 ghostInflight 字段）。
+type ghostInflightTable struct {
+	mu sync.Mutex
+	at map[string]time.Time // account → 上次派发时间
+}
+
+// mark 记录一批"刚下发抓鬼命令"的号（定时补号 / 卡死重登恢复 / 手动直派都调）。
+func (t *ghostInflightTable) mark(accs []string) {
+	if len(accs) == 0 {
+		return
+	}
+	now := time.Now()
+	t.mu.Lock()
+	if t.at == nil {
+		t.at = map[string]time.Time{}
+	}
+	for _, acc := range accs {
+		if acc != "" {
+			t.at[acc] = now
+		}
+	}
+	t.mu.Unlock()
+}
+
+// count 当前有效在途号数（顺手清理两类失效项）：
+//   - live(acc) 返回 true（号已建立活跃抓鬼会话：命令已生效，避免重复占用）；
+//   - 超过 TTL（命令大概率失败/丢失，允许重新派发）。
+func (t *ghostInflightTable) count(live func(acc string) bool) int {
+	now := time.Now()
+	t.mu.Lock()
+	snap := make(map[string]time.Time, len(t.at))
+	for acc, at := range t.at {
+		snap[acc] = at
+	}
+	t.mu.Unlock()
+
+	n := 0
+	drop := make([]string, 0, 8)
+	for acc, at := range snap {
+		if now.Sub(at) > ghostInflightTTL || (live != nil && live(acc)) {
+			drop = append(drop, acc)
+			continue
+		}
+		n++
+	}
+	if len(drop) > 0 {
+		t.mu.Lock()
+		for _, acc := range drop {
+			delete(t.at, acc)
+		}
+		t.mu.Unlock()
+	}
+	return n
+}
+
+// markGhostDispatch 记录一批"刚下发抓鬼命令"的号（定时补号 / 卡死重登恢复 / 手动直派都调）。
+func (a *API) markGhostDispatch(accs []string) { a.ghostInflight.mark(accs) }
+
+// ghostInflightCount 当前在途号数；live 判定：号已建立活跃抓鬼会话 → 不再算在途。
+func (a *API) ghostInflightCount() int {
+	return a.ghostInflight.count(func(acc string) bool {
+		if a.St == nil {
+			return false
+		}
+		r, ok := a.St.Get(acc)
+		return ok && r.GhostActive()
+	})
+}
+
+// restoreInflightCount 恢复引擎"刚补发、还没跑起来"的号数（同样受 TTL 约束）。
+// restorer 的补发不经过 LaunchTask，靠它自己的 Status().LastDispatchAt 记账，
+// 否则"补发 + 直派"互相看不见，闸门仍会被连续放行。
+func (a *API) restoreInflightCount() int {
+	if a.Restorer == nil {
+		return 0
+	}
+	now := time.Now()
+	n := 0
+	for _, st := range a.Restorer.Status() {
+		if st.LastDispatchAt.IsZero() || now.Sub(st.LastDispatchAt) > ghostInflightTTL {
+			continue
+		}
+		if a.St != nil {
+			if r, ok := a.St.Get(st.Account); ok && r.GhostActive() {
+				continue // 会话已起来：已计入在跑数
+			}
+		}
+		n++
+	}
+	return n
+}
+
+// poolQuota 该池"本轮最多还能派几个"（-1 = 不限，保持旧行为）。
+//
+//   - AutoTask 未装配 / Target<=0 → -1：没配目标 = 不限（沿用 autotask.Config 的 0=不限 语义，
+//     也让未配置池的测试环境保持旧行为）；
+//   - Target>0 且池未启用 → 0：池停用就一个都不直派（避免"池停了还被手动/自动拉起"）；
+//   - 其余 → max(0, Target - 在跑 - 在途)（抓鬼的在途 = 直派/重登恢复 + 恢复引擎补发两份）。
+func (a *API) poolQuota(kind autotask.Kind) int {
+	if a.AutoTask == nil {
+		return -1
+	}
+	st, ok := a.AutoTask.States()[kind]
+	if !ok || st.Target <= 0 {
+		return -1
+	}
+	if !st.Enabled {
+		return 0
+	}
+	inflight := 0
+	if kind == autotask.KindGhost {
+		inflight = a.ghostInflightCount() + a.restoreInflightCount()
+	}
+	if q := st.Target - st.Online - inflight; q > 0 {
+		return q
+	}
+	return 0
+}
+
+// cutByPoolQuota 按池配额截断一批待派号，返回被截断（本次不派）的号。
+//
+// 配额口径见 poolQuota：-1（不限）/ 0（池停用或已满）/ N（还能派 N 个）。
+// 返回的是**尾部**超出配额的号；调用方负责把它们从待派列表里去掉并回带原因。
+func (a *API) cutByPoolQuota(accs []string, kind autotask.Kind) []string {
+	q := a.poolQuota(kind)
+	if q < 0 || len(accs) <= q {
+		return nil
+	}
+	if q == 0 {
+		return append([]string(nil), accs...)
+	}
+	return append([]string(nil), accs[q:]...)
+}
+
+// poolAllowsDispatch 池状态闸（2026-09-22 P1 / 2026-09-23 P0 加在途）：
+// 池未启用 / 配额已用尽（在跑 + 在途 ≥ 目标）→ 不自动补发。
 func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 	if a.AutoTask == nil {
 		return true, ""
 	}
-	st, ok := a.AutoTask.States()[autotask.Kind(kind)]
+	k := autotask.Kind(kind)
+	st, ok := a.AutoTask.States()[k]
 	if !ok {
 		return true, ""
 	}
 	if !st.Enabled {
 		return false, kind + " 池未启用（不自动补发）"
 	}
-	if st.Target > 0 && st.Deficit <= 0 {
-		return false, fmt.Sprintf("%s 池已达标（%d/%d，不自动补发）", kind, st.Online, st.Target)
+	if st.Target <= 0 {
+		return true, "" // 没配目标 = 不限
+	}
+	if q := a.poolQuota(k); q <= 0 {
+		inflight := 0
+		if k == autotask.KindGhost {
+			inflight = a.ghostInflightCount() + a.restoreInflightCount()
+		}
+		return false, fmt.Sprintf("%s 池配额已用满（在跑 %d + 在途 %d ≥ 目标 %d，不自动补发）",
+			kind, st.Online, inflight, st.Target)
 	}
 	return true, ""
 }
@@ -566,6 +721,7 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		if !a.Events.SendCmd(cmd, "autotask_ghost_start") {
 			return false, "下发失败：机器人通道未连接"
 		}
+		a.markGhostDispatch(accs) // 2026-09-23 P0：在途记账（定时补号/卡死重登恢复共走这里）
 		return true, "已下发抓鬼: " + strings.Join(accs, ", ")
 
 	case autotask.KindHatch:

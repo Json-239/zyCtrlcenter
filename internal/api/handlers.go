@@ -11,6 +11,7 @@ import (
 	"zyctrlcenter/internal/chainlib"
 	"zyctrlcenter/internal/chainplan"
 	"zyctrlcenter/internal/config"
+	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/intent"
 	"zyctrlcenter/internal/services/restorer"
 	"zyctrlcenter/internal/wsutil"
@@ -479,6 +480,38 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		}
 	}
 
+	// 2026-09-23 P0：池配额截断 —— "启动(自动分配)"不再无上限直派。
+	// 生产实测（docs/04-测试/分析-20260923-抓鬼分配逻辑.md）：11:49:55 / 13:10:11 两次各带
+	// 231 个号，按意图直派 227/225 个 ghost_start，把抓鬼会话推到 200+（目标 100）；
+	// 与批量上线、RESTORE 补发叠加后长期超编 118。口径与池闸一致
+	// max(0, 目标 - 在跑 - 在途)；池停用（Target>0 且 Enabled=false）→ 一个都不派。
+	cutByQuota := func(accs []string, kind autotask.Kind, label string) []string {
+		cut := a.cutByPoolQuota(accs, kind)
+		if len(cut) == 0 {
+			return accs
+		}
+		keep := len(accs) - len(cut)
+		set := make(map[string]bool, len(cut))
+		for _, acc := range cut {
+			set[acc] = true
+		}
+		for i := range assignments {
+			if set[toStr(assignments[i]["account"])] {
+				assignments[i]["command"] = ""
+				assignments[i]["reason"] = label + "池配额已满/停用，本次不派（等池内号收工或调大 target）"
+			}
+		}
+		skipped = append(skipped, fmt.Sprintf("%d 个（%s池配额拦下）", len(cut), label))
+		a.Log.Printf("[START] %s池配额拦下 %d 个（保留 %d 个，目标/在跑/在途见池状态）：%s",
+			label, len(cut), keep, strings.Join(cut, ", "))
+		if keep <= 0 {
+			return nil
+		}
+		return accs[:keep]
+	}
+	toGhost = cutByQuota(toGhost, autotask.KindGhost, "抓鬼")
+	toChain = cutByQuota(toChain, autotask.KindNewbie, "新手")
+
 	// 抓鬼载荷**在发任何命令之前**取齐：导航数据缺失就是硬失败，一条命令都不发
 	// （否则会出现"新手链那组已经发出去了、抓鬼这组失败"的半成功状态）。
 	var ghostNav *chainlib.Chain
@@ -543,6 +576,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		}
 		if a.Events.SendCmd(cmd, "ghost_start_auto") {
 			sent++
+			a.markGhostDispatch(toGhost) // 2026-09-23 P0：在途记账（配额/池闸据此防连续放行）
 			msgs = append(msgs, fmt.Sprintf("%d 个走钟馗抓鬼(%s)", len(toGhost), ghostChainID))
 		}
 	}

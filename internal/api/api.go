@@ -118,6 +118,9 @@ type API struct {
 	payloadOnce sync.Once
 	// hatch 孵化会话记账（到期收工/完成清理；见 internal/api/hatch.go）。
 	hatch *hatchSessions
+	// ghostInflight 抓鬼"已派发未确认"在途表（2026-09-23 P0，见 autotask.go 注释）：
+	// 池配额闸用它防"上一批还在路上就放行下一批"。实例级状态（测试/多实例互不串味）。
+	ghostInflight ghostInflightTable
 	// throttle 注册自适应限速器（进程内一份；见 handlers_create.go）。
 	throttle *CreateThrottle
 }
