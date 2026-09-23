@@ -444,9 +444,25 @@ def _ghost_scan_max(store, lo, hi):
 check("S5 同源校验: 同一 store 两实现结果一致(捉鬼段)",
       S.scan_task_limited_max(_store, list(range(2019501, 2019514)))
       == _ghost_scan_max(_store, 2019501, 2019513))
-check("S5 神捕段取最大(2028301/2028302 同 key 共享)",
+check("S5 神捕段纯函数取最大(2028301/2028302 同 key 共享)",
       S.scan_task_limited_max(_store, [2028301, 2028302, 2028311, 2028399]) == 4)
 check("S5 空 store → None", S.scan_task_limited_max({}, [2028301]) is None)
+# 计数口径（关键）：只扫主 share_daily 的 episode_root = task_order 首任务号；
+# reply 条目（2028311/2028399 各自为根、daily_limit=-1）每轮 +2，全链取最大会虚高一倍
+_sb_chain = new_state().chain
+_main_roots = getattr(S, "__main_count_roots")(_sb_chain)
+check("S5 主键计数只扫 task_order 首任务号", _main_roots == [2028301], str(_main_roots))
+_store2 = {"2028301": 3, "2028311": 6, "2028399": 6}
+check("S5 reply 条目(6)不污染主键计数(3)",
+      S.scan_task_limited_max(_store2, _main_roots) == 3)
+r = fresh_robot()
+g = new_state()
+r.m_share_daily = g
+r.m_task_limited = dict(_store2)
+g.settle_at_ms = time.time() * 1000 - 1
+g.settle_summary = True
+getattr(S, "__check_settle")(r, g, time.time() * 1000)
+check("S5 轮次结算按主键校准(3, 非 6)", g.done_count == 3, str(g.done_count))
 
 # ================================================================
 # 7) S6 · tick 未启用 / 命令回包 / 挂载点
