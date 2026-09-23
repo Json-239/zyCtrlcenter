@@ -195,6 +195,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/start", a.handleStart)
 	mux.HandleFunc("POST /api/stop", a.handleStop)
 	mux.HandleFunc("POST /api/reset", a.handleReset)
+	// 2026-09-23 商店采购（手动/冒烟）：选号 + 商品 + 数量 → 机器人端 shop_errand
+	mux.HandleFunc("POST /api/shop_errand", a.requireToken(a.handleShopErrand))
 	mux.HandleFunc("POST /api/robots/manage", a.requireToken(a.handleRobotsManage))
 	mux.HandleFunc("POST /api/robots/clear_removed", a.requireToken(a.handleRobotsClearRemoved)) // 清空"已移除"名单（池子被吃空时一键恢复候选池）
 	mux.HandleFunc("POST /api/robot/restart", a.requireToken(a.handleRobotRestart))
