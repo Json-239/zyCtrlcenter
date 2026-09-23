@@ -346,6 +346,116 @@ def main():
         if _ch is None:
             check("起点校正真实网格用例(可选): 有链数据", True, "跳过(无链数据)")
 
+    # ============================================================ B10. 起点连通性校正(2026-09-23i 对称兜底)
+    # 现场: map45 入口走廊孤立域 —— 号跳进 map45 落在"入口走廊"连通域(506 格, 含出口跳转点),
+    #   目标(钟馗走位点 (1162,848))在另一连通域(2729 格):
+    #   ① __walk_start_fix_cell 不触发(起点 (632,440) 可走, 不是落墙/越界);
+    #   ② 目标连通兜底 ncc(from→to) 退化: 起点域里离目标最近的点就是起点自己(668px)
+    #      → path2b 起终点同格必 None → 仍 NO_LEGAL_ROUTE(现场 robot0001116 18:53 连报 3 次)。
+    #   修法 __walk_start_connect_fix_cell: 把 ncc 的"泛洪源/扫描点"对调(从**目标**泛洪、
+    #   从**起点**扩环) → 校正到"与目标连通且离起点最近"的格 (648,696)(距起点 256px) → A* 通。
+    #   保守口径: 校正点与起点同格(≤1px) / 距离超上限(同 ROAM_SNAP_MAX_DIST_PX 口径, 退 1024)
+    #   → 返回 None(不写回=不瞬移); 调用方只在非任务链启用 + 写回前先试算路径存在。
+    import math as _math_c
+    check("quest_engine 定义 __walk_start_connect_fix_cell(起点连通性校正)",
+          "def __walk_start_connect_fix_cell(" in qe)
+    _i_alt = qe.find("_alt = __nearest_connected_cell(_g2, from_x, from_y, to_x, to_y)")
+    _i_sf = qe.find("_sf0 = __walk_start_connect_fix_cell(_g2, from_x, from_y, to_x, to_y)")
+    _i_fail = qe.find("地图 %d 无可行路径 (%d,%d)→(%d,%d), 取消行走")
+    check("新校正在目标连通兜底之后、NO_LEGAL_ROUTE 报错之前(依次兜底不取代旧逻辑)",
+          -1 < _i_alt < _i_sf < _i_fail, (_i_alt, _i_sf, _i_fail))
+    check("新校正只在非任务链启用(与目标连通兜底同口径, 链任务保持立即失败停链)",
+          qe.count('if path2 is None and not bool(getattr(quest, "active", False)):') >= 2)
+    check("写回统一走 __set_pose(..., \"walk_start_fix\") + 中文 warn(含距 Npx)",
+          '__set_pose(robot_object, _snx0, _sny0, "walk_start_fix")' in qe
+          and "起点(%d,%d)与目标不连通, 校正到(%d,%d) 距 %dpx" in qe)
+    check("写回前先试算(校正点→目标 路径存在才写回, 防搬了家仍走不通)",
+          "path2s = __build_path(quest, robot_object.m_mapid," in qe
+          and "path2 = path2s" in qe)
+    check("保守口径: 同格/超上限 → None(不写回=不瞬移; 复用 ROAM_SNAP_MAX_DIST_PX)",
+          "if _dist <= 1:" in qe and "if _dist > max_dist_px:" in qe
+          and 'getattr(random_walk, "ROAM_SNAP_MAX_DIST_PX", max_dist_px)' in qe)
+
+    try:
+        _ns_base = ns
+    except NameError:
+        _ns_base = {}
+    ns_conn = dict(_ns_base) if _rp is not None else {}
+    ns_conn["math"] = _math_c
+    frag_conn = _extract_func(qe, "__walk_start_connect_fix_cell")
+    check("提取 quest_engine.__walk_start_connect_fix_cell", frag_conn is not None)
+    if frag_conn:
+        try:
+            exec(frag_conn, ns_conn)
+        except Exception as e:  # noqa
+            check("exec quest_engine.__walk_start_connect_fix_cell", False, str(e))
+    connc = ns_conn.get("__walk_start_connect_fix_cell")
+    if _rp is not None and connc is not None:
+        # ---- 夹具(20x12, 见 FIX_GRID 注释): 主区(40,40) 与右下口袋(280,88) 不连通 ----
+        _cfg = _rp.MapGrid(FIX_MAP, FIX_GRID)
+        _cfinder = _rp.GridPathFinder(_cfg)
+        check("夹具前提: 主区(40,40)→口袋(280,88) A* 无解",
+              _cfinder.find_path(40, 40, 280, 88) is None)
+        r = connc(_cfg, 40, 40, 280, 88)
+        _dc = None if r is None else int(_math_c.sqrt((r[0] - 40) ** 2 + (r[1] - 40) ** 2))
+        check("夹具: 起点可走但与口袋不连通 → 校正到口袋域最近格 (248,56), 距 208px",
+              r == (248, 56) and _dc == 208, (r, _dc))
+        check("夹具: 校正点与目标连通(校正后 A* 通, 修复生效)",
+              r is not None and _cfinder.find_path(r[0], r[1], 280, 88) is not None)
+        check("夹具: 超限(max_dist_px=100) → None(不写回)",
+              connc(_cfg, 40, 40, 280, 88, max_dist_px=100) is None)
+        check("夹具: 起点与目标同域可通 → None(不该校正; ncc 返回起点自身格, 距离 0)",
+              connc(_cfg, 40, 40, TARGET_MAIN[0], TARGET_MAIN[1]) is None)
+        _all_blocked2 = _rp.MapGrid(FIX_MAP, {"w": 6, "h": 6, "rows": ["1" * 6] * 6})
+        check("夹具: 整片不可走 → None(交调用方原报错)",
+              connc(_all_blocked2, 40, 40, 40, 40) is None)
+
+        # ---- 真实网格(离线只读, 有链数据才测) ----
+        if _ch is None:
+            check("起点连通真实网格用例(可选): 有链数据", True, "跳过(无链数据)")
+        else:
+            _g45c = (_ch.get("map_grids") or {}).get("45")
+            if _g45c:
+                _grid45c = _rp.MapGrid(45, _g45c)
+                _f45c = _rp.GridPathFinder(_grid45c)
+                _sgx, _sgy = _grid45c.to_grid(632, 440)
+                _tgx, _tgy = _grid45c.to_grid(1162, 848)
+                check("现场 map45 前提: 起点/目标都可走, 但 A* 无解(起点孤立域 506 格)",
+                      not _grid45c.blocked(_sgx, _sgy) and not _grid45c.blocked(_tgx, _tgy)
+                      and _f45c.find_path(632, 440, 1162, 848) is None
+                      and _rp.nearest_walkable(_grid45c, 632, 440) == (_sgx, _sgy))
+                r = connc(_grid45c, 632, 440, 1162, 848)
+                _d45 = None if r is None else int(_math_c.sqrt((r[0] - 632) ** 2 + (r[1] - 440) ** 2))
+                check("现场 map45: 校正到 (648,696)(距起点 256px, 与目标同域)",
+                      r == (648, 696) and _d45 == 256, (r, _d45))
+                check("现场 map45: 校正后 A* 到目标可达(修复生效)",
+                      r is not None and _f45c.find_path(r[0], r[1], 1162, 848) is not None)
+                r2 = connc(_grid45c, 632, 440, 1720, 1128)
+                _nw45 = _rp.nearest_walkable(_grid45c, 1720, 1128)
+                _ok45b = False
+                if r2 is not None and _nw45 is not None:
+                    _ok45b = _f45c.find_path(r2[0], r2[1],
+                        _nw45[0] * 16 + 8, _nw45[1] * 16 + 8) is not None
+                check("现场 map45: 目标(1720,1128)本身阻挡 → 校正到 (648,696) 且到就近可走格可达",
+                      r2 == (648, 696) and _ok45b, (r2, _nw45))
+                check("现场 map45: 上限压到 100px → None(超限不写回)",
+                      connc(_grid45c, 632, 440, 1162, 848, max_dist_px=100) is None)
+            # ---- 回归: map24 越界起点 仍"超限不写回" ----
+            _g24c = (_ch.get("map_grids") or {}).get("24")
+            if _g24c:
+                _grid24c = _rp.MapGrid(24, _g24c)
+                check("回归 map24: 越界起点(4712,2776) 最近可达面 2026px > 上限 → None(仍不写回)",
+                      connc(_grid24c, 4712, 2776, 1768, 1064) is None)
+                check("回归 map24: 闸门确为距离上限(放宽到 3000px 才给出候选 (2936,1800))",
+                      connc(_grid24c, 4712, 2776, 1768, 1064, max_dist_px=3000) == (2936, 1800))
+            # ---- 回归: map49 阻挡起点 仍走"阻挡校正"(B9), 且两机制对同一场景给同一校正点 ----
+            _g49c = (_ch.get("map_grids") or {}).get("49")
+            if _g49c:
+                _grid49c = _rp.MapGrid(49, _g49c)
+                check("回归 map49: 阻挡起点仍由 __walk_start_fix_cell 解决(新 helper 同点一致)",
+                      fixc is not None and fixc(_grid49c, 1160, 856) == (1336, 856)
+                      and connc(_grid49c, 1160, 856, 1753, 918) == (1336, 856))
+
     # ============================================================ C. "免费 hop 有效性"机制
     # (2026-09-23g, 用户口径: 免费跳点走不到 → 优先改走 NPC 跳转)
     #   A. hop_first_reach_ok: 首跳可达性预判(可达→免费优先; 不可达但就近点 ≤400px→仍走;
