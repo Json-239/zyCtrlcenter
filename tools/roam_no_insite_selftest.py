@@ -147,10 +147,15 @@ def main():
           "def __note_walk_progress(" in rw)
     check("random_walk 定义 __roam_switch_map(连续失败换图/停止)",
           "def __roam_switch_map(" in rw)
-    check("常量: 试算3次/吸附40格/换图阈值3/失败节流20s/重试冷却5s",
+    check("random_walk 定义 __stop_roam_far_snap(吸附超限→停止游荡待命)",
+          "def __stop_roam_far_snap(" in rw)
+    check("常量: 试算3次/吸附40格/换图阈值3/失败节流20s/重试冷却5s/吸附上限1024px",
           "ROAM_PATH_CHECK_TRIES = 3" in rw and "ROAM_SNAP_RADIUS = 40" in rw
           and "ROAM_FAILS_TO_SWITCH = 3" in rw and "ROAM_FAIL_GAP_MS = 20000" in rw
-          and "ROAM_PICK_RETRY_MS = 5000" in rw)
+          and "ROAM_PICK_RETRY_MS = 5000" in rw and "ROAM_SNAP_MAX_DIST_PX = 1024" in rw)
+    check("吸附距离上限调用处判断(欧氏距离, px): 超限 → 停止游荡",
+          "if _d > ROAM_SNAP_MAX_DIST_PX:" in rw
+          and "_d = (((snap[0] - cur[0]) ** 2 + (snap[1] - cur[1]) ** 2)) ** 0.5" in rw)
     check("选点连通试算复用 quest_engine.__build_path(与 __do_walk 同寻路, 非新写)",
           "quest_engine.__build_path(quest, w.mapid," in rw)
     check("__random_walk_move 入口: 无进展计数 + 吸附",
@@ -415,25 +420,31 @@ def main():
             return types.SimpleNamespace(chain={"map_grids": {str(FIX_MAP): FIX_GRID}})
 
         _feas_hook = {"v": None}
+        _sched = []
         qe_stub.__chain_grid_for = _stub_chain_grid
         qe_stub.__build_path = _stub_build_path
         qe_stub.get_quest = _stub_get_quest
         qe_stub.roam_feasible_maps = lambda quest, fm, cands: _feas_hook["v"]
+        qe_stub.__schedule = lambda quest, d: _sched.append(d)
+        qe_stub.__human_delay = lambda ms: ms
         ns["quest_engine"] = qe_stub
         ns["__quest"] = _stub_get_quest
         ns["random"] = __import__("random")
         ns["hashlib"] = __import__("hashlib")
         ns["robot_path"] = _rp
+        ns["diag"] = types.SimpleNamespace(log=lambda m: None)
         # ROAM_* 常量注入(默认参数/函数体都引用它们; 从源码解析实际值, 改常量自检跟着变)
         import re as _re
         for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
             ns[_m.group(1)] = int(_m.group(2))
-        check("图内死点: ROAM_* 常量齐全(6 个)",
-              len([k for k in ns if k.startswith("ROAM_")]) == 6,
+        check("图内死点: ROAM_* 常量齐全(7 个)",
+              len([k for k in ns if k.startswith("ROAM_")]) == 7,
               sorted(k for k in ns if k.startswith("ROAM_")))
 
         for name in ("__grid_for", "__snap_walkable", "__note_walk_progress",
-                     "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point"):
+                     "__rng", "__auto_range", "__roam_switch_map", "__pick_walk_point",
+                     "__write_pose", "__stop_roam_far_snap", "__dither_point",
+                     "__other_bot_positions", "_cos", "_sin", "__random_walk_move"):
             frag = _extract_func(rw, name)
             check("提取 random_walk.%s(D 段)" % name, frag is not None)
             if frag:
@@ -590,6 +601,77 @@ def main():
             pt = _pick(None, w9, min_dist=0, from_pos=None)
             check("选点: from_pos 为空(选落地点) → 不试算(旧行为)",
                   pt is not None and len(_bp_calls) == _calls2, pt)
+
+        # ---- E. __random_walk_move 端到端: 吸附上限(1024px, 欧氏) ----
+        # 口径(用户 2026-09-23): ≤上限 → 照常吸附救出; >上限 → 不吸附不瞬移 → 停止游荡待命。
+        _move = ns.get("__random_walk_move")
+
+        def _mk_move_ro(mapid, x, y):
+            ro = types.SimpleNamespace()
+            ro.m_mapid = mapid
+            ro.m_pose = [x, y, 0]
+            ro.m_account = ["selftest"]
+            ro.m_fight_state = False
+            return ro
+
+        def _mk_move_w(mapid, rng_box):
+            ww = _mk_w(mapid, rng_box)
+            ww.target = None
+            ww.target_fail = 0
+            ww.dither_left = 0
+            ww.walk_mode = "walk"
+            ww.dither_ratio = 0.0
+            ww.dither_min = 30
+            ww.dither_max = 90
+            ww.heading = None
+            ww.heading_span = 0.6
+            ww.step_min = 150
+            ww.step_max = 300
+            ww.walk_fail = 0
+            ww.walk_fail_ms = 0
+            ww._prog_pos = None
+            ww.walk_next_try_ms = 0
+            ww.stand_until_ms = 0
+            return ww
+
+        if _move is not None:
+            _box = [[48, 48], [250, 150]]	# 主区可走范围内
+            # ①≤上限: 位置在阻挡格(竖墙 x=5,y=5), 最近可走格 16px → 吸附 + 正常安排走路
+            del _sched[:]
+            del disp_calls[:]
+            ro1 = _mk_move_ro(FIX_MAP, 5 * 16 + 8, 5 * 16 + 8)	# 格(5,5)=墙
+            w1 = _mk_move_w(FIX_MAP, _box)
+            _move(ro1, _stub_get_quest(ro1), w1, 100000)
+            check("吸附上限: ≤1024px → 照常吸附(写回 m_pose)",
+                  ro1.m_pose[0] == 4 * 16 + 8 and ro1.m_pose[1] == 5 * 16 + 8, ro1.m_pose[:2])
+            check("吸附上限: ≤1024px → 照常安排走路(不停止)",
+                  len(_sched) == 1 and not disp_calls,
+                  (_sched[-1]["data"] if _sched else None, disp_calls))
+            # ②>上限: 位置远在网格外(欧氏距离 ≈1914px) → 不吸附(位置不动) + 停止游荡
+            del _sched[:]
+            del disp_calls[:]
+            ro2 = _mk_move_ro(FIX_MAP, 1600, 1600)
+            w2 = _mk_move_w(FIX_MAP, _box)
+            _move(ro2, _stub_get_quest(ro2), w2, 200000)
+            check("吸附上限: >1024px → 不吸附(位置不变, 无瞬移)",
+                  ro2.m_pose[0] == 1600 and ro2.m_pose[1] == 1600, ro2.m_pose[:2])
+            check("吸附上限: >1024px → 走'停止游荡'路径(不是换图/不是走路)",
+                  len(disp_calls) == 1
+                  and disp_calls[0].get("cmd") == "random_walk_stop" and not _sched,
+                  (disp_calls, _sched))
+            check("吸附上限: >1024px → 有明确 warn 日志(写明距离/上限)",
+                  any("超过上限" in m and "1024px" in m for m in logs), logs[-2:])
+            # ③边界: 恰好在上限内(≤) → 仍吸附(取 1000px 处构造)
+            del _sched[:]
+            del disp_calls[:]
+            ro3 = _mk_move_ro(FIX_MAP, 312 + 700, 184 + 700)	# 距格(19,11)≈990px
+            w3 = _mk_move_w(FIX_MAP, _box)
+            ro3.m_pose = [312 + 700, 184 + 700, 0]
+            _move(ro3, _stub_get_quest(ro3), w3, 300000)
+            check("吸附上限: 990px(<上限) → 仍吸附救出",
+                  (ro3.m_pose[0], ro3.m_pose[1]) == (312, 184)
+                  and len(_sched) == 1 and not disp_calls,
+                  (ro3.m_pose[:2], _sched, disp_calls))
 
     nfail = 0
     for name, ok, detail in results:
