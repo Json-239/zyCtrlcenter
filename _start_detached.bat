@@ -1,18 +1,33 @@
 @echo off
-REM 2026-09-22 detached start (NOT "start /b"): /b shares the parent console,
-REM so the controller dies when the parent shell is cleaned up (2 silent deaths).
+REM ============================================================
+REM  Production starter (Windows, detached): controller + robot.
+REM
+REM  - Detached via "start /min". Do NOT use "start /b": /b shares the parent
+REM    console, so the controller dies when the parent shell is cleaned up
+REM    (documented cause of 2 silent deaths on 2026-09-22).
+REM  - --auto-robot: the controller starts robot_single_robot.exe itself
+REM    (cwd = deploy dir; orphan robot processes in that dir are killed first
+REM    so two processes never fight over the single control channel).
+REM  - CTRL_AUTO_RESTORE=1: after a controller restart, re-dispatch tasks
+REM    (start_chain / ghost_start) from stored intents.
+REM
+REM  NOTE: keep this file ASCII-only. cmd decodes .bat with the console code
+REM  page; multi-byte (UTF-8) comment bytes can swallow quotes and break the
+REM  parser mid-line (seen: a Chinese REM line ran as a bogus command).
+REM  Panel after start: http://127.0.0.1:28082/
+REM ============================================================
 cd /d F:\ZyBin\zyCtrlcenter
 set ROBOT_CTRL_HOST=127.0.0.1
 set ROBOT_CTRL_PORT=27200
 set CTRL_AUTO_RESTORE=1
-REM 2026-09-22 服务端在线数直连（livecount，参考 game_admin_web/origin_hqm 的 GMApi::onlineCount）
-REM   接口：GET http://<游戏服>:8080/gm/online  → {"online_count":N,"success":true,"serverId":1000}
-REM   无需 GM 授权；实测：192.168.0.201:8080 通；生产 47.96.8.240:8080 需在游戏服放行
-REM   **** 2026-09-22 用户口径：暂不做"全服含真人"，先只用我们自己的握手数 → ENABLED=0；
-REM        将来游戏服放行了把这里改回 1 即可（也可用 POST /api/livecount 在线切换，不用重启）****
-REM   **** 白名单要放行的是本机"公网出口 IP 110.90.3.243"（不是内网 192.168.0.193）****
+
+REM Live server online count (livecount). Disabled per owner's decision 2026-09-22:
+REM   GET http://<game-server>:8080/gm/online -> {"online_count":N,"success":true,"serverId":1000}
+REM   No GM auth needed. To enable, allowlist our public egress IP 110.90.3.243
+REM   on the game server, set ENABLED=1 here, or toggle at runtime via
+REM   POST /api/livecount (no restart needed).
 set CTRL_LIVECOUNT_ENABLED=0
 set CTRL_LIVECOUNT_URL=http://47.96.8.240:8080
 set CTRL_LIVECOUNT_SERVER_ID=1000
 
-start "zyctrlcenter" /min "F:\ZyBin\zyCtrlcenter\zyctrlcenter.exe" --deploy "F:\ZyBin\xm\2d-xiyou-server\robot\deploy\single_robot_zy"
+start "zyctrlcenter" /min "F:\ZyBin\zyCtrlcenter\zyctrlcenter.exe" --deploy "F:\ZyBin\xm\2d-xiyou-server\robot\deploy\single_robot_zy" --auto-robot
