@@ -58,6 +58,10 @@ check("start: 手动采购对抓鬼号有闸(errand/food 拒绝)", '手动采购
 	os.path.join(SCRIPT, "shop_errand.py"), encoding="utf-8").read())
 check("start: 采购前停空闲游荡", "m_collect_walk" in open(
 	os.path.join(SCRIPT, "shop_errand.py"), encoding="utf-8").read())
+_srt = open(os.path.join(SCRIPT, "shop_errand.py"), encoding="utf-8").read()
+check("start: 战斗中硬闸(不启动采购)", "战斗中, 不启动商店采购" in _srt)
+check("shop_errand: env_snapshot 现场快照 + 储备金货架白名单",
+	"def env_snapshot" in _srt and "RESERVE_SHELVES" in _srt)
 check("单次上限 SHOP_MAX_COUNT=500", se.SHOP_MAX_COUNT == 500)
 check("失败通知码含 552/63/1248/1255/1278", all(n in se.SHOP_FAIL_NOTICES for n in (552, 63, 1248, 1255, 1278)))
 
@@ -173,6 +177,11 @@ check("quest_engine: __cmd_shop_errand 有会话锁检查", "shop_errand" in qe 
 check("quest_engine: 采购完成回调 notify_done", "_se.notify_done" in qe)
 check("quest_engine: 采购失败回调 notify_failed", "_se.notify_failed" in qe)
 check("quest_engine: 识别 1110 扣储备金通知", "if _nid == 1110:" in qe)
+check("quest_engine: 购买静默无应答检测(>25s 现场快照)", "商店购买静默无应答" in qe)
+check("quest_engine: 记录购买会话货架/环境/发送时刻",
+	'_ctx["sale_index"] = data[5]' in qe and '_ctx["buy_sent_ts"] = __now_ms()' in qe)
+check("quest_engine: 点 NPC 无响应日志带环境快照", "静默拒绝点击" in qe)
+check("quest_engine: begin_chase 记追捕时刻", "m_last_chase_ms" in qe)
 
 cfg = rd("deploy/zones/prod-240-2300/script/config.py")
 check("config: robot_food_shop_npc=13021(真杂货商)", "robot_food_shop_npc = 13021" in cfg)
