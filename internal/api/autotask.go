@@ -26,6 +26,7 @@ import (
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/intent"
 	"zyctrlcenter/internal/services/reghost"
+	"zyctrlcenter/internal/services/waterline"
 	"zyctrlcenter/internal/state"
 )
 
@@ -651,21 +652,20 @@ func (a *API) newbieMaxLevel() int {
 	return 31
 }
 
-// isTasking 是否在跑任务（与恢复引擎 needsRestore 同口径：这些状态不打扰）。
-func isTasking(r state.Robot) bool {
-	// 2026-09-22: 游荡/孵化中的号也算"在忙"—— 游荡与抓鬼互斥，自动任务
-	// 若把它当空闲号下发抓鬼，会打断游荡（半月岛试跑实测被抢断）。
-	if r.Walking() {
-		return true
-	}
-	switch strings.ToUpper(strings.TrimSpace(r.State)) {
-	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT":
-		return true
-	case "WAIT_TASK":
-		return r.TaskIndex != 0
-	}
-	return false
-}
+// isTasking 是否"在跑/不该被自动打扰"（判据 = waterline.Busy，与在线水位保持器、游荡池
+// roampool.Idle、恢复引擎 needsRestore 同一份口径；2026-09-23 删掉此前的复制实现，避免第三套口径）。
+//
+// 2026-09-22 纳入游荡/孵化（Walking）：游荡与抓鬼在机器人端互斥，把游荡号当空闲号下发抓鬼
+// 会打断游荡（半月岛试跑实测被抢断）。
+//
+// 2026-09-23 与地图页口径（26f4660）补齐：
+//   - **SUBMIT**（交付/提交中）= 推进中，与 FIGHT/NAV 并列，不算空闲、不派活；
+//   - **ERROR**（机器人上报的卡住/停链态）= 异常，同样不派活、不当可回收（等人工/机器人端自愈）；
+//   - 顺带并入 Fight / GhostActive（三池交互审计 C5：修复前 39~43 个"正在跑"的号
+//     —— WAIT_GHOST/READY/SUBMIT 态但抓鬼会话活跃 —— 被当空闲候选混进候选表）。
+//
+// 调用点：autotaskCandidates 的"在跑就不打扰"，链在途的"命令已生效"（同一份判据）。
+func isTasking(r state.Robot) bool { return waterline.Busy(r) }
 
 // usableInZone 该号在当前区是否"已验证可用"（池内该区记录 usable=true 或运行时在线）。
 func (a *API) usableInZone(acc string) bool {

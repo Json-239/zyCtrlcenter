@@ -245,6 +245,31 @@ func TestPickOfflineWithoutIdlePreference(t *testing.T) {
 	}
 }
 
+// 2026-09-23（与地图页 26f4660 同口径）：交付中（SUBMIT）与卡住（ERROR）的号都不能
+// 当"空闲号"立刻压 —— 前者在推进、后者是异常（等人工/机器人端自愈）；两者都只进"待下线"。
+func TestPickOfflineSubmitAndErrorGoPending(t *testing.T) {
+	robots := []state.Robot{
+		online("idle1"),
+		{Account: "sub1", Online: true, State: "SUBMIT"},
+		{Account: "err1", Online: true, State: "ERROR"},
+	}
+	now, pending := waterline.PickOffline(robots, 3, true)
+	if len(now) != 1 || now[0] != "idle1" {
+		t.Fatalf("只有真空闲号能立刻压: now=%v", now)
+	}
+	if len(pending) != 2 || pending[0] != "sub1" || pending[1] != "err1" {
+		t.Fatalf("SUBMIT（推进中）/ ERROR（异常）只进待下线: pending=%v", pending)
+	}
+	// 不挑空闲（prefer_idle=false）也一样：忙/异常号绝不进 now
+	now2, pending2 := waterline.PickOffline(robots, 3, false)
+	if len(now2) != 1 || now2[0] != "idle1" {
+		t.Fatalf("prefer_idle=false 时 now 仍只含空闲号: now=%v", now2)
+	}
+	if len(pending2) != 2 {
+		t.Fatalf("prefer_idle=false 时 SUBMIT/ERROR 仍进待下线: pending=%v", pending2)
+	}
+}
+
 func TestBusyJudgement(t *testing.T) {
 	if waterline.Busy(online("a")) {
 		t.Fatal("ONLINE 空闲号不该判为忙")
@@ -266,6 +291,22 @@ func TestBusyJudgement(t *testing.T) {
 	}
 	if !waterline.Busy(state.Robot{Account: "a", Online: true, Walk: map[string]any{"enabled": true}}) {
 		t.Fatal("游荡中应判为忙（游荡与抓鬼互斥，别打断）")
+	}
+	// 2026-09-23（前端 26f4660 同口径）：SUBMIT = 推进中（与 FIGHT/NAV 并列），ERROR = 异常。
+	if !waterline.Busy(state.Robot{Account: "a", Online: true, State: "SUBMIT"}) {
+		t.Fatal("交付中（SUBMIT）应判为忙：推进中，不压、不当空闲派活")
+	}
+	if !waterline.Busy(state.Robot{Account: "a", Online: true, State: " error "}) {
+		t.Fatal("卡住（ERROR）应判为忙/异常（大小写与空白也要归一）：不派活、不硬压")
+	}
+	// 对照：等待段（WAIT_GHOST）不是忙 —— 与 roampool.Interruptible 的白名单口径一致
+	// （有活跃抓鬼会话时 GhostActive 已经把它判成忙，这里是"没有会话、只在等推送"的形态）。
+	if waterline.Busy(state.Robot{Account: "a", Online: true, State: "WAIT_GHOST"}) {
+		t.Fatal("WAIT_GHOST 且无活跃抓鬼会话 = 等待段，不算忙（否则水位永远压不动等刷鬼的号）")
+	}
+	if !waterline.Busy(state.Robot{Account: "a", Online: true, State: "WAIT_GHOST",
+		Ghost: map[string]any{"enabled": true}}) {
+		t.Fatal("WAIT_GHOST 且抓鬼会话活跃 = 在忙（GhostActive 兜住）")
 	}
 }
 

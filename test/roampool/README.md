@@ -28,11 +28,11 @@
 ## 覆盖场景清单
 | 用例 | 场景 | 预期 |
 |---|---|---|
-| `TestRoamingAndIdleJudgements` | walk.enabled=true / 孵化中 / 普通在线 / 离线；NAV / WAIT_TASK(有任务) | 只有"游荡且不在孵化"算在游荡；在忙的都不算空闲 |
+| `TestRoamingAndIdleJudgements` | walk.enabled=true / 孵化中 / 普通在线 / 离线；NAV / WAIT_TASK(有任务) / SUBMIT / ERROR / WAIT_GHOST(无会话) | 只有"游荡且不在孵化"算在游荡；在忙/异常的都不算空闲（SUBMIT/ERROR 2026-09-23 补齐），等待段 WAIT_GHOST 仍算空闲 |
 | `TestPickReclaimPrefersCrowdedMap` | 图10 挤 3 个（2 个在游荡）、图26/24 各 1 个 | 先回收图10 的游荡号（顺带纠偏分布） |
 | `TestPickReclaimShortfallAndEmpty` | 游荡号不足 n / 没有游荡号 / n=0 | 有几个给几个；空结果；空结果 |
 | `TestPickReclaimTieBreakIsStable` | 两图人数相同 | 按账号升序（结果稳定、日志可预期） |
-| `TestPickIdleFiltersBusyAndOffline` | 空闲 / 抓鬼 / 战斗 / 游荡 / 孵化 / WAIT_TASK(有任务) / 离线 / 空账号 | 只挑出真正空闲的号 |
+| `TestPickIdleFiltersBusyAndOffline` | 空闲 / 抓鬼 / 战斗 / 游荡 / 孵化 / WAIT_TASK(有任务) / SUBMIT / ERROR / 离线 / 空账号 | 只挑出真正空闲的号（SUBMIT/ERROR 不派游荡） |
 | `TestPickIdleRespectsN` | 3 个空闲要 2 个 / 要 0 个 | 保序取 2；n≤0 空结果 |
 | `TestBalanceAssignEven` | 3 张空图 6 个号 | 各 2 个 |
 | `TestBalanceAssignRemainder` | 3 张空图 5 个号 | 2/2/1（余数给并列中图号小的） |

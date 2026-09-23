@@ -389,3 +389,29 @@ func TestAutoTaskGhostRunningCountsOnlyActiveSessions(t *testing.T) {
 		t.Fatalf("两个号都已验证可用，usable 应为 2: %v", gp)
 	}
 }
+
+// 2026-09-23（前端 26f4660 同口径；Go 侧 isTasking 改为直接复用 waterline.Busy）：
+// 「推进中 / 异常」的号不能混进抓鬼候选 ——
+//   - SUBMIT（交付/提交中）= 推进中（与 FIGHT/NAV 并列），不算空闲、不派活；
+//   - ERROR（机器人上报的卡住/停链态）= 异常，先人工处理，同样不派活；
+//   - 对照：IDLE 号仍应正常进候选（证明是"按状态排除"，不是整体失效）。
+func TestGhostCandidatesSkipSubmitAndError(t *testing.T) {
+	env := newTestEnv(t, "")
+	idle, submit, stuck := "cst_idle@xy3.com", "cst_submit@xy3.com", "cst_error@xy3.com"
+	env.pool.Add([]string{idle, submit, stuck}, "pwd", testZoneAddr, "")
+	for _, a := range []string{idle, submit, stuck} { // 三号都已毕业（45 级）+ 该区可用
+		env.pool.SetZoneState(a, testZoneAddr, accounts.ZoneState{Verified: true, Usable: true, Level: 45})
+	}
+	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
+		"robots": []any{
+			map[string]any{"account": idle, "level": 45, "online": true, "state": "IDLE", "task_index": 0},
+			map[string]any{"account": submit, "level": 45, "online": true, "state": "SUBMIT", "task_index": 0},
+			map[string]any{"account": stuck, "level": 45, "online": true, "state": "ERROR", "task_index": 0},
+		}, "_zone": testsupportZone()})
+
+	body := getJSON(t, env.srv.URL+"/api/autotask")
+	cands, _ := body["candidates"].(map[string]any)
+	if cands["ghost"] != float64(1) {
+		t.Fatalf("抓鬼候选只该剩 IDLE 号（SUBMIT 推进中 / ERROR 异常都不派活），实得 %v", cands)
+	}
+}

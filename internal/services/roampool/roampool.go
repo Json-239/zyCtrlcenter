@@ -365,10 +365,16 @@ func Roaming(r state.Robot) bool {
 }
 
 // Idle 该号是否**空闲**（在线 且 没在干活）：战斗 / 活跃抓鬼 / 游荡（含孵化）/ 任务态
-// （NAV/CLICK/DIALOG/FIGHT/SHOP/ALLOC/WAIT_NEXT，以及 WAIT_TASK 且任务索引非 0）都不算空闲。
+// （NAV/CLICK/DIALOG/FIGHT/SHOP/ALLOC/WAIT_NEXT/**SUBMIT**，以及 WAIT_TASK 且任务索引非 0）、
+// 以及 **ERROR**（卡住/停链的异常态）都不算空闲。
 //
 // 判据复用 waterline.Busy —— 与在线水位保持器**同一口径**（否则会出现"水位以为它空闲、游荡池以为它在忙"
 // 这种两套判据打架的场面）。
+//
+// WAIT_GHOST（钟馗等刷鬼的"等待段"）**不在** Busy 黑名单里 → 无活跃抓鬼会话时算空闲。
+// 与 Interruptible 的白名单口径一致（都把等待段当"可中断、只损失本轮"）；有活跃抓鬼会话时
+// GhostActive 已经把它判成忙，两处不会打架。若现场认为"等刷鬼也不能派游荡/不能压号"，
+// 需用户确认后在 Busy 里单列排除（会同时影响水位压号，别只改这里）。
 func Idle(r state.Robot) bool {
 	if r.Account == "" || !r.Online {
 		return false
@@ -384,7 +390,11 @@ func Idle(r state.Robot) bool {
 //
 //   - 离线 / 战斗中（r.Fight）/ 游荡中 / 孵化中 → false（后者由本池自己管，不重复处理）；
 //   - WAIT_GHOST（钟馗等刷鬼/巡逻）、READY（刚启动未接活）、IDLE/ONLINE/空 → true；
-//   - FIGHT/SUBMIT/DIALOG/NAV/CLICK/SHOP/ALLOC/WAIT_NEXT → false（推进中，不打断）。
+//   - FIGHT/SUBMIT/DIALOG/NAV/CLICK/SHOP/ALLOC/WAIT_NEXT → false（推进中，不打断）；
+//   - ERROR（机器人上报的卡住/停链态）→ false（异常，先人工处理，别当成可回收的号）。
+//
+// 与 Idle/Busy 的关系（2026-09-23 口径核对）：ERROR 已并入 waterline.Busy（不派活、不硬压），
+// 这里是白名单式实现，天然不含 ERROR/SUBMIT —— 两处结论一致，无冲突。
 func Interruptible(r state.Robot) bool {
 	if r.Account == "" || !r.Online {
 		return false

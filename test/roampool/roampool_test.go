@@ -80,6 +80,24 @@ func TestRoamingAndIdleJudgements(t *testing.T) {
 			t.Fatalf("抓鬼/战斗/游荡/孵化的号不该算空闲: %+v", r)
 		}
 	}
+	// 2026-09-23（前端 26f4660 同口径）：交付中（SUBMIT）与卡住（ERROR）也不算空闲 ——
+	// 前者在推进、后者是异常（先人工处理）；判据经 waterline.Busy 统一。
+	submit := online("s1", 10)
+	submit.State = "SUBMIT"
+	if roampool.Idle(submit) {
+		t.Fatal("交付中（SUBMIT）不该算空闲：派游荡会打断交付")
+	}
+	stuck := online("e1", 10)
+	stuck.State = "ERROR"
+	if roampool.Idle(stuck) {
+		t.Fatal("卡住（ERROR）不该算空闲：异常号先人工处理，别派游荡")
+	}
+	// 对照：等刷鬼的等待段（WAIT_GHOST，无活跃会话）仍算空闲（与 Interruptible 白名单一致）
+	waitGhost := online("w1", 10)
+	waitGhost.State = "WAIT_GHOST"
+	if !roampool.Idle(waitGhost) {
+		t.Fatal("WAIT_GHOST 且无活跃抓鬼会话 = 等待段，应算空闲")
+	}
 	task := online("a", 10)
 	task.State = "NAV"
 	if roampool.Idle(task) {
@@ -135,9 +153,13 @@ func TestPickIdleFiltersBusyAndOffline(t *testing.T) {
 	waitTask.State, waitTask.TaskIndex = "WAIT_TASK", 5
 	off := online("off1", 10)
 	off.Online = false
+	submit := online("s1", 10)
+	submit.State = "SUBMIT" // 2026-09-23：交付中 = 推进中，不派游荡
+	stuck := online("e1", 10)
+	stuck.State = "ERROR" // 2026-09-23：卡住 = 异常，不派游荡
 	robots := []state.Robot{
 		online("i1", 10), ghosting("g1"), fighting("f1"), walking("w1", 10), hatching("h1", 6),
-		waitTask, off, {Account: "", Online: true},
+		waitTask, submit, stuck, off, {Account: "", Online: true},
 	}
 	got := roampool.PickIdle(robots, 10)
 	if len(got) != 1 || got[0] != "i1" {

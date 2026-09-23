@@ -19,6 +19,9 @@
 - 输入是构造的结构体/数字（不是报文），依据是 2026-09-22 拍板口径：
   人数 = 服务端全服在线（含真人，`svr_online`），缺失/超过 180 秒过期时用本地握手数兜底；
   每轮 60s、死区 3、单轮 ±5、空闲优先断号。
+  2026-09-23 起 `Busy`（"不该被自动打扰"判据）与前端地图页 26f4660 同口径：SUBMIT（交付中）=
+  推进中、ERROR（卡住/停链）= 异常 —— 两者都不算空闲（不硬压、不派活；ERROR 的号进待下线后
+  要等它自愈回正常态才按常规处理）。
 - 假 `Offline` 会像真实壳层一样把号标记为离线（壳层会 `MarkRemoved` + 删行），
   假 `Online` **不**立刻上线（真实要等机器人登录上报）——在途记账正是靠这个差异验证。
 
@@ -35,7 +38,8 @@
 | `TestPickOfflineBusyGoesPending` | 1 忙 + 2 空闲，要 3 个 | 空闲进 now；抓鬼中的忙号进 pending（不硬断） |
 | `TestPickOfflineNotEnoughAndOfflineSkipped` | 只有 1 空闲 + 1 忙，要 5 个；含已离线号 | 有几个给几个；离线号不参与；`n<=0` 返回空 |
 | `TestPickOfflineWithoutIdlePreference` | preferIdle=false（随机补选路径） | 按输入顺序取，但忙号仍只进 pending |
-| `TestBusyJudgement` | 空闲 / 抓鬼会话 / 战斗 / DIALOG / WAIT_TASK(有/无任务) / 游荡 | 只有真在干活的算忙 |
+| `TestPickOfflineSubmitAndErrorGoPending` | SUBMIT（交付中）/ ERROR（卡住）与空闲号混排 | 只有空闲号进 now；SUBMIT/ERROR 只进 pending（不硬压） |
+| `TestBusyJudgement` | 空闲 / 抓鬼会话 / 战斗 / DIALOG / WAIT_TASK(有/无任务) / 游荡 / SUBMIT / ERROR / WAIT_GHOST(有无会话) | 只有真在干活或异常的算忙；等待段（WAIT_GHOST 无会话）不算忙 |
 | `TestPickOnlineCandidatesFilters` | 池里有不可用/已移除/已在线/在忙/空账号 | 只回可用离线号，按账号升序、受 n 限幅 |
 | `TestTickDisabledDoesNothing` | enabled=false 且差得很远 | 一次动作都不发 |
 | `TestTickSourceSvrThenLocalFallback` | 读数新鲜 / 过期 600s / 完全没有 | svr+fresh / local+不新鲜（svr 值仍展示）/ local+age=-1 |

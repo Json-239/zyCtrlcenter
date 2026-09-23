@@ -7,8 +7,8 @@
 //     （生产服没授权时为空）→ 兜底用我们自己的握手数（state.Counts 的 handshake），
 //     并在状态里标注来源 source=svr|local 与新鲜度 fresh（面板必须显示来源，别把兜底当真值）。
 //   - 不足 → 从号池拉号上线（走机器人端 `robot_manage add`，密码只从池里按区取）；
-//     超出 → 断**空闲**的号；正在干活的（抓鬼会话/任务/战斗/游荡）**绝不硬断**，标记
-//     「待下线」，等它回到空闲态再由下一轮断掉。
+//     超出 → 断**空闲**的号；正在干活的（抓鬼会话/任务/战斗/游荡/**交付中 SUBMIT**）与
+//     **异常号（ERROR 卡住/停链）绝不硬断**，标记「待下线」，等它回到空闲态再由下一轮断掉。
 //   - 节奏：每 IntervalSec 秒一轮；|diff| < DeadZone（死区）不动；每轮最多调 MaxStep 个。
 //   - 只对**当前区**生效（壳层传入的机器人快照已按当前区过滤）。
 //
@@ -425,15 +425,27 @@ func PickOnlineCandidates(pool []Candidate, n int) []string {
 	return names
 }
 
-// Busy 该号是否"正在干活"（不硬断的判据，与 api.isTasking / restorer 同口径）：
-// 战斗 / 活跃抓鬼会话 / 游荡或孵化 / 任务态（NAV/CLICK/DIALOG/FIGHT/SHOP/ALLOC/WAIT_NEXT，
-// 以及 WAIT_TASK 且任务索引非 0）。
+// Busy 该号是否"不该被自动打扰"（不硬断、不拉起、不派游荡的统一判据；与 api.isTasking /
+// roampool.Idle 同口径，restorer.needsRestore 的"不打扰"集合是它的子集）：
+//
+//   - 战斗（r.Fight）/ 活跃抓鬼会话（r.GhostActive）/ 游荡或孵化（r.Walking）；
+//   - 推进中的任务态：NAV / CLICK / DIALOG / FIGHT / SHOP / ALLOC / WAIT_NEXT、
+//     **SUBMIT**（交付/提交中 —— 2026-09-23 按地图页口径补齐，与 FIGHT/NAV 并列）；
+//     WAIT_TASK 且任务索引非 0；
+//   - **ERROR**（机器人上报的卡住/停链态，如"换图推送迟迟未到"）：它不是"在干活"，
+//     但属于**异常** —— 派活只会让卡住号更难处理，压号也不该拿它当可回收的空闲号
+//     （等人工重登或机器人端 STUCK_ 自愈，见 docs/04-测试/修复-20260921-STUCK错误自动恢复.md）。
+//     故与"忙"同列：不派活、不硬压；进了"待下线"也要等它自愈回正常态才按常规处理。
+//
+// 与前端 MapView（26f4660）的关系：前端把 SUBMIT 放进 BUSY_STATES、把 ERROR 单列「异常」桶
+// （同样不进"空闲"候选）—— 结果等价；Go 侧合并进 Busy，是为了让所有"不打扰/不回收"的
+// 判据天然统一，不再出现第三套口径（三池交互审计 C5）。
 func Busy(r state.Robot) bool {
 	if r.Fight || r.GhostActive() || r.Walking() {
 		return true
 	}
 	switch strings.ToUpper(strings.TrimSpace(r.State)) {
-	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT":
+	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT", "SUBMIT", "ERROR":
 		return true
 	case "WAIT_TASK":
 		return r.TaskIndex != 0
