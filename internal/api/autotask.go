@@ -127,10 +127,18 @@ func (a *API) ghostGate(level, required int) (bool, string) {
 	return true, ""
 }
 
-// GhostSkipFunc 供恢复引擎（restorer）用的"派发前最后一道闸"：抓鬼等级门槛不过就不补发。
+// GhostSkipFunc 供恢复引擎（restorer）用的"派发前最后一道闸"：人工暂停 / 抓鬼等级门槛 / 池闸。
 // 导出给 main 装配（restorer 在 api 之前构造，用闭包晚绑定）。
+//
+// 2026-09-23 R3（操作健壮性审计）：**人工暂停闸对所有 kind 生效**（原先只处理 ghost）——
+// 用户点过「停止/停链」的号，恢复引擎不再按意图把它拉起来；再次「启动/立即补发/上线」
+// 由壳层清标（见 handleStart / handleIntentsRestore / batchOnline）。
+// 抓鬼等级/池闸的判据沿用原口径（只对 ghost），不变。
 func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	return func(kind, account string) (bool, string) {
+		if a.St != nil && a.St.IsPaused(account) {
+			return true, "人工暂停（面板点过「停止」；再点「启动/立即补发/上线」即解除）"
+		}
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
 		}
@@ -156,24 +164,33 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	}
 }
 
-// ---------------------------------------------------------------- 抓鬼在途记账（2026-09-23 P0）
+// ---------------------------------------------------------------- 派发在途记账（2026-09-23）
 //
-// 为什么需要：抓鬼"在跑数"以机器人上报的活跃会话（ghost.enabled）为准，而
+// 为什么需要：任务"在跑数"以机器人上报的活跃会话（ghost.enabled / 链推进）为准，而
 // "命令下发 → 机器人建立会话"之间有几十秒空窗。批量上线时（一次 add 100+ 号），
 // 池闸若只看会话数，每一批新号都会看到"缺口仍在"而被连续放行 —— 生产实测一次
 // 直派/补发 200+（超 target 100，见 docs/04-测试/分析-20260923-抓鬼分配逻辑.md）。
 // 这里把"已派发未确认"的号也计入占用量：配额判断用
 // "活跃会话 + 在途"，避免"上一批还在路上就放行下一批"。
+//
+// 2026-09-23 R1（操作健壮性审计）：同一套记账按**命令种类**分表 ——
+//   - ghostInflight：ghost_start（抓鬼）；
+//   - chainInflight：start_chain（新手链/捉鬼链）——原先只有抓鬼记账，连点
+//     「启动(自动分配)」会把同一批号重复下发 start_chain。
+//
+// 两表的"生效"（live）判据各自与在跑口径同源：
+//   - ghost：机器人上报活跃抓鬼会话（state.Robot.GhostActive）；
+//   - chain：在线且任务在推进（isTasking；IDLE/等推送视为还没生效，保守留在途）。
 const ghostInflightTTL = 120 * time.Second
 
-// ghostInflightTable 抓鬼在途表（实例级；挂在 API 上，见 api.go 的 ghostInflight 字段）。
-type ghostInflightTable struct {
+// dispatchInflightTable 派发在途表（实例级；API 上按种类各挂一个，见 api.go）。
+type dispatchInflightTable struct {
 	mu sync.Mutex
 	at map[string]time.Time // account → 上次派发时间
 }
 
-// mark 记录一批"刚下发抓鬼命令"的号（定时补号 / 卡死重登恢复 / 手动直派都调）。
-func (t *ghostInflightTable) mark(accs []string) {
+// mark 记录一批"刚下发命令"的号（定时补号 / 卡死重登恢复 / 手动直派都调）。
+func (t *dispatchInflightTable) mark(accs []string) {
 	if len(accs) == 0 {
 		return
 	}
@@ -191,9 +208,9 @@ func (t *ghostInflightTable) mark(accs []string) {
 }
 
 // count 当前有效在途号数（顺手清理两类失效项）：
-//   - live(acc) 返回 true（号已建立活跃抓鬼会话：命令已生效，避免重复占用）；
+//   - live(acc) 返回 true（号已建立活跃会话：命令已生效，避免重复占用）；
 //   - 超过 TTL（命令大概率失败/丢失，允许重新派发）。
-func (t *ghostInflightTable) count(live func(acc string) bool) int {
+func (t *dispatchInflightTable) count(live func(acc string) bool) int {
 	now := time.Now()
 	t.mu.Lock()
 	snap := make(map[string]time.Time, len(t.at))
@@ -221,8 +238,48 @@ func (t *ghostInflightTable) count(live func(acc string) bool) int {
 	return n
 }
 
+// hasFresh 该号是否"刚派发、还没到 TTL"（只看时间，不判 live：判 live 要读状态，
+// 调用方通常紧接着自己会判"在跑"，避免重复取数）。顺手清理过期项。
+func (t *dispatchInflightTable) hasFresh(acc string) bool {
+	if acc == "" {
+		return false
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	at, ok := t.at[acc]
+	if !ok {
+		return false
+	}
+	if now.Sub(at) > ghostInflightTTL {
+		delete(t.at, acc)
+		return false
+	}
+	return true
+}
+
+// dropFresh 从一批账号里剔掉"刚派发（TTL 内）"的号，返回 (保留, 剔除)。
+// 剔除的号由调用方回带"为什么没派"（不静默）。
+func (t *dispatchInflightTable) dropFresh(accs []string) (kept, dropped []string) {
+	if len(accs) == 0 {
+		return accs, nil
+	}
+	kept = make([]string, 0, len(accs))
+	for _, acc := range accs {
+		if t.hasFresh(acc) {
+			dropped = append(dropped, acc)
+			continue
+		}
+		kept = append(kept, acc)
+	}
+	return kept, dropped
+}
+
 // markGhostDispatch 记录一批"刚下发抓鬼命令"的号（定时补号 / 卡死重登恢复 / 手动直派都调）。
 func (a *API) markGhostDispatch(accs []string) { a.ghostInflight.mark(accs) }
+
+// markChainDispatch 记录一批"刚下发 start_chain（新手链/捉鬼链）"的号（2026-09-23 R1）。
+func (a *API) markChainDispatch(accs []string) { a.chainInflight.mark(accs) }
 
 // ghostInflightCount 当前在途号数；live 判定：号已建立活跃抓鬼会话 → 不再算在途。
 func (a *API) ghostInflightCount() int {
@@ -235,10 +292,56 @@ func (a *API) ghostInflightCount() int {
 	})
 }
 
-// restoreInflightCount 恢复引擎"刚补发、还没跑起来"的号数（同样受 TTL 约束）。
+// chainInflightCount 当前"链在途"号数（2026-09-23 R1）；live 判定：号在线且任务在推进
+// （isTasking）→ 命令已生效，不再算在途。停在 IDLE/ONLINE（等推送/刚上线）不算生效，
+// 保守留在途（最多 TTL 120s，之后允许重派）。
+func (a *API) chainInflightCount() int {
+	return a.chainInflight.count(func(acc string) bool {
+		if a.St == nil {
+			return false
+		}
+		r, ok := a.St.Get(acc)
+		return ok && r.Online && isTasking(r)
+	})
+}
+
+// ghostInflightActive 该号是否"抓鬼已派发、会话还没起来"（TTL 内且非活跃会话）。
+// 用于候选过滤/去重派发（R2）：命中就不要再派一次。
+func (a *API) ghostInflightActive(acc string) bool {
+	if !a.ghostInflight.hasFresh(acc) {
+		return false
+	}
+	if a.St != nil {
+		if r, ok := a.St.Get(acc); ok && r.GhostActive() {
+			return false // 会话已起来：不算在途（与 count 同口径）
+		}
+	}
+	return true
+}
+
+// chainInflightActive 该号是否"start_chain 已派发、任务还没推进"（TTL 内且非在跑）。
+// 用于候选过滤/去重派发（R1）：命中就不要再派一次。
+func (a *API) chainInflightActive(acc string) bool {
+	if !a.chainInflight.hasFresh(acc) {
+		return false
+	}
+	if a.St != nil {
+		if r, ok := a.St.Get(acc); ok && r.Online && isTasking(r) {
+			return false // 链已在推进：不算在途
+		}
+	}
+	return true
+}
+
+// restoreInflightCountByKind 恢复引擎"刚补发、还没跑起来"的号数（同样受 TTL 约束），
+// 按**命令种类**过滤（2026-09-23 R1）：
+//
+//	kind=ghost  → 只算 intent=ghost 的补发；
+//	kind=newbie → 算 start_chain 类补发（newbie / zhuaogui 两种意图都是 start_chain）。
+//
 // restorer 的补发不经过 LaunchTask，靠它自己的 Status().LastDispatchAt 记账，
 // 否则"补发 + 直派"互相看不见，闸门仍会被连续放行。
-func (a *API) restoreInflightCount() int {
+func (a *API) restoreInflightCountByKind(kind autotask.Kind) int {
 	if a.Restorer == nil {
 		return 0
 	}
@@ -248,14 +351,35 @@ func (a *API) restoreInflightCount() int {
 		if st.LastDispatchAt.IsZero() || now.Sub(st.LastDispatchAt) > ghostInflightTTL {
 			continue
 		}
+		if !restoreKindMatches(st.Kind, kind) {
+			continue
+		}
 		if a.St != nil {
-			if r, ok := a.St.Get(st.Account); ok && r.GhostActive() {
-				continue // 会话已起来：已计入在跑数
+			if r, ok := a.St.Get(st.Account); ok {
+				// 会话/链已起来：已计入在跑数，不重复占用
+				if kind == autotask.KindGhost && r.GhostActive() {
+					continue
+				}
+				if kind == autotask.KindNewbie && r.Online && isTasking(r) {
+					continue
+				}
 			}
 		}
 		n++
 	}
 	return n
+}
+
+// restoreKindMatches 恢复记录的意图 kind 是否属于该池（命令口径：ghost → 抓鬼；
+// newbie/zhuaogui → start_chain 类）。
+func restoreKindMatches(intentKind string, poolKind autotask.Kind) bool {
+	switch poolKind {
+	case autotask.KindGhost:
+		return intentKind == string(intent.KindGhost)
+	case autotask.KindNewbie:
+		return intentKind == string(intent.KindNewbie) || intentKind == string(intent.KindZhuaogui)
+	}
+	return false
 }
 
 // poolQuota 该池"本轮最多还能派几个"（-1 = 不限，保持旧行为）。
@@ -266,7 +390,10 @@ func (a *API) restoreInflightCount() int {
 //     （池停用就不自动派，避免"停了还被自动拉起"）；
 //   - manual=true（**手动通道**：面板"启动(自动分配)"，用户意图优先）：池停用**不拦**
 //     （用户点了启动就是要跑），但仍按目标截断（在跑 + 在途 ≥ 目标 → 0，超编不该手动再加）；
-//   - 其余 → max(0, Target - 在跑 - 在途)（抓鬼的在途 = 直派/重登恢复 + 恢复引擎补发两份）。
+//   - 其余 → max(0, Target - 在跑 - 在途)（抓鬼/新手链各算各的在途：直派/重登恢复 + 恢复引擎补发）。
+//
+// 2026-09-23 R1：新手链（KindNewbie）也计入在途（原先只有抓鬼）——避免连点「启动(自动分配)」
+// 把同一批号重复下发 start_chain。
 func (a *API) poolQuota(kind autotask.Kind, manual bool) int {
 	if a.AutoTask == nil {
 		return -1
@@ -279,8 +406,11 @@ func (a *API) poolQuota(kind autotask.Kind, manual bool) int {
 		return 0
 	}
 	inflight := 0
-	if kind == autotask.KindGhost {
-		inflight = a.ghostInflightCount() + a.restoreInflightCount()
+	switch kind {
+	case autotask.KindGhost:
+		inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
+	case autotask.KindNewbie:
+		inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
 	}
 	if q := st.Target - st.Online - inflight; q > 0 {
 		return q
@@ -303,7 +433,7 @@ func (a *API) cutByPoolQuota(accs []string, kind autotask.Kind, manual bool) []s
 	return append([]string(nil), accs[q:]...)
 }
 
-// poolAllowsDispatch 池状态闸（2026-09-22 P1 / 2026-09-23 P0 加在途）：
+// poolAllowsDispatch 池状态闸（2026-09-22 P1 / 2026-09-23 P0 加在途 / R1 按池分表）：
 // 池未启用 / 配额已用尽（在跑 + 在途 ≥ 目标）→ 不自动补发。
 func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 	if a.AutoTask == nil {
@@ -322,8 +452,11 @@ func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 	}
 	if q := a.poolQuota(k, false); q <= 0 {
 		inflight := 0
-		if k == autotask.KindGhost {
-			inflight = a.ghostInflightCount() + a.restoreInflightCount()
+		switch k {
+		case autotask.KindGhost:
+			inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
+		case autotask.KindNewbie:
+			inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
 		}
 		return false, fmt.Sprintf("%s 池配额已用满（在跑 %d + 在途 %d ≥ 目标 %d，不自动补发）",
 			kind, st.Online, inflight, st.Target)
@@ -373,6 +506,20 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 		acc := pa.Name
 		if a.St != nil && a.St.IsRemoved(acc) {
 			continue // 用户明确移除过的号不再自动拉起
+		}
+		// 2026-09-23 R3（操作健壮性审计）：人工暂停（面板点过「停止/停链」）→ 不自动拉起。
+		// 再次「启动 / 立即补发 / 上线」会清标（壳层负责），不在这里静默过期。
+		if a.St != nil && a.St.IsPaused(acc) {
+			continue
+		}
+		// 2026-09-23 R2/R1：刚派发、命令还没生效的号不算候选 ——
+		// 防"手动「启动(自动分配)」+ 定时任务"在几十秒空窗里重复派同一号
+		// （抓鬼重复=机器人端重启会话；新手链重复=重复 start_chain）。TTL 过后自动回到候选。
+		if kind == autotask.KindGhost && a.ghostInflightActive(acc) {
+			continue
+		}
+		if kind == autotask.KindNewbie && a.chainInflightActive(acc) {
+			continue
 		}
 		z := pa.Zone(gameAddr)
 		r, hasLive := live[acc]
@@ -548,6 +695,10 @@ func (a *API) poolCounts(kind autotask.Kind) (usable, running int) {
 		if a.St != nil && a.St.IsRemoved(pa.Name) {
 			continue
 		}
+		// 2026-09-23 R3：人工暂停的号不算"可拉"（面板"可用"与真实可派口径一致）。
+		if a.St != nil && a.St.IsPaused(pa.Name) {
+			continue
+		}
 		if z := pa.Zone(gameAddr); z == nil || !z.Usable {
 			continue
 		}
@@ -692,9 +843,18 @@ func (a *API) passwordFor(acc string) (string, bool) {
 }
 
 // LaunchTask 按策略下发任务（定时任务 / 卡死恢复 / 手动启动共用同一套载荷口径）。
+//
+// 2026-09-23 R3：入口统一过滤"人工暂停"的号（用户点过「停止/停链」）；
+// 手动「启动 / 立即补发」路径在入口先清标，所以不会走到这里被误拦。
 func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 	if len(accs) == 0 || a.Events == nil {
 		return false, "没有账号或事件通道不可用"
+	}
+	if paused := a.dropPaused(accs); len(paused) != len(accs) {
+		accs = paused
+		if len(accs) == 0 {
+			return false, "全部为人工暂停（面板点过「停止」；再点「启动/立即补发/上线」即解除）"
+		}
 	}
 	switch kind {
 	case autotask.KindNewbie:
@@ -712,6 +872,7 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		if !a.Events.SendCmd(cmd, "autotask_start_chain") {
 			return false, "下发失败：机器人通道未连接"
 		}
+		a.markChainDispatch(accs) // 2026-09-23 R1：新手链在途记账（配额/候选据此防重复派）
 		return true, "已下发新手链: " + strings.Join(accs, ", ")
 
 	case autotask.KindGhost:

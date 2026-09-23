@@ -151,6 +151,7 @@ type Candidate struct {
 	Removed   bool // 被用户/其它模块标记移除（心跳不复活）——我们自己压下线的号由壳层豁免
 	Online    bool // 运行时已在线
 	Busy      bool // 在忙（有任务/抓鬼会话/战斗/游荡）
+	Paused    bool // 人工暂停（R3，面板点过「停止」）→ 不自动拉起
 	Level     int
 	ChainDone bool
 }
@@ -357,6 +358,9 @@ func ComputeAdjust(cur, target, deadZone, maxStep int) int {
 // preferIdle=true（默认）：空闲号优先，不够再用忙号补 pending；
 // preferIdle=false：按传入顺序挑（壳层传随机序 = 随机补选），但忙号仍只进 pending。
 // 取舍顺序由输入顺序决定（纯函数、不用随机源，便于确定性单测）。
+//
+// 2026-09-23 R3：**人工暂停的号既不 now 也不 pending** —— 用户点过「停止」的号
+// 水位保持器不主动断它（保留它在线，等用户自己决定；目标缺口由别的号摊）。
 func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pending []string) {
 	if n <= 0 {
 		return nil, nil
@@ -366,7 +370,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 			if len(now)+len(pending) >= n {
 				break
 			}
-			if r.Account == "" || !r.Online {
+			if r.Account == "" || !r.Online || r.Paused {
 				continue
 			}
 			if Busy(r) {
@@ -381,7 +385,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 		if len(now) >= n {
 			break
 		}
-		if r.Account == "" || !r.Online || Busy(r) {
+		if r.Account == "" || !r.Online || r.Paused || Busy(r) {
 			continue
 		}
 		now = append(now, r.Account)
@@ -390,7 +394,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 		if len(now)+len(pending) >= n {
 			break
 		}
-		if r.Account == "" || !r.Online || !Busy(r) {
+		if r.Account == "" || !r.Online || r.Paused || !Busy(r) {
 			continue
 		}
 		pending = append(pending, r.Account)
@@ -401,14 +405,15 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 // PickOnlineCandidates 从号池候选里挑 n 个可上线的（按账号升序，结果稳定）。
 //
 // 过滤口径：该区不可用的不拉、被标记移除的不拉（自己压下去的号由壳层豁免）、
-// 已在线的不拉（重复 add 没意义）、在忙的不拉（它已经在线了，正常不会出现在池里）。
+// 已在线的不拉（重复 add 没意义）、在忙的不拉（它已经在线了，正常不会出现在池里）、
+// **人工暂停的不拉**（R3：用户点过「停止」，自动编排不打扰）。
 func PickOnlineCandidates(pool []Candidate, n int) []string {
 	if n <= 0 {
 		return nil
 	}
 	names := make([]string, 0, len(pool))
 	for _, c := range pool {
-		if c.Account == "" || !c.Usable || c.Removed || c.Online || c.Busy {
+		if c.Account == "" || !c.Usable || c.Removed || c.Online || c.Busy || c.Paused {
 			continue
 		}
 		names = append(names, c.Account)

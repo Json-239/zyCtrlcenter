@@ -295,6 +295,38 @@ func TestPickOnlineCandidatesFilters(t *testing.T) {
 	}
 }
 
+// 2026-09-23 R3（操作健壮性审计修复）：人工暂停（面板点过「停止」）的号 ——
+// 水位保持器既不自动拉起、也不自动压号（别动用户明确停过的号）。
+func TestPickSkipsPaused(t *testing.T) {
+	pool := []waterline.Candidate{
+		{Account: "a-ok", Usable: true},
+		{Account: "b-paused", Usable: true, Paused: true},
+		{Account: "c-ok", Usable: true},
+	}
+	got := waterline.PickOnlineCandidates(pool, 10)
+	if len(got) != 2 || got[0] != "a-ok" || got[1] != "c-ok" {
+		t.Fatalf("暂停号不能被自动拉起（补号候选应排除）: %v", got)
+	}
+
+	pIdle := online("p-idle")
+	pIdle.Paused = true
+	pBusy := ghosting("p-busy")
+	pBusy.Paused = true
+	robots := []state.Robot{online("i1"), pIdle, ghosting("b1"), pBusy}
+	now, pending := waterline.PickOffline(robots, 3, true)
+	if len(now) != 1 || now[0] != "i1" {
+		t.Fatalf("暂停的空闲号不该被断: now=%v", now)
+	}
+	if len(pending) != 1 || pending[0] != "b1" {
+		t.Fatalf("只有非暂停的忙号能进待下线（暂停号既不 now 也不 pending）: pending=%v", pending)
+	}
+	// preferIdle=false（随机补选）同样跳过暂停号
+	now2, pending2 := waterline.PickOffline(robots, 3, false)
+	if len(now2)+len(pending2) != 2 {
+		t.Fatalf("非空闲优先模式下也只能选到 2 个非暂停号: now=%v pending=%v", now2, pending2)
+	}
+}
+
 // ---------------------------------------------------------------- Tick（一轮决策）
 
 func TestTickDisabledDoesNothing(t *testing.T) {

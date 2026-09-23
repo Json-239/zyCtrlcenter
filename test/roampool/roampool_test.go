@@ -638,6 +638,28 @@ func TestPickExcessOnlyInterruptible(t *testing.T) {
 	}
 }
 
+// 2026-09-23 R3（操作健壮性审计修复）：人工暂停（面板点过「停止」）的号 ——
+// 不派游荡、不从抓鬼转游荡、不回收（留着等用户自己决定）。
+func TestPausedSkippedInPicks(t *testing.T) {
+	pIdle := online("p1", 10)
+	pIdle.Paused = true
+	if got := roampool.PickIdle([]state.Robot{pIdle, online("i1", 10)}, 10); join(got) != "i1" {
+		t.Fatalf("暂停号不该被派游荡: %v", got)
+	}
+
+	pGhost := ghostAt("pg1", "WAIT_GHOST")
+	pGhost.Paused = true
+	if got := roampool.PickExcess([]state.Robot{pGhost, ghostAt("g1", "WAIT_GHOST")}, 10); join(got) != "g1" {
+		t.Fatalf("暂停号不该被从抓鬼转游荡: %v", got)
+	}
+
+	pWalk := walking("pw1", 10)
+	pWalk.Paused = true
+	if got := roampool.PickReclaim([]state.Robot{pWalk, walking("w1", 10)}, 10, nil); join(got) != "w1" {
+		t.Fatalf("暂停号不该被回收: %v", got)
+	}
+}
+
 // 任务池超编（deficit<0）+ 游荡不足 + 没有空闲号 → 从可中断的超编号里补位；
 // 动作文案要说清"含超编回收 N 个"（可追溯）。
 func TestTickExcessReclaimWhenOverDeficit(t *testing.T) {
@@ -700,4 +722,3 @@ func TestTickExcessRespectsMaxStep(t *testing.T) {
 		t.Fatalf("每轮最多 MaxStep=2 个，实际 %d（%v）", len(got), got)
 	}
 }
-

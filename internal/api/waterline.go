@@ -126,7 +126,9 @@ func (a *API) waterlineCandidates() []waterline.Candidate {
 		out = append(out, waterline.Candidate{
 			Account: acc, Usable: usable, Removed: removed,
 			Online: hasLive && r.Online, Busy: hasLive && waterline.Busy(r),
-			Level: level, ChainDone: chainDone,
+			// 2026-09-23 R3：人工暂停的号不自动拉起（也不自动压号，见 waterline.PickOffline）。
+			Paused: a.St != nil && a.St.IsPaused(acc),
+			Level:  level, ChainDone: chainDone,
 		})
 	}
 	return out

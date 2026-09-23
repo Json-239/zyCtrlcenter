@@ -26,6 +26,12 @@ type Robot struct {
 	// 由 Snapshot() 从 ghostUnavail 表填入 —— 不存 robot 行：行会被 removeAccount
 	// 删掉、标记会随之丢失（2026-09-22 踩过坑）。
 	GhostDoneToday bool `json:"ghost_done_today,omitempty"`
+	// Paused 人工暂停（2026-09-23 操作健壮性 R3）：用户在面板点了「停止/停链」时打标，
+	// 各编排（恢复引擎/定时任务/水位/游荡池）派发前跳过暂停号，直到用户再次
+	// 「启动 / 立即补发 / 上线」清标。
+	// 与 GhostDoneToday 同款：由 Snapshot() 从 paused 表填入，**不存 robot 行**
+	// （行会被 Remove 删掉，标记必须独立存活）。
+	Paused bool `json:"paused,omitempty"`
 	RoleName  string `json:"role_name,omitempty"`
 	Level     int    `json:"level"`
 	// LevelPending / LevelPendingN 等级"大幅回退"待确认（连续 LevelPendingN 次上报同一新值才真切换，
@@ -155,6 +161,9 @@ type State struct {
 	// ghostUnavail 账号 → "今天抓鬼不可用/已满"的日期串（跨日自动失效）。
 	//   独立于 robots 行：行会被 removeAccount 删掉，标记必须留着（否则会被反复拉起）。
 	ghostUnavail map[string]string
+	// paused 账号 → 人工暂停（2026-09-23 R3）。独立于 robots 行：行会被 Remove 删掉，
+	//   暂停意图必须留着（下线再上线仍保持暂停，直到用户显式「启动/补发/上线」）。
+	paused map[string]bool
 
 	mu sync.RWMutex
 
@@ -171,6 +180,7 @@ func New() *State {
 	return &State{
 		robots:  make(map[string]*Robot),
 		removed: make(map[string]bool),
+		paused:  make(map[string]bool),
 		curServ: make(map[string]string),
 	}
 }
@@ -267,6 +277,8 @@ func (s *State) Snapshot() []Robot {
 		cp := *r
 		// 面板标记：今天抓鬼已满/不可用（同一把锁内查 ghostUnavail，不二次加锁）
 		cp.GhostDoneToday = s.ghostUnavail[cp.Account] == today
+		// 人工暂停（R3）：同样在同一把锁内查，保证与行数据一致
+		cp.Paused = s.paused[cp.Account]
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
@@ -475,6 +487,66 @@ func (s *State) ClearRemoved() []string {
 		out = append(out, a)
 	}
 	s.removed = make(map[string]bool)
+	sort.Strings(out)
+	return out
+}
+
+// ---------------------------------------------------------------- paused（人工暂停）
+
+// MarkPaused 标记"人工暂停"（面板「停止/停链」打标；各编排派发前跳过）。
+//
+// 独立于 robots 行：号被下线/移除后标记仍在（再次上线不会被自动编排吵醒），
+// 直到用户显式「启动 / 立即补发 / 上线」由壳层清标。
+func (s *State) MarkPaused(account string) {
+	if account == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.paused == nil {
+		s.paused = map[string]bool{}
+	}
+	s.paused[account] = true
+	s.mu.Unlock()
+}
+
+// ClearPaused 解除该号的人工暂停（用户显式启动/补发/上线时调）。
+func (s *State) ClearPaused(account string) {
+	if account == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.paused, account)
+	s.mu.Unlock()
+}
+
+// ClearAllPaused 解除全部人工暂停，返回被解除的账号（升序）。
+func (s *State) ClearAllPaused() []string {
+	s.mu.Lock()
+	out := make([]string, 0, len(s.paused))
+	for a := range s.paused {
+		out = append(out, a)
+	}
+	s.paused = make(map[string]bool)
+	s.mu.Unlock()
+	sort.Strings(out)
+	return out
+}
+
+// IsPaused 该号是否处于人工暂停。
+func (s *State) IsPaused(account string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.paused[account]
+}
+
+// PausedList 返回全部人工暂停的账号（升序；面板/状态接口用）。
+func (s *State) PausedList() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.paused))
+	for a := range s.paused {
+		out = append(out, a)
+	}
 	sort.Strings(out)
 	return out
 }

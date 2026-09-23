@@ -66,6 +66,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"current_keys":            map[string]any{"server": serverKey, "zone": zoneKey},
 		"zone_counts":             a.St.ZoneCounts(),
 		"removed":                 a.St.RemovedList(),
+		"paused":                  a.St.PausedList(), // 2026-09-23 R3：人工暂停名单（停止按钮打标）
 		"robot_connected":         a.Ctrl.Connected(),
 		"ctrl_addr":               a.Ctrl.Addr(),
 		"ctrl_zone":               a.Ctrl.Tag(),
@@ -173,6 +174,13 @@ func (a *API) handleIntentsRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	body := readBody(r)
 	only := strings.TrimSpace(toStr(body["account"]))
+	// 2026-09-23 R3：手动「立即补发」= 用户要它跑 → 先解除人工暂停（单个/全部），
+	// 再跑 TickForce；否则暂停闸（GhostSkipFunc）会把它们全部拦下（"补发没用"观感）。
+	if only != "" {
+		a.resumeAccounts([]string{only})
+	} else {
+		a.resumeAccounts(nil)
+	}
 	acts := a.Restorer.TickForce(time.Now(), true)
 
 	// 先按账号过滤（每个号单独点「补发」时只处理它），再合并 —— 顺序反了会把别的号也带出去
@@ -295,6 +303,12 @@ func (a *API) handleStart(w http.ResponseWriter, r *http.Request) {
 		chainID = a.Cfg.DefaultChainID
 	}
 	accounts := bodyAccounts(body)
+
+	// 2026-09-23 R3：用户显式「启动」= 解除人工暂停（空账号 = 全部解除，与"停全部"对称）。
+	// 放在最前面：后面的 auto 分支/直派都按"用户就是要跑"执行。
+	if resumed := a.resumeAccounts(accounts); len(resumed) > 0 {
+		a.Log.Printf("[START] 解除人工暂停 %d 个：%v", len(resumed), resumed)
+	}
 
 	// auto=true：不手选链，**按账号意图自动分配**（新手链 → start_chain；抓鬼 → ghost_start；无意图 → 回落指定链）
 	if toBool(body["auto"], false) {
@@ -513,6 +527,38 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	toGhost = cutByQuota(toGhost, autotask.KindGhost, "抓鬼")
 	toChain = cutByQuota(toChain, autotask.KindNewbie, "新手")
 
+	// 2026-09-23 R1/R2（操作健壮性审计 · 连点去重）：去掉"最近 120 秒内已派发过"的号 ——
+	// 抓鬼原先只在配额不满时才会重复派（配额有余就重发命令 → 机器人端重启会话）；
+	// 新手链原先完全没有在途记账（连点必重复发 start_chain）。命中即在 assignments
+	// 回带原因（不静默）；确需重发请等 TTL 过去，或用「重置重跑」。
+	dropInflight := func(accs []string, kind autotask.Kind, label string) []string {
+		var kept, dropped []string
+		if kind == autotask.KindGhost {
+			kept, dropped = a.ghostInflight.dropFresh(accs)
+		} else {
+			kept, dropped = a.chainInflight.dropFresh(accs)
+		}
+		if len(dropped) == 0 {
+			return accs
+		}
+		set := make(map[string]bool, len(dropped))
+		for _, acc := range dropped {
+			set[acc] = true
+		}
+		for i := range assignments {
+			if set[toStr(assignments[i]["account"])] {
+				assignments[i]["command"] = ""
+				assignments[i]["reason"] = label + "最近 120 秒内已派发（在途），本次不重复派；确需重发请稍候或先「重置重跑」"
+			}
+		}
+		skipped = append(skipped, fmt.Sprintf("%d 个（%s最近已派发，去重跳过）", len(dropped), label))
+		a.Log.Printf("[START] %s池最近已派发（在途），去重跳过 %d 个：%s",
+			label, len(dropped), strings.Join(dropped, ", "))
+		return kept
+	}
+	toGhost = dropInflight(toGhost, autotask.KindGhost, "抓鬼")
+	toChain = dropInflight(toChain, autotask.KindNewbie, "新手")
+
 	// 抓鬼载荷**在发任何命令之前**取齐：导航数据缺失就是硬失败，一条命令都不发
 	// （否则会出现"新手链那组已经发出去了、抓鬼这组失败"的半成功状态）。
 	var ghostNav *chainlib.Chain
@@ -557,6 +603,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		cmd["accounts"] = toChain
 		if a.Events.SendCmd(cmd, "start_chain_auto") {
 			sent++
+			a.markChainDispatch(toChain) // 2026-09-23 R1：新手链在途记账（配额/候选/去重据此）
 			msgs = append(msgs, fmt.Sprintf("%d 个走新手链(%s)", len(toChain), defaultChainID))
 		}
 	}
@@ -658,14 +705,20 @@ func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
 	// 停链同时**取消自动重登恢复**：用户手动停了就不该被自动拉起
 	//（口径同参考实现 routers/ghost.py 的 _PENDING_REGHOST.pop）。
 	a.cancelRegHost(accounts)
+	// 2026-09-23 R3：停止 = **人工暂停** —— 给这些号打暂停标，让恢复引擎/定时任务/
+	// 水位/游荡池派发前跳过（生产 CTRL_AUTO_RESTORE=1，不打标会在几秒内被补发拉起，
+	// 用户观感"停不住"）。解除方式：再次「启动 / 立即补发 / 上线」（见 pause.go）。
+	pausedN := a.pauseAccounts(accounts)
 	cmd := map[string]any{"cmd": "stop"}
 	if len(accounts) > 0 {
 		cmd["accounts"] = accounts
 	}
 	ok := a.Events.SendCmd(cmd, "stop")
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "stop",
-		"zone": a.currentZoneKey(), "accounts": accounts, "sent": ok})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": okMsg(ok, "已下发停链")})
+		"zone": a.currentZoneKey(), "accounts": accounts, "paused": pausedN, "sent": ok})
+	msg := okMsg(ok, "已下发停链")
+	msg += "；已标人工暂停 " + itoa(pausedN) + " 个（自动编排不再拉起；再点「启动/立即补发/上线」解除）"
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "paused": pausedN, "msg": msg})
 }
 
 // cancelRegHost 取消自动重登恢复：给了账号就取消这些；没给（=全部）就清空待恢复列表。
@@ -738,6 +791,10 @@ func (a *API) handleRobotsManage(w http.ResponseWriter, r *http.Request) {
 		}
 		ok := a.Events.SendCmd(map[string]any{
 			"cmd": "robot_manage", "action": "add", "accounts": payload}, "add")
+		if ok {
+			// 2026-09-23 R3：显式添加=上线 → 解除人工暂停（用户让它干活）。
+			a.resumeAccounts(names)
+		}
 		a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_manage", "sub": "add",
 			"zone": a.currentZoneKey(), "accounts": names, "sent": ok})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": okMsg(ok, "已下发添加机器人")})

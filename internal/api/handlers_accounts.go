@@ -262,6 +262,8 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 
 	sentAccounts, chunks, skippedNoPwd := a.sendOnlineChunks(accounts, gameAddr, chunk, interval, "batch_add")
 	sent := len(sentAccounts)
+	// 2026-09-23 R3：显式上线 = 用户让它干活 → 解除人工暂停（只解除本次真的下发成功的号）。
+	a.resumeAccounts(sentAccounts)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_batch", "sub": "online",
 		"zone": zoneArg, "requested": len(accounts), "sent": sent, "chunks": chunks,
 		"interval_ms": interval})
@@ -353,10 +355,15 @@ func (a *API) batchOffline(w http.ResponseWriter, accounts []string, gameAddr st
 //
 // 先本地标记移除 + 删行（防心跳复活），再分批下发（每批之间留 interval，避免下线风暴）。
 // 返回实际下发成功的账号与批数。
+//
+// 2026-09-23 R4（操作健壮性审计）：这里统一**取消自动重登恢复（reghost）** ——
+// 否则"当日卡死过"的号刚被下线就被 reghost 重登 + 补发（用户观感"下线没效果"）。
+// 口径与 /api/robots/manage remove（handlers.go）和 /api/stop 一致；Cancel 幂等。
 func (a *API) sendOfflineChunks(accounts []string, chunk, interval int, tag string) (sent []string, chunks int) {
 	if chunk <= 0 {
 		chunk = 10
 	}
+	a.cancelRegHost(accounts)
 	for _, n := range accounts {
 		a.St.MarkRemoved(n)
 		a.St.Remove(n)

@@ -90,16 +90,21 @@ func GroupActions(acts []Action) []Group {
 
 // Status 某账号的恢复状态（面板展示"在补哪几个、卡在哪"）。
 type Status struct {
-	Account   string    `json:"account"`
-	Attempts  int       `json:"attempts"`
-	NextAt    time.Time `json:"next_at,omitempty"`
-	LastMsg   string    `json:"last_msg,omitempty"`
-	Blocked   bool      `json:"blocked"`
+	Account  string    `json:"account"`
+	Attempts int       `json:"attempts"`
+	NextAt   time.Time `json:"next_at,omitempty"`
+	LastMsg  string    `json:"last_msg,omitempty"`
+	Blocked  bool      `json:"blocked"`
+	// BlockTill 熔断截止时间（Blocked=true 时有意义）。
 	BlockTill time.Time `json:"block_till,omitempty"`
 	// LastDispatchAt 最近一次"决定补发"的时间（2026-09-23 P0）：壳层的池闸据此把
 	// "刚补发、还没跑起来"的号算作在途占位（TTL 见 api 侧 ghostInflightTTL），
 	// 避免"上一批还在路上，闸门又放行下一批"。
 	LastDispatchAt time.Time `json:"last_dispatch_at,omitempty"`
+	// Kind 最近一次补发的**意图种类**（intent.Kind 的字符串：ghost/newbie/zhuaogui）。
+	// 2026-09-23 R1（操作健壮性审计）：壳层按池种类细分在途统计（抓鬼 vs 新手链），
+	// 没有它就无法判断"这条在途记录该占哪个池的配额"。
+	Kind string `json:"kind,omitempty"`
 }
 
 // Deps 依赖（除 Send 外都是只读读取，便于测试注入假时钟/假状态）。
@@ -293,6 +298,7 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 		st.NextAt = now.Add(time.Duration(r.d.RetrySec) * time.Second)
 		st.LastMsg = "已补发 " + cmd
 		st.LastDispatchAt = now // 在途记账（壳层池闸用；TTL 见 api 侧 ghostInflightTTL）
+		st.Kind = string(it.Kind)
 		if st.Attempts >= r.d.MaxAttempts {
 			st.Blocked = true
 			st.BlockTill = now.Add(time.Duration(r.d.CircuitSec) * time.Second)

@@ -455,6 +455,9 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 		if !Roaming(r) {
 			continue
 		}
+		if r.Paused {
+			continue // 2026-09-23 R3：人工暂停的号不回收（回收了也进不了任务池，留着继续游荡）
+		}
 		if eligible != nil && !eligible(r) {
 			continue // 2026-09-22 P0：回收后进不了任务池的号不回收（详见函数头注释）
 		}
@@ -484,6 +487,8 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 }
 
 // PickIdle 从空闲在线号里挑 n 个（保序；不足就有几个给几个；n<=0 → nil）。
+//
+// 2026-09-23 R3：人工暂停（面板点过「停止」）的号不派游荡 —— 暂停=别自动打扰它。
 func PickIdle(robots []state.Robot, n int) []string {
 	if n <= 0 {
 		return nil
@@ -492,6 +497,9 @@ func PickIdle(robots []state.Robot, n int) []string {
 	for _, r := range robots {
 		if len(out) >= n {
 			break
+		}
+		if r.Paused {
+			continue
 		}
 		if Idle(r) {
 			out = append(out, r.Account)
@@ -519,6 +527,9 @@ func PickExcess(robots []state.Robot, n int) []string {
 	for _, r := range robots {
 		if !r.GhostActive() || !Interruptible(r) {
 			continue
+		}
+		if r.Paused {
+			continue // 2026-09-23 R3：人工暂停的号不转游荡（用户点过「停止」）
 		}
 		if r.DoubleClaimedToday() {
 			continue // 2026-09-23 今日领双 → 不转游荡（留着抓鬼，双倍有时长）
