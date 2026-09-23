@@ -8,6 +8,9 @@ import {
   mapLabel, posLabel, posPxLabel, zoneFullLabel, isActive,
   avatarChar, avatarStyle, hpPct, hpText, taskLabel, taskHint,
 } from '../store'
+// 忙/空闲/异常归类判据（与地图页 MapView、Go 侧 waterline.Busy / roampool.Idle 同源，
+// 口径说明见该模块注释）——2026-09-23 统一：大屏不再自己维护状态集合
+import { isBusy, isErr, isGhosting, isWalking, isIdle } from '../stateBuckets'
 
 const DENSE_ROWS = 80 // 单页超过这个行数就不跑"呼吸"动画（几百个常驻动画会明显吃帧）
 const PAGE_SIZES = [20, 50, 100]
@@ -60,29 +63,37 @@ const robotRunning = computed(() => !!state.status.robot_running)
 const filters = [
   { key: 'all', label: '全部' },
   { key: 'online', label: '在线' },
-  { key: 'task', label: '干活中' },
+  { key: 'task', label: '干活中', title: '在线且在忙：任务链推进（含交任务 SUBMIT）/ 抓鬼会话活跃 / 游荡(含孵化) / 战斗中 —— 与地图页「任务中」桶、Go 侧 waterline.Busy 同口径' },
   { key: 'ghost', label: '👻抓鬼', title: '有活跃抓鬼会话（机器人上报 ghost.enabled === true；enabled=false 的历史会话不算）' },
   { key: 'newbie', label: '🆕新手' },  // 意图表 kind === 'newbie'
-  // 2026-09-22 游荡：机器人上报的 walk.enabled === true（MapView 的绿环同一口径）
-  { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true）' },
-  { key: 'idle', label: '发呆' },
-  { key: 'error', label: '卡住', title: '只算机器人停在 ERROR 态的号（需要处理）。仅带历史 err_code 但仍在运行的号不计入，行内以弱化"曾出错"标注' },
+  // 2026-09-22 游荡：机器人上报的 walk.enabled === true，或孵化会话进行中（与 MapView 绿环、Go r.Walking() 同一口径）
+  { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true，或孵化会话进行中）' },
+  { key: 'idle', label: '发呆', title: '在线、没在干活、也不是异常（ERROR），且未收工（DONE）—— 与地图页「空闲」桶、Go 侧 roampool.Idle 同源（DONE 是本页额外的排除口径）' },
+  { key: 'error', label: '卡住', title: '只算机器人停在 ERROR 态的号（需要处理）—— 与地图页「异常」同口径。仅带历史 err_code 但已恢复的号不计入，行内以弱化"曾出错"标注' },
   { key: 'offline', label: '掉线' },
 ]
 
-const TASK_STATES = ['WAIT_TASK', 'NAV', 'CLICK', 'DIALOG', 'FIGHT', 'SHOP', 'ALLOC', 'WAIT_NEXT']
-function isTasking(r) { return r.online && TASK_STATES.includes(r.state) }
-// "真在抓鬼" = 机器人上报的抓鬼会话 enabled（ghost 字段非空只代表该号有 GhostState，
-// 停止/跑完的号 enabled=false 也会上报，故不能只看字段存在）
-function isGhosting(r) { return !!(r.ghost && r.ghost.enabled === true) }
-// 2026-09-22 游荡中(与地图页绿环同一判据): 机器人上报 walk.enabled === true
-function isWalking(r) { return !!r.online && !!(r.walk && r.walk.enabled) }
+// ---- 状态口径：全部走 ../stateBuckets（与地图页、Go 侧同源），本页不再自定义 --------------
+// 2026-09-23 修复（对齐 ef6a044 / 26f4660）：这里原来漏了 SUBMIT（交付/提交中 = 推进中，不是空闲），
+// 且 isStuck 要求 err_code 非空 → state='ERROR' 的号会被**同时**计进「发呆」与「卡住」两边。
+// 现在：isBusy 含 SUBMIT（但不含 ERROR）；ERROR 由 isErr 单列「异常」；空闲要求"非忙且非异常"。
+//
+// 2026-09-22 游荡中（与地图页绿环同一判据，含孵化——孵化是"游荡到孵化图"）；
+// 离线号不算（walk 字段可能是下线前的残留）
+function isWalkingOn(r) { return !!r.online && isWalking(r) }
+// 在线且在忙（离线行不算：ghost/walk 字段可能是离线前的残留，别让它污染计数）
+function isBusyOn(r) { return !!r.online && isBusy(r) }
 
-// "卡住" = 停在 ERROR 态（机器人端等 reset/stop 的真卡住），而不是"err_code 非空"：
-// err_code 是"最近一次错误"，机器人端有 3 分钟时效（quest_state.ERROR_TTL_MS）且
-// 任务恢复时立即清除；时效内的历史错误仍会随心跳捎带一段，不能据此把正常运行的号
-// 标成卡住（生产 20:17：5 个误报号全部是 NAV/WAIT_GHOST 活跃态、ghost.enabled=true）。
-function isStuck(r) { return !!(r.err_code && r.state === 'ERROR') }
+// "卡住" = 停在 ERROR 态（机器人端等 reset/stop 的真卡住）——与地图页「异常」同口径：
+// 判据只看 state === 'ERROR'，不看 err_code 是否非空（ERROR 态但 err_code 缺失的号也必须计入，
+// 否则它会掉进「发呆」）。err_code 是"最近一次错误"，机器人端有 3 分钟时效
+// （quest_state.ERROR_TTL_MS）且任务恢复时立即清除；时效内的历史错误仍会随心跳捎带一段，
+// 不能据此把正常运行的号标成卡住（生产 20:17：5 个误报号全部是 NAV/WAIT_GHOST 活跃态）。
+function isStuck(r) { return isErr(r) }
+// "发呆" = 在线、没在干活、不是异常、也没收工（DONE）。
+// 前三条 = Go 侧 roampool.Idle / 地图页「空闲」桶同口径（该口径下 DONE 也算空闲，
+// 大屏额外排除：跑完链/抓满额的号是"收工"，不是"发呆"，这是大屏原有口径）。
+function isIdleRow(r) { return isIdle(r) && r.state !== 'DONE' }
 // 非 ERROR 态仍带 err_code：弱化提示"曾出错"，title 里保留错误码/信息，信息不丢。
 function recentErrTitle(r) {
   return `最近一次错误 ${r.err_code}${r.err_repeat > 1 ? ` ×${r.err_repeat}` : ''}` +
@@ -97,12 +108,12 @@ const countsByFilter = computed(() => {
     c.all++
     if (r.online) c.online++
     else c.offline++
-    if (isTasking(r)) c.task++
+    if (isBusyOn(r)) c.task++
     if (isGhosting(r)) c.ghost++
     if (kinds[r.account] === 'newbie') c.newbie++
-    if (isWalking(r)) c.walk++
-    if (r.online && !isTasking(r) && r.state !== 'DONE') c.idle++
-    if (isStuck(r)) c.error++ // 卡住 = ERROR 态（不是 err_code 非空，见 isStuck 注释）
+    if (isWalkingOn(r)) c.walk++
+    if (isIdleRow(r)) c.idle++  // 非忙 + 非异常 + 未收工：SUBMIT/ERROR 都不会再掉进「发呆」（见 isIdleRow）
+    if (isStuck(r)) c.error++   // 卡住 = ERROR 态（不是 err_code 非空，见 isStuck 注释）
   }
   return c
 })
@@ -112,11 +123,11 @@ const filtered = computed(() => robots.value.filter((r) => {
   switch (filter.value) {
     case 'online': return r.online
     case 'offline': return !r.online
-    case 'task': return isTasking(r)
+    case 'task': return isBusyOn(r)
     case 'ghost': return isGhosting(r)
-    case 'walk': return isWalking(r)
+    case 'walk': return isWalkingOn(r)
     case 'newbie': return intentKind.value[r.account] === 'newbie'
-    case 'idle': return r.online && !isTasking(r) && r.state !== 'DONE'
+    case 'idle': return isIdleRow(r)
     case 'error': return isStuck(r)
     default: return true
   }
@@ -1045,8 +1056,10 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
                     title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
               🈵 已抓满
             </el-tag>
-            <el-tag v-if="isStuck(r)" size="small" type="danger" effect="dark" disable-transitions :title="r.err_msg || ''">
-              {{ r.err_code }}<template v-if="r.err_repeat > 1">×{{ r.err_repeat }}</template>
+            <!-- ERROR 态但没带 err_code 的号也会走这里（判据只看 state，见 isStuck），文案要有兜底 -->
+            <el-tag v-if="isStuck(r)" size="small" type="danger" effect="dark" disable-transitions
+                    :title="r.err_msg || '机器人上报 ERROR（卡住/停链等待处理）——请重置或人工处理'">
+              {{ r.err_code || 'ERROR' }}<template v-if="r.err_repeat > 1">×{{ r.err_repeat }}</template>
             </el-tag>
             <!-- 非 ERROR 态的历史错误：弱化展示，不冒充"卡住"（见 isStuck/recentErrTitle） -->
             <el-tag v-else-if="r.err_code" size="small" type="info" effect="plain" disable-transitions

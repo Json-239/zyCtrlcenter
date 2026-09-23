@@ -3,6 +3,9 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiGet } from '../api'
 import { state, mapLabel, posLabel, taskLabel, taskHint, logEvents, logVersion, post, stateTagClass } from '../store'
+// 忙/空闲/异常归类判据（与 Go 侧 waterline.Busy / roampool.Idle 同源）抽到公共模块，
+// 与大屏 Dashboard 共用一份，别再在本文件里本地定义（2026-09-23 统一口径）
+import { BUCKET_ORDER, isErr, isGhosting, isHatching, isWalking, bucketOf } from '../stateBuckets'
 
 const mapid = ref(0)
 const cellPx = ref(3)
@@ -168,30 +171,14 @@ async function confirmStop(text) {
 const onlineRobots = computed(() => (state.status?.robots || []).filter((r) => r.online))
 const onlineCntAll = computed(() => onlineRobots.value.length)
 
-// 归类判据与中控 Go 侧同口径（internal/services/waterline/waterline.go:Busy、roampool.Idle）：
+// 归类判据（isBusy/isErr/isWalking/bucketOf/BUCKET_ORDER）已抽到 ../stateBuckets，
+// 与 Go 侧 internal/services/waterline/waterline.go:Busy、roampool.Idle 同口径（详见该模块注释）：
 //   忙碌 = 战斗中 / 活跃抓鬼会话(ghost.enabled) / 游荡或孵化(walk.enabled、hatch.active) /
-//          NAV·CLICK·DIALOG·FIGHT·SHOP·ALLOC·WAIT_NEXT / WAIT_TASK 且 task_index≠0
-//   空闲 = 在线 且 非忙碌（含 READY/IDLE/ONLINE/WAIT_GHOST/DONE）
+//          NAV·CLICK·DIALOG·FIGHT·SHOP·ALLOC·WAIT_NEXT·**SUBMIT** / WAIT_TASK 且 task_index≠0
+//   空闲 = 在线 且 非忙碌 且 非异常（含 READY/IDLE/ONLINE/WAIT_GHOST/DONE）
 // 「已抓满」= 后端标记 ghost_done_today（今天抓鬼已满/不可用，跨日自动消失）——这类号不能
 // 再抓鬼了，最适合派去游荡。
 //
-// 注：这里比 waterline.Busy 的**黑名单多一个 SUBMIT**（交任务/提交中）。理由：
-//   - roampool.Interruptible 的口径把 SUBMIT 与 FIGHT/NAV 并列 = "推进中，不打断"（超编收敛不动它）；
-//   - /api/random_walk 下游只校验"在线"，不看状态 —— 派错就会打断任务链，前端必须偏保守归类；
-//   - 实战数据：SUBMIT 号几乎都 ghost.enabled=true（先落"抓鬼中"桶），该条只在抓鬼会话外兜底。
-const BUSY_STATES = ['NAV', 'CLICK', 'DIALOG', 'FIGHT', 'SHOP', 'ALLOC', 'WAIT_NEXT', 'SUBMIT']
-function isGhosting(r) { return !!(r.ghost && r.ghost.enabled === true) }
-function isHatching(r) { return !!(r.hatch && r.hatch.active === true && r.hatch.hatched !== true) }
-function isWalking(r) { return !!(r.walk && r.walk.enabled === true) || isHatching(r) }
-// ERROR = 机器人上报的卡住/停链态（如"换图推送迟迟未到"），先人工处理，不能当空闲派活
-function isErr(r) { return String(r.state || '').toUpperCase() === 'ERROR' }
-function isBusy(r) {
-  if (r.fight || isGhosting(r) || isWalking(r)) return true
-  const s = String(r.state || '').toUpperCase()
-  if (BUSY_STATES.includes(s)) return true
-  if (s === 'WAIT_TASK') return Number(r.task_index) !== 0
-  return false
-}
 // 互斥归类（按"最该先看到"的优先级取一个）——筛选按钮与排序共用
 const CAND_BUCKETS = [
   { key: 'idle', label: '空闲', title: '在线且没在干活（与中控在线水位/游荡池同一判据）——最适合派游荡' },
@@ -201,17 +188,6 @@ const CAND_BUCKETS = [
   { key: 'walk', label: '游荡中', title: '已在游荡/孵化（walk.enabled 或孵化会话进行中）' },
   { key: 'err', label: '异常', title: '机器人上报 ERROR（卡住/停链等待处理，如换图推送未到）：先人工处理，别派活' },
 ]
-const BUCKET_ORDER = { idle: 0, full: 1, task: 2, ghost: 3, walk: 4, err: 5 }
-function bucketOf(r) {
-  // ERROR（机器人上报的卡住/停链）**最优先**：Go 的 waterline.Busy() 黑名单也不含它，
-  // 若按"非忙碌=空闲"会把它归进「空闲」——派游荡只会让卡住号更难处理。这里单列一类。
-  if (isErr(r)) return 'err'
-  if (isWalking(r)) return 'walk'
-  if (isGhosting(r)) return 'ghost'
-  if (isBusy(r)) return 'task'
-  if (r.ghost_done_today) return 'full'
-  return 'idle'
-}
 // 标记列里"有内容吗"（没有就显示 —）
 function hasMarks(r) {
   return !!(isErr(r) || hasDouble(r) || r.ghost_done_today || isWalking(r) || isGhosting(r) || r.paused)
