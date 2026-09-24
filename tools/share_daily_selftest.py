@@ -1943,7 +1943,102 @@ check("F10 动态 NPC 坐标表含 13007/13006/13021/13011",
       str(sorted(S.SHOP_NPC_POSITIONS.keys())))
 
 # ================================================================
-# 22.5) 汇总
+# 23) F11 · 2026-09-24 现场修复（神捕慢：点位判废 / 导航零进展复位）
+#     —— robot0005274/5275/5278 死点位空转 30-66 次；robot0005256 静默 11 分钟
+# ================================================================
+_src_f11 = _src_p1   # 同文件（share_daily.py）源码，复用 F10 的读取
+# A① 判废窗口内跳过 12054 点位路径 → 就地巡逻兜底可达（修复前该兜底永不触发）
+_rA = fresh_robot()
+_gA = new_state()
+_rA.m_share_daily = _gA
+_qA = _rA.m_quest
+_qA.tasks[2028302] = mk_task(2028302, counters=[counter(11883, 18140, 0, 1)])
+_gA.state = "KILL"
+_gA.target_locs = [(12, 100, 100)]
+_gA.tried_locations = set()
+_gA.kill_tries = 0
+_gA.tp_abandon_task = 2028302                            # 同一任务实例（不触发换任务重置）
+_gA.tp_abandon_until_ms = time.time() * 1000 + 300000    # 判废窗口打开
+_rA.m_mapid = 12
+_rA.m_pose = (100, 100)
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+getattr(S, "__on_kill")(_rA, _gA, _qA, time.time() * 1000)
+check("F11 A① 判废窗口内跳过点位路径 → 就地巡逻兜底（state=PATROL）",
+      _gA.state == "PATROL" and _gA.kill_mode == "patrol",
+      "%s/%s" % (_gA.state, _gA.kill_mode))
+# A② 连续 3 次"点位耗尽退避" → 判本轮点位不可用（窗口打开）
+_rA = fresh_robot()
+_gA = new_state()
+_rA.m_share_daily = _gA
+_qA = _rA.m_quest
+_qA.tasks[2028302] = mk_task(2028302, counters=[counter(11883, 18140, 0, 1)])
+_gA.state = "KILL"
+_gA.target_locs = [(12, 100, 100)]
+_rA.m_mapid = 12
+_rA.m_pose = (100, 100)
+for _i in range(3):
+    _gA.respawn_until_ms = 0
+    _gA.kill_tries = 99
+    getattr(S, "__on_kill")(_rA, _gA, _qA, time.time() * 1000)
+check("F11 A② 连续 3 次退避 → 判本轮点位不可用（窗口打开）",
+      _gA.tp_abandon_until_ms > time.time() * 1000, str(_gA.tp_abandon_until_ms))
+check("F11 A②b 判废后计数归零（进入下一累计周期）", _gA.tp_retry_count == 0,
+      str(_gA.tp_retry_count))
+check("F11 A③ 源码: ② 进入条件含判废窗口（防回归）",
+      "if g.target_locs and not (g.tp_abandon_until_ms and now_ms < g.tp_abandon_until_ms)" in _src_f11)
+check("F11 A④ 源码: 退避路径累计计数 + 判废常量",
+      "TP_ABANDON_RETRY_LIMIT" in _src_f11 and "TP_ABANDON_WINDOW_MS" in _src_f11)
+# B① nav_busy（walk_pending_click 形态）+ 位置零变化 ≥45s → 清理全形态残留回 READY
+_rB = fresh_robot()
+_gB = new_state()
+_rB.m_share_daily = _gB
+_qB = _rB.m_quest
+_gB.state = "KILL"
+_qB.walk_pending_click = {"at_ms": 1}      # 旧实现漏网的形态（只认 dijkstra_route）
+_rB.m_mapid = 12
+_rB.m_pose = (100, 100)
+_gB.nav_probe = (12, 100, 100)
+_gB.nav_probe_ms = time.time() * 1000 - 46000
+_okB = getattr(S, "__check_watchdog")(_rB, _gB, _qB, time.time() * 1000)
+check("F11 B① nav_busy 零进展 ≥45s → 清残留 + 回 READY（5256 现场形态）",
+      _okB is True and _qB.walk_pending_click is None and _gB.state == "READY",
+      "%s/%s/%s" % (_okB, _qB.walk_pending_click, _gB.state))
+# B② 位置有变化（有进展）→ 不误伤
+_rB = fresh_robot()
+_gB = new_state()
+_rB.m_share_daily = _gB
+_qB = _rB.m_quest
+_gB.state = "KILL"
+_qB.walk_pending_click = {"at_ms": 1}
+_rB.m_mapid = 12
+_rB.m_pose = (200, 200)                    # 与 nav_probe 不同 = 有进展
+_gB.nav_probe = (12, 100, 100)
+_gB.nav_probe_ms = time.time() * 1000 - 46000
+_okB = getattr(S, "__check_watchdog")(_rB, _gB, _qB, time.time() * 1000)
+check("F11 B② 位置有变化 → 不误伤（保留导航字段）",
+      _okB is False and _qB.walk_pending_click is not None, str(_okB))
+# B③ 对话中豁免（对话有独立的 30s 未关清理）
+_rB = fresh_robot()
+_gB = new_state()
+_rB.m_share_daily = _gB
+_qB = _rB.m_quest
+_gB.state = "KILL"
+_qB.walk_pending_click = {"at_ms": 1}
+_qB.dialog_open = True
+_rB.m_mapid = 12
+_rB.m_pose = (100, 100)
+_gB.nav_probe = (12, 100, 100)
+_gB.nav_probe_ms = time.time() * 1000 - 60000
+_okB = getattr(S, "__check_watchdog")(_rB, _gB, _qB, time.time() * 1000)
+check("F11 B③ 对话中豁免零进展清理", _okB is False and _qB.walk_pending_click is not None,
+      str(_okB))
+# B④ 源码级：__clear_nav_fields 覆盖全形态 + 时间语义常量
+check("F11 B④ 源码: __clear_nav_fields 全形态 + NAV_STALL_MS",
+      "def __clear_nav_fields" in _src_f11 and "NAV_STALL_MS" in _src_f11
+      and "walk_pending_click" in _src_f11)
+
+# ================================================================
+# 24) 汇总
 # ================================================================
 print("\n自检目标: %s" % SCRIPT_DIR)
 print("结果：%d 项，失败 %d 项" % (total, fails))
