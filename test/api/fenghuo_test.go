@@ -61,6 +61,7 @@ func TestLaunchFenghuoCarriesPayload(t *testing.T) {
 	want := map[float64]bool{2002101: false, 2002102: false, 2002103: false,
 		2002104: false, 2002105: false, 2002107: false}
 	catcherOf := map[float64]string{}
+	throwerOf := map[float64]string{}
 	for _, it := range order {
 		o, _ := it.(map[string]any)
 		idx, _ := o["task_index"].(float64)
@@ -70,6 +71,9 @@ func TestLaunchFenghuoCarriesPayload(t *testing.T) {
 		want[idx] = true
 		if c, _ := o["catcher_npc"].(string); c != "" {
 			catcherOf[idx] = c
+		}
+		if t, _ := o["thrower_npc"].(string); t != "" {
+			throwerOf[idx] = t
 		}
 	}
 	for idx, seen := range want {
@@ -83,6 +87,15 @@ func TestLaunchFenghuoCarriesPayload(t *testing.T) {
 	}
 	if catcherOf[2002101] != "30029" {
 		t.Fatalf("2002101（押送银两）的 catcher 应为动态军需官 30029: %v", catcherOf)
+	}
+	// thrower（接取/推进 NPC，**机器人端接口约定**，2026-09-24 对齐）：
+	//   全 6 环均为秦琼 10149 —— 2002101~2002105 依据 20021.xml 的 task_thrower（首环 catcher
+	//   是动态军需官，显式 thrower 防机器人端把 catcher 误当 broker）；2002107（收尾）XML 的
+	//   thrower 无实际接取语义，按 catcher 交互 NPC 显式填 10149（两方一致的接口约定）。
+	for _, idx := range []float64{2002101, 2002102, 2002103, 2002104, 2002105, 2002107} {
+		if throwerOf[idx] != "10149" {
+			t.Fatalf("任务 %v 的 thrower 应为 10149 秦琼（机器人端用它定接取/推进 NPC）: %v", idx, throwerOf)
+		}
 	}
 	// 坐标/网格/路由从基座 newbie_full 复用（专属文件只放声明）
 	if npcs, _ := chain["npcs"].(map[string]any); len(npcs) == 0 {
