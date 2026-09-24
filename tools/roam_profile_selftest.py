@@ -35,12 +35,16 @@
   ⑤ 源码形状: 随机图/白名单/限时确实接进了 random_walk; mount_egg 启动游荡固定传 dense;
      **wild 档注册 + __note_roam_fight 统计补口 + tick 战斗分支调用 + 沿标记复位**;
      default/dense 参数精确值(防"顺手改档"回归)。
+  ⑥ 野外游荡白名单(2026-09-24): config.robot_roam_wild_maps 精确值(20 张 100% 怪区世界图)、
+     ⊆ 世界图白名单、与排除图无交集; random_walk 的 mode=wild 缺省补口存在; 死代码
+     HATCH_MAPS 已清理; wild+maps 组合(随机图抽签落在清单内)。
 
 用法:
   python tools/roam_profile_selftest.py <script 目录 或 random_walk.py 路径>
 """
 import os
 import random
+import re
 import sys
 
 
@@ -78,6 +82,15 @@ def _extract_func(src, name):
                 out.append(ln2)
             return "\n".join(out)
     return None
+
+
+def _extract_list(src, name):
+    """从 config.py 源码里取顶层 `name = [..数字..]` 列表（跨行可解析；取不到返回 None）。"""
+    m = re.search(r"^%s\s*=\s*\[([^\]]*)\]" % re.escape(name), src, re.M)
+    if not m:
+        return None
+    vals = [int(x) for x in re.findall(r"-?\d+", m.group(1))]
+    return vals
 
 
 class _W(object):
@@ -372,6 +385,41 @@ def main():
                 _sys.modules["fight_tester"] = _old_ft
             else:
                 del _sys.modules["fight_tester"]
+
+    # ---- ⑦ 野外游荡白名单(config.robot_roam_wild_maps) + wild/maps 组合(2026-09-24) ----
+    #   背景: mode=wild 只管节奏, 选图要靠 maps; 机器人端新增"wild+随机图+未给 maps
+    #   → 缺省用 config.robot_roam_wild_maps(20 张 100% 怪区世界图)"的补口。
+    cfg_path = os.path.join(script_dir, "config.py")
+    cfg_src = open(cfg_path, encoding="utf-8", errors="replace").read() if os.path.exists(cfg_path) else ""
+    wild = _extract_list(cfg_src, "robot_roam_wild_maps")
+    world = _extract_list(cfg_src, "robot_roam_world_maps")
+    excl = _extract_list(cfg_src, "robot_roam_exclude_maps")
+    check("config 定义 robot_roam_wild_maps 且非空(野外游荡可派)", bool(wild), wild)
+    if wild:
+        check("wild 清单精确值(20 张 100% 怪区世界图; 防顺手改)",
+              wild == [6, 8, 10, 15, 16, 20, 21, 26, 27, 31, 32, 34, 38, 39, 42, 43, 44, 45, 46, 49],
+              wild)
+        check("wild 清单 ⊆ 世界图白名单(robot_roam_world_maps)",
+              bool(world) and set(wild) <= set(world),
+              "wild=%s world=%s" % (wild, world))
+        check("wild 清单与排除图(robot_roam_exclude_maps)无交集",
+              not (set(wild) & set(excl or [])),
+              "交集=%s" % sorted(set(wild) & set(excl or [])))
+    check("random_walk: mode=wild 缺省补 config.robot_roam_wild_maps(可组合)",
+          'is_random_map(_raw_map) and _prof_req == "wild"' in src
+          and "robot_roam_wild_maps" in src,
+          "wild 缺省白名单补口缺失(mode=wild 不带 maps 会去无怪图)")
+    check("random_walk: 死代码 HATCH_MAPS 已清理(真值在服务端/前端)",
+          "HATCH_MAPS = [" not in src,
+          "机器人端又出现了 HATCH_MAPS 定义(重复真值源)")
+    if wild and resolve is not None and norm is not None:
+        # 组合口径: mode=wild + 显式 maps(怪区清单) + 随机图 → 抽到图必在清单内
+        _t = resolve("random", norm(wild), wild + [609], current_map=0, rng=random.Random(3))
+        check("wild+maps 组合: 随机图抽签落在怪区清单内", _t[0] in wild and _t[2] == "", _t)
+        # 整组清单可当白名单(∩有网格图 = 全部) → 不因个别图缺网格整组被拒
+        _t2 = resolve("random", wild, wild, current_map=0, rng=random.Random(3))
+        check("wild 清单可整组作为随机图白名单(∩网格=全部, 不空拒)",
+              _t2[0] in wild and _t2[2] == "", _t2)
 
     nfail = 0
     for name, ok, detail in results:

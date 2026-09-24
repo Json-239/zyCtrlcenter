@@ -35,13 +35,18 @@ const batchDlg = ref(false)            // 批量游荡弹窗
 const candPage = ref(1)                // 选号列表页码
 const candSize = ref(50)               // 每页条数（20/50/100）
 const HATCH_MAPS = [6, 17, 34, 40]  // 服务端 CFG/mount.xml：只有这 4 张图能孵出坐骑
+// 2026-09-24 野外挂机刷怪（wild）：服务端只读实证"怪颜色像素占非零像素 100%"的世界图 20 张
+//   （来源 git ee8cf06；与机器人 config.robot_roam_wild_maps 同清单 —— 机器人端对
+//   mode=wild+随机图+未给 maps 也有一份缺省补口，这里显式传做双保险）。
+//   不进清单：40（怪区仅占全图 ~68.9%）/17(~67.9%)/13(~40.3%) 密度不足；6xx/7xx 副本图不去。
+const WILD_MAPS = [6, 8, 10, 15, 16, 20, 21, 26, 27, 31, 32, 34, 38, 39, 42, 43, 44, 45, 46, 49]
 const ROAM_PROFILES = [
   { id: 'default', label: 'default（拟人挂机）' },
   { id: 'dense', label: 'dense（密集游荡）' },
   { id: 'wild', label: 'wild（野外挂机刷怪）' },
   { id: 'gather', label: 'gather（采集·占位未实现）' },
 ]
-const ROAM_KIND_LABEL = { current: '当前图', picked: '指定图', random: '随机图', hatch: '孵化图' }
+const ROAM_KIND_LABEL = { current: '当前图', picked: '指定图', random: '随机图', hatch: '孵化图', wild: '野外' }
 
 const maps = computed(() => state.maps || {})
 const robots = computed(() => (state.status?.robots || []).filter((r) => r.online && r.mapid))
@@ -96,13 +101,15 @@ function doubleTitle(row) {
   return `今日（${txt}）已领双倍经验 · 优先抓鬼（双倍有时长，别派去游荡）`
 }
 
-// 2026-09-23 右侧信息面板「货币」行 / 批量选号列表共用：银两 / 储备金(reserve) / 存款(deposit)。
+// 2026-09-23 右侧信息面板「货币」行 / 批量选号列表共用：银两 / 储备金(reserve) / 存款(deposit)，
+//   2026-09-24 追加开元通宝(kaiyuan)。
 //   0/缺失 → '-'；悬浮 title 给完整数值（列表列与详情行共用同一份口径）。
 function moneyTitle(row) {
-  return `银两 ${row?.money ?? 0} · 储备金 ${row?.reserve ?? 0} · 存款 ${row?.deposit ?? 0}`
+  return `银两 ${row?.money ?? 0} · 储备金 ${row?.reserve ?? 0} · 存款 ${row?.deposit ?? 0} · 开元通宝 ${row?.kaiyuan ?? 0}`
 }
 
 // 下发游荡：kind = current(当前图) / picked(选图) / random(随机图) / hatch(孵化图·dense) /
+//                    wild(野外·怪区图 random+maps，2026-09-24) /
 //                    batchmap(②区多图分配：每图一批，targetMap=该批的目标图)
 async function roamStart(kind, accs, targetMap) {
   const d = detail.value
@@ -129,6 +136,12 @@ async function roamStart(kind, accs, targetMap) {
   } else if (kind === 'hatch') {
     body.mapid = hatchMap.value  // 孵化白名单 6/17/34/40
     body.mode = 'dense'          // 孵化靠走动踩暗雷：固定密集档（与 mount_egg 内部一致）
+  } else if (kind === 'wild') {
+    // 2026-09-24 野外挂机刷怪：随机去一张 100% 怪区图（每号不同）+ wild 节奏刷暗雷。
+    // maps 显式传（Go 侧 /api/random_walk 原样透传给机器人；与机器人 config 同清单）。
+    body.mapid = 'random'
+    body.mode = 'wild'
+    body.maps = WILD_MAPS
   }
   if (body.mode === undefined) body.mode = roamMode.value
   const m = Number(roamMinutes.value)
@@ -723,7 +736,8 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             <td class="mono">{{ posLabel(detail.pos) }} / {{ (detail.pos || []).join(', ') || '--' }}</td></tr>
           <tr><td class="muted">任务</td><td class="mono" :title="taskHint(detail.task_index)">{{ taskLabel(detail.task_index) }} · 进度 {{ detail.done || 0 }}</td></tr>
           <!-- 2026-09-23 货币（用户要求放右侧信息面板）：银两 / 储备金 / 存款（钱庄存款）。
-               数据来自机器人心跳（90353 全量 + 90073 增量解析）；0/缺失显示 '-'，悬浮给完整数值。 -->
+               数据来自机器人心跳（90353 全量 + 90073 增量解析）；0/缺失显示 '-'，悬浮给完整数值。
+               2026-09-24 追加开元通宝(9727)（用户要求补全）。 -->
           <tr><td class="muted">货币</td>
             <td class="mono" :title="moneyTitle(detail)">
               <span class="ok-text">{{ fmtMoney(detail.money) }}</span>
@@ -731,7 +745,9 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
               <span class="warn-text">{{ fmtMoney(detail.reserve) }}</span>
               <span class="muted"> / </span>
               <span>{{ fmtMoney(detail.deposit) }}</span>
-              <span class="muted small">（银两 / 储备金 / 存款）</span>
+              <span class="muted"> / </span>
+              <span>{{ fmtMoney(detail.kaiyuan) }}</span>
+              <span class="muted small">（银两 / 储备金 / 存款 / 开元通宝）</span>
             </td></tr>
           <tr v-if="detail.err_code"><td class="muted">最近错误</td>
             <td><el-tag size="small" type="danger">{{ detail.err_code }} ×{{ detail.err_repeat || 1 }}</el-tag>
@@ -775,11 +791,13 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
                    @click="roamStart('picked')">选图游荡</el-button>
         <el-button size="small" :disabled="roamBusy" @click="roamStart('random')">随机图游荡</el-button>
         <el-button size="small" :disabled="roamBusy" @click="roamStart('hatch')">孵化图游荡(dense)</el-button>
+        <el-button size="small" :disabled="roamBusy" @click="roamStart('wild')">野外游荡(wild·怪区图)</el-button>
         <el-button size="small" type="danger" plain :disabled="roamBusy" @click="roamStopPicked">停止游荡</el-button>
       </div>
       <div class="muted small roam-hint">
         游荡与任务链/抓鬼互斥（机器人端会先停它们）；孵化图=白名单 6/17/34/40（号上没蛋则无灵气收益）；
-        档位 gather 为采集占位（机器人端明确回退 default，别当采集用）。
+        野外(wild)=随机去 20 张"100% 怪区"世界图刷暗雷（遇怪自动打，产战斗统计）；档位 gather 为采集占位
+        （机器人端明确回退 default，别当采集用）。
       </div>
 
       <!-- 血量/法力 -->
@@ -956,16 +974,19 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
             <el-table-column label="等级" width="58">
               <template #default="{ row }">Lv{{ row.level ?? '--' }}</template>
             </el-table-column>
-            <!-- 2026-09-23 货币详情：银两(money) / 储备金(reserve)，数据来自机器人心跳
-                 （机器人端 90353 全量 + 90073 增量解析，见 msghandle.match_role_data_handle）。
+            <!-- 2026-09-23 货币详情：银两(money) / 储备金(reserve) / 开元通宝(kaiyuan)，数据来自机器人
+                 心跳（机器人端 90353 全量 + 90073 增量解析，见 msghandle.match_role_data_handle）。
                  0/缺省显示 '-'；完整数值见悬浮提示。 -->
-            <el-table-column label="银两 / 储备" width="132">
+            <el-table-column label="银两 / 储备 / 开元" width="170">
               <template #default="{ row }">
                 <span class="mono ok-text"
-                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.money) }}</span>
+                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0} · 开元通宝 ${row.kaiyuan ?? 0}`">{{ fmtMoney(row.money) }}</span>
                 <span class="muted"> / </span>
                 <span class="mono warn-text"
-                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0}`">{{ fmtMoney(row.reserve) }}</span>
+                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0} · 开元通宝 ${row.kaiyuan ?? 0}`">{{ fmtMoney(row.reserve) }}</span>
+                <span class="muted"> / </span>
+                <span class="mono"
+                      :title="`银两 ${row.money ?? 0} · 储备金 ${row.reserve ?? 0} · 开元通宝 ${row.kaiyuan ?? 0}`">{{ fmtMoney(row.kaiyuan) }}</span>
               </template>
             </el-table-column>
             <template #empty>
@@ -1024,6 +1045,7 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
         </el-button>
         <el-button size="small" :disabled="roamBusy || !selAccounts.length" @click="roamBatch('random')">批量·随机图</el-button>
         <el-button size="small" :disabled="roamBusy || !selAccounts.length" @click="roamBatch('hatch')">批量·孵化图(dense)</el-button>
+        <el-button size="small" :disabled="roamBusy || !selAccounts.length" @click="roamBatch('wild')">批量·野外(wild)</el-button>
         <el-button type="primary" size="small" :disabled="batchBusy || roamBusy || !selAccounts.length || !batchMaps.length"
                    @click="roamBatchToMaps()">
           批量·分配到所选图（{{ batchMaps.length }} 图 / {{ batchMapSum }} 号）
