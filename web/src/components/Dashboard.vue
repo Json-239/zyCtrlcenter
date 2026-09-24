@@ -66,9 +66,10 @@ const filters = [
   { key: 'task', label: '干活中', title: '在线且在忙：任务链推进（含交任务 SUBMIT）/ 抓鬼会话活跃 / 游荡(含孵化) / 战斗中 —— 与地图页「任务中」桶、Go 侧 waterline.Busy 同口径' },
   { key: 'ghost', label: '👻抓鬼', title: '有活跃抓鬼会话（机器人上报 ghost.enabled === true；enabled=false 的历史会话不算）' },
   { key: 'newbie', label: '🆕新手' },  // 意图表 kind === 'newbie'
-  // 2026-09-23 分享日常（方案 §4.4）：意图表 kind === 'shenbu' / 'fenghuo'
-  { key: 'shenbu', label: '🕵️神捕', title: '意图表 kind === shenbu：等级 ≥40 且大唐神捕今日未满' },
-  { key: 'fenghuo', label: '🔥烽火', title: '意图表 kind === fenghuo：等级 ≥40 且烽火大唐今日未满（P1 接入）' },
+  // 2026-09-23 分享日常（方案 §4.4）；2026-09-24 补充：**正在跑的号也要能筛出来**
+  // （只看意图会漏——号可能意图仍是抓鬼、但已被派了大唐神捕，见 dailyKindOf）
+  { key: 'shenbu', label: '🕵️神捕', title: '意图=shenbu（等级 ≥40 且大唐神捕今日未满）或 正在跑大唐神捕（心跳 daily=share_daily_大唐神捕）' },
+  { key: 'fenghuo', label: '🔥烽火', title: '意图=fenghuo 或 正在跑烽火大唐（心跳 daily=share_daily_宫廷10）（P1 接入）' },
   // 2026-09-22 游荡：机器人上报的 walk.enabled === true，或孵化会话进行中（与 MapView 绿环、Go r.Walking() 同一口径）
   { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true，或孵化会话进行中）' },
   { key: 'idle', label: '发呆', title: '在线、没在干活、也不是异常（ERROR），且未收工（DONE）—— 与地图页「空闲」桶、Go 侧 roampool.Idle 同源（DONE 是本页额外的排除口径）' },
@@ -103,6 +104,23 @@ function recentErrTitle(r) {
     `${r.err_msg ? '：' + r.err_msg : ''}（当前非卡住态：已恢复或正在自动重试）`
 }
 
+// 2026-09-24 补充（用户反馈"大屏神捕 tab 是空的"）：分享日常「正在跑」判据 ——
+// 号可能意图仍是抓鬼、但已被派了大唐神捕（手动/策略下发的号），只看意图会漏；
+// 心跳 daily 块 {share_key,done,limit,state} 才是"在跑"的权威。share_key→kind 映射
+// 与中控 /api/daily/overview 队列口径一致（share_daily_大唐神捕 / share_daily_宫廷10）。
+function dailyKindOf(r) {
+  const sk = r && r.daily ? String(r.daily.share_key || '') : ''
+  if (sk.includes('大唐神捕')) return 'shenbu'
+  if (sk.includes('宫廷')) return 'fenghuo'
+  return ''
+}
+function dailyTitle(r) {
+  const dk = dailyKindOf(r)
+  const name = dk === 'shenbu' ? '大唐神捕' : dk === 'fenghuo' ? '烽火大唐' : '分享日常'
+  const d = (r && r.daily) || {}
+  return `分享日常：${name}（相位 ${d.state || '?'}）今日 ${Number(d.done) || 0}/${Number(d.limit) || 0}`
+}
+
 // 一次遍历算完所有筛选计数（原来每个筛选各扫一遍全表）
 const countsByFilter = computed(() => {
   const c = { all: 0, online: 0, task: 0, ghost: 0, newbie: 0, shenbu: 0, fenghuo: 0, walk: 0, idle: 0, error: 0, offline: 0 }
@@ -114,8 +132,9 @@ const countsByFilter = computed(() => {
     if (isBusyOn(r)) c.task++
     if (isGhosting(r)) c.ghost++
     if (kinds[r.account] === 'newbie') c.newbie++
-    if (kinds[r.account] === 'shenbu') c.shenbu++
-    if (kinds[r.account] === 'fenghuo') c.fenghuo++
+    const dk = dailyKindOf(r)  // 2026-09-24：正在跑的号也计入神捕/烽火（见 dailyKindOf 注释）
+    if (kinds[r.account] === 'shenbu' || dk === 'shenbu') c.shenbu++
+    if (kinds[r.account] === 'fenghuo' || dk === 'fenghuo') c.fenghuo++
     if (isWalkingOn(r)) c.walk++
     if (isIdleRow(r)) c.idle++  // 非忙 + 非异常 + 未收工：SUBMIT/ERROR 都不会再掉进「发呆」（见 isIdleRow）
     if (isStuck(r)) c.error++   // 卡住 = ERROR 态（不是 err_code 非空，见 isStuck 注释）
@@ -132,8 +151,8 @@ const filtered = computed(() => robots.value.filter((r) => {
     case 'ghost': return isGhosting(r)
     case 'walk': return isWalkingOn(r)
     case 'newbie': return intentKind.value[r.account] === 'newbie'
-    case 'shenbu': return intentKind.value[r.account] === 'shenbu'
-    case 'fenghuo': return intentKind.value[r.account] === 'fenghuo'
+    case 'shenbu': return intentKind.value[r.account] === 'shenbu' || dailyKindOf(r) === 'shenbu'
+    case 'fenghuo': return intentKind.value[r.account] === 'fenghuo' || dailyKindOf(r) === 'fenghuo'
     case 'idle': return isIdleRow(r)
     case 'error': return isStuck(r)
     default: return true
@@ -644,6 +663,7 @@ function taskCellHint(r) {
   const k = intentKind.value[r.account]
   const lines = [taskHint(r.task_index)]
   if (k) lines.push(`意图：${KIND_LABEL[k] || k}`)
+  if (dailyKindOf(r)) lines.push(dailyTitle(r))  // 2026-09-24：在跑分享日常的号带一行明细
   lines.push(`新手链：${r.chain_done ? '已完成' : '未完成'}，链内已完成 ${Number(r.done) || 0} 个任务`)
   lines.push(g
     ? `抓鬼会话：${g.enabled === true ? '进行中' : '已停'}${g.state ? `（${g.state}）` : ''}` +
@@ -1063,6 +1083,11 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
             <el-tag v-if="r.ghost_done_today" size="small" type="warning" effect="dark" disable-transitions
                     title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
               🈵 已抓满
+            </el-tag>
+            <!-- 2026-09-24：分享日常在跑标记（神捕/烽火）——大屏直接可见"在跑哪个日常、第几轮" -->
+            <el-tag v-if="dailyKindOf(r)" size="small" :type="dailyKindOf(r) === 'shenbu' ? 'warning' : 'info'"
+                    effect="dark" disable-transitions :title="dailyTitle(r)">
+              {{ dailyKindOf(r) === 'shenbu' ? '🕵️神捕' : '🔥烽火' }} {{ Number(r.daily.done) || 0 }}/{{ Number(r.daily.limit) || 0 }}
             </el-tag>
             <!-- ERROR 态但没带 err_code 的号也会走这里（判据只看 state，见 isStuck），文案要有兜底 -->
             <el-tag v-if="isStuck(r)" size="small" type="danger" effect="dark" disable-transitions
