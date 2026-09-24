@@ -518,9 +518,14 @@ async function cancelRegHost(acc) {
 .ob-block { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .ob-block:first-of-type { margin-top: 0; }
 /* 参数区：固定 label 宽度的两列以上网格（窄屏自动折行），比一行 flex 更好对齐 */
-.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(262px, 1fr)); gap: 0 12px; margin-top: 8px; }
-.cfg-grid :deep(.el-form-item) { margin-bottom: 6px; }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 0 12px; margin-top: 8px; }
+.cfg-grid :deep(.el-form-item) { margin-bottom: 6px; min-width: 0; }
 .cfg-grid :deep(.el-form-item__label) { padding-right: 8px; }
+/* 2026-09-24 排版修复（用户反馈"参数区排版歪了"）：单元格并排时单位文案被压成两行
+   （"级(低于则跳/过)"、"开元通宝(低于则/跳过)"）。口径：内容行不换行 + 单位文案 nowrap，
+   列宽放统一到 ≥360px，四套策略卡两行列轨一致。 */
+.cfg-grid :deep(.el-form-item__content) { flex-wrap: nowrap; min-width: 0; }
+.cfg-grid :deep(.el-form-item__content) .muted { white-space: nowrap; }
 .mb { margin-bottom: 12px; }
 .mt { margin-top: 10px; }
 </style>
