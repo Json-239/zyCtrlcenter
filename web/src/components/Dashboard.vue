@@ -312,6 +312,9 @@ onUnmounted(() => clearInterval(rpTimer))
 const chains = reactive({ list: [], dir: '', err: '', id: localStorage.getItem('zy_chain_id') || 'auto' })
 const curChain = computed(() => chains.list.find((c) => c.id === chains.id) || null)
 const autoMode = computed(() => chains.id === 'auto' || !chains.id)
+// 2026-09-24：日常声明文件（*_nav，如 shenbu_nav / zhongkui_nav）—— 命名约定同链数据页
+// （3ed6c0b）：可查看、不可作为普通任务链启动；否则"选中+全部启动"会把声明链整批发给所有号。
+function isDailyDecl(c) { return /_nav$/.test(String((c && (c.id || c.chain_id)) || '')) }
 async function loadChains() {
   try {
     const d = await apiGet('/api/chains')
@@ -332,6 +335,13 @@ function startBody(accounts) {
   return body
 }
 async function startAll() {
+  // 2026-09-24：日常声明（*_nav，如 shenbu_nav）不是可执行链 —— 防"选中它点全部启动"
+  // 把一条声明链整批发给所有号（会把号上正在跑的链数据顶掉）。与链数据页同口径。
+  const c = curChain.value
+  if (!autoMode.value && c && (c.nav_only || isDailyDecl(c))) {
+    ElMessage.warning(`「${c.name || c.chain_id || c.id}」不是可执行任务链（${c.nav_only ? '导航数据' : '日常声明'}），不能整批启动；分享日常请到「任务」页启动`)
+    return
+  }
   // 提示由 post() 统一弹（避免与行内启动重复弹同一条 msg）；下发行为不变。
   await post('/api/start', startBody(null))
 }
@@ -902,12 +912,12 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         <el-select v-model="chains.id" size="small" style="width: 296px" placeholder="（只下发默认链 id）">
           <el-option value="auto" label="自动分配（按意图：等级&lt;31 新手链 / 其余抓鬼）" />
           <el-option value="" label="（只下发默认链 id）" />
-          <el-option v-for="c in chains.list.filter((x) => !x.nav_only)" :key="c.id" :value="c.id"
+          <el-option v-for="c in chains.list.filter((x) => !x.nav_only && !isDailyDecl(x))" :key="c.id" :value="c.id"
                      :label="`${c.name || c.chain_id || c.id}（${c.task_count} 节点）`" />
-          <el-option value="__nav_head__" disabled label="—— 以下不是链，是导航数据 ——"
-                     v-if="chains.list.some((x) => x.nav_only)" />
-          <el-option v-for="c in chains.list.filter((x) => x.nav_only)" :key="c.id" :value="c.id" disabled
-                     :label="`${c.name || c.chain_id || c.id}（导航数据，不可直接启动）`" />
+          <el-option value="__nav_head__" disabled label="—— 以下不是可执行链 ——"
+                     v-if="chains.list.some((x) => x.nav_only || isDailyDecl(x))" />
+          <el-option v-for="c in chains.list.filter((x) => x.nav_only || isDailyDecl(x))" :key="c.id" :value="c.id" disabled
+                     :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据' : '日常声明'}，不可直接启动）`" />
         </el-select>
       </el-tooltip>
       <el-tag size="small" effect="plain" disable-transitions
