@@ -669,6 +669,20 @@ _sched = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
 check("S8 ⑨ 接取对话（#i901#大唐神捕）→ 选接取项而非退出项",
       bool(_sched) and _sched[-1].get("data", {}).get("option_index") == 0,
       str(_sched[-1:]))
+# 2026-09-24 现场回归（robot0005275 打匪首"开战"对话被误判无关而退出）：击杀实例的对话算本 run
+r = fresh_robot()
+g = new_state()
+g.state = "KILL"
+g.kill_npc_id = 1923723
+r.m_share_daily = g
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlg2 = [0, 0, 1923723, "不是吧，这么冒昧的和我说话，难道有什么企图？", 0,
+         [("#i902#大唐神捕", 0), ("离开", 1)]]
+getattr(S, "__on_show_dialog")(r, g, _dlg2)
+_sched2 = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("S8 ⑩ 击杀实例的'开战'对话 → 选【大唐神捕】而非退出",
+      bool(_sched2) and _sched2[-1].get("data", {}).get("option_index") == 0,
+      str(_sched2[-1:]))
 
 # ================================================================
 # 10) S9 · 交付（不覆盖 catcher / 先等一拍 / 12 次上限）
@@ -728,6 +742,27 @@ q.dyn_npc_meta = {1001: 18140, 1002: 18141}
 q.dynamic_npcs = {1001: [12, 9999, 9999], 1002: [12, 2300, 1900]}
 got = getattr(S, "__find_clickable_instance")(r, q, [18140, 18141, 18142])
 check("S10 选可点实例而非列表首项", got is not None and got[0] == 1002, str(got))
+# 2026-09-24 现场回归（robot0005275 B 分支"目标点无可点怪"死循环）：任务自带目标 npc 必须
+# 进击杀名单 —— 真实 shenbu_nav.json 的 2028311 声明未带 kill_npc，配置的 18140|41|42
+# （A 分支匪徒）顶不上，导致匪首 13597 实例永远不被认。
+g10 = new_state()
+g10.chain = {"task_order": [{"task_index": 2028311, "catcher_npc": 13597}]}
+task10 = mk_task(2028311, npc_index=13597, npc_id=1923723)
+idx10 = getattr(S, "__kill_npc_indexes")(fresh_robot(), g10, task10)
+check("S10 ⑦任务自带目标 npc 进击杀名单（链数据无 kill_npc 仍含 13597）",
+      13597 in idx10, str(idx10))
+g10b = new_state()
+g10b.chain = {"task_order": [{"task_index": 2028311, "kill_npc": [13597]}]}
+idx10b = getattr(S, "__kill_npc_indexes")(fresh_robot(), g10b, task10)
+check("S10 ⑧链数据带 kill_npc 时不重复", idx10b.count(13597) == 1, str(idx10b))
+r10 = fresh_robot()
+r10.m_mapid = 11
+r10.m_pose = (1800, 1896)
+q10 = r10.m_quest
+q10.dyn_npc_meta[1923723] = 13597
+q10.dynamic_npcs[1923723] = [11, 1792, 1888]
+inst10 = getattr(S, "__find_clickable_instance")(r10, q10, [18140, 18141, 18142, 13597])
+check("S10 ⑨同图已注册的匪首实例可被找到", bool(inst10) and inst10[1] == 13597, str(inst10))
 # S11 三点耗尽 → 退避且不缓存旧坐标
 r = fresh_robot()
 g = new_state()

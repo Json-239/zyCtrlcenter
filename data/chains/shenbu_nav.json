@@ -22,6 +22,7 @@
       "name": "大唐神捕（匪首老大）",
       "catcher_npc": "13597",
       "catcher_name": "匪首老大",
+      "kill_npc": [13597],
       "next": [2028399]
     },
     {
