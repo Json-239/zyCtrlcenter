@@ -164,6 +164,28 @@ def part_a(dh, cfg):
     check("A25 config.py 无 GHOST_HUNT 开关(纯逻辑, 不扩部署面)",
           ("GHOST_HUNT" not in cfg) if cfg is not None else True)
 
+    # ---- 病灶1: NAV 追鬼误清鬼(独立 nav 计数) 的源码形状 ----
+    check("A26 常量 NAV_FOLLOW_MAX = 3(本状态真实超时上限)",
+          re.search(r"^NAV_FOLLOW_MAX\s*=\s*3", dh, re.M) is not None)
+    check("A27 定义 __nav_ghost_follow_ok(清鬼判据入口)",
+          "def __nav_ghost_follow_ok(" in dh)
+    check("A28 清鬼判据改用本状态计数(共享 rounds<3 判据已不存在)",
+          "__nav_ghost_follow_ok(g):" in dh
+          and re.search(r"and g\.rounds < 3", dh) is None)
+    check("A29 NAV 真实超时累加独立计数(nav_rounds)",
+          "g.nav_rounds = _nav_r" in dh
+          and '_nav_r = int(getattr(g, "nav_rounds", 0) or 0)' in dh)
+    check("A30 进入 NAV 清零(仅进入; 内部重推不清)",
+          re.search(r'if state == "NAV":\s*\n\t\t\tg\.nav_rounds = 0', dh) is not None)
+    check("A31 清鬼后本状态计数归零",
+          "g.nav_rounds = 0\t# 2026-09-24 找鬼追踪: 本轮追鬼结束" in dh)
+    check("A32 共享 rounds 其他语义原样(__stuck/累加/非 NAV 日志)",
+          "if g.rounds > 4:" in dh
+          and '__stuck(robot_object, g, "状态 %s 重试 %d 次仍无进展"' in dh
+          and '"抓鬼状态 %s 超时, 第 %d 次重试" % (g.state, g.rounds)' in dh)
+    check("A33 nav_rounds 字段在 __init__ 与 reset 都初始化",
+          dh.count("self.nav_rounds = 0") >= 2)
+
 
 # ======================================================================
 # B. 动态: 真执行 __refresh_hunt_target
@@ -328,6 +350,50 @@ def part_b(dh):
     rt(_RO(26), g7, q7, NOW + 9000)   # 坐标未变
     check("B14 未变化不刷日志", not logs, "logs=%s" % logs)
 
+    # ================= 病灶1: 误清鬼回归(NAV 独立计数) =================
+    class _G2(object):
+        pass
+
+    frag_nf = _extract_func(dh, "__nav_ghost_follow_ok")
+    check("B15 可抽取 __nav_ghost_follow_ok", frag_nf is not None)
+    if frag_nf:
+        ns_nf = {"NAV_FOLLOW_MAX": 3}
+        exec(frag_nf, ns_nf)
+        nf = ns_nf["__nav_ghost_follow_ok"]
+        g9 = _G2()
+        g9.nav_rounds = 0
+        g9.rounds = 3       # 其他状态残留(现场"第 3 次"的来源)
+        check("B15a 误清鬼回归: rounds=3 残留 + 本状态 0 次 → 继续追(不清鬼)",
+              nf(g9) is True)
+        g9.nav_rounds = 2
+        check("B15b 本状态真实 2 次 → 继续追", nf(g9) is True)
+        g9.nav_rounds = 3
+        check("B15c 反向: 本状态真实 3 次 → 达上限, 按原设计清鬼换新", nf(g9) is False)
+        g9.nav_rounds = 4
+        check("B15d 超过上限仍为 False(清鬼)", nf(g9) is False)
+        check("B15e 旧对象无 nav_rounds 字段 → 默认 0 → 继续追(兼容)",
+              nf(_G2()) is True)
+
+    frag_ss = _extract_func(dh, "__set_state")
+    check("B16 可抽取 __set_state", frag_ss is not None)
+    if frag_ss:
+        ns_ss = {"__now_ms": lambda: 0}
+        exec(frag_ss, ns_ss)
+        ss = ns_ss["__set_state"]
+        g11 = _G2(); g11.state = "WAIT_GHOST"; g11.state_since_ms = 0; g11.nav_rounds = 3
+        ss(g11, "NAV", 111)
+        check("B16 进入 NAV: nav_rounds 清零",
+              g11.state == "NAV" and g11.nav_rounds == 0,
+              "state=%s nav=%s" % (g11.state, g11.nav_rounds))
+        g11.nav_rounds = 2
+        ss(g11, "NAV", 222)
+        check("B17 NAV 内部重复设置(超时重推): 不清零(要累计连续次数)",
+              g11.nav_rounds == 2 and g11.state_since_ms == 111,
+              "nav=%s since=%s" % (g11.nav_rounds, g11.state_since_ms))
+        ss(g11, "WAIT_GHOST", 333)
+        check("B18 离开 NAV: 不动 nav_rounds(其他状态语义不变)",
+              g11.nav_rounds == 2)
+
 
 # ======================================================================
 # C. 回放: 真实生产日志证据(修复针对的现象真实存在)
@@ -347,11 +413,19 @@ def part_c(log_dir):
     ghost_map_same = 0    # "鬼 X 在图N(跨图)" 且 N == 任务图
     ghost_map_diff = 0
     wait3 = 0
+    ts_diag = None       # 最近一次"接到捉鬼任务诊断"的时间戳
+    nav3_close = False   # 接任务后 ≤20s 出现"NAV 超时, 第 3 次重试"(残留铁证)
     pat_diag = re.compile(r"接到捉鬼任务 (\d+) 诊断.*?kill_area=(\[(.*?)\])")
     pat_go = re.compile(r"前往图(\d+)\(")
     pat_gm = re.compile(r"鬼 (\d+) 在图(\d+)\(跨图\)")
     with io.open(p, encoding="utf-8", errors="ignore") as f:
         for line in f:
+            _mts = re.search(r'"ts":(\d+)', line)
+            _ts = int(_mts.group(1)) if _mts else 0
+            if "接到捉鬼任务" in line and "诊断" in line:
+                ts_diag = _ts
+            if ts_diag and "NAV 超时, 第 3 次重试" in line and 0 < _ts - ts_diag <= 20:
+                nav3_close = True
             m = pat_diag.search(line)
             if m:
                 try:
@@ -384,6 +458,9 @@ def part_c(log_dir):
     check("C4 样本「鬼所在图 == 任务图」占绝对多数(不换图的决策依据)",
           total_gm >= 10 and ghost_map_same * 100 >= total_gm * 90,
           "same=%d diff=%d" % (ghost_map_same, ghost_map_diff))
+    check("C5 现场铁证: 接任务后 ≤20s 出现 NAV「第 3 次重试」"
+          "(rounds 残留, 非本状态真实 3 次 → 修复前必误清鬼)",
+          nav3_close is True)
     return True
 
 
