@@ -2091,7 +2091,33 @@ check("F11 C⑤ 热更兼容：旧实例缺新字段 → 首帧补齐",
       str([_f3 for _f3 in _f3list if not hasattr(_gC3, _f3)]))
 
 # ================================================================
-# 24) 汇总
+# 24) F12 · 修（2026-09-24）：战斗时长补回走路 ETA（防怪区"走路超时"误判）
+#     现场 robot0005102 图 20（100% 怪区）：每场战斗结束即触发假超时 → 反复重寻路
+# ================================================================
+# F12① 行为：注入 nav_pause_ms（模拟 60s 前开战）→ 走"战斗结束"分支 → ETA 被补回
+_rW = fresh_robot()
+_gW = new_state()
+_rW.m_share_daily = _gW
+_qW = _rW.m_quest
+_base_w = int(time.time() * 1000) + 10000
+_qW.walk_target = (12, 3000, 2000)
+_qW.walk_end_ms = _base_w
+_rW.m_fight_state = True
+S.tick(_rW, time.time() * 1000)                       # 首帧进战斗（记 nav_pause_ms）
+_rW.m_fight_state = False
+_gW.nav_pause_ms = int(time.time() * 1000) - 60000    # 假装 60s 前开战
+S.tick(_rW, time.time() * 1000)                       # 战斗结束 → 补回
+check("F12① 战斗时长补回走路 ETA（防怪区假超时）",
+      _qW.walk_end_ms >= _base_w + 59000, "Δ=%s" % (_qW.walk_end_ms - _base_w))
+# F12② 源码：记点/补回/热更补齐三件套（防回归）
+_src_f12 = open(os.path.join(SCRIPT_DIR, "share_daily.py"), encoding="utf-8").read()
+check("F12② 源码: 战斗记 nav_pause_ms + 结束补回 + 热更补齐列表",
+      "g.nav_pause_ms = now_ms" in _src_f12
+      and "quest.walk_end_ms += (now_ms - g.nav_pause_ms)" in _src_f12
+      and '("nav_pause_ms", 0)' in _src_f12)
+
+# ================================================================
+# 25) 汇总
 # ================================================================
 print("\n自检目标: %s" % SCRIPT_DIR)
 print("结果：%d 项，失败 %d 项" % (total, fails))
