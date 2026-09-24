@@ -373,6 +373,15 @@ def part_b(dh):
         check("B15d 超过上限仍为 False(清鬼)", nf(g9) is False)
         check("B15e 旧对象无 nav_rounds 字段 → 默认 0 → 继续追(兼容)",
               nf(_G2()) is True)
+        # B15f 判别力自证: 同一输入下 旧判据(g.rounds<3) 与 新判据 结论相反
+        #   —— 若把本用例跑在修复前的代码上(判据=rounds<3), B15a 必 FAIL。
+        g9.nav_rounds = 0
+        g9.rounds = 3
+        _old_ok = (g9.rounds < 3)      # 修复前判据: 同一输入 → False(会清鬼)
+        _new_ok = nf(g9)               # 修复后判据: → True(继续追)
+        check("B15f 判别力: 同输入 旧判据=False(必清鬼) vs 新判据=True(不清) "
+              "→ 修复前本用例必 FAIL(非恒真用例)",
+              _old_ok is False and _new_ok is True)
 
     frag_ss = _extract_func(dh, "__set_state")
     check("B16 可抽取 __set_state", frag_ss is not None)
