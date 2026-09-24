@@ -120,6 +120,15 @@ function dailyTitle(r) {
   const d = (r && r.daily) || {}
   return `分享日常：${name}（相位 ${d.state || '?'}）今日 ${Number(d.done) || 0}/${Number(d.limit) || 0}`
 }
+// 2026-09-24（用户反馈"又抓鬼又神捕、还发着呆"）：有分享日常在跑时，"在忙什么"的小字
+// 从机器人相位话术（如"发着呆，等指令"）换成日常口径 —— 整行只讲同一个故事。
+function dailyPhrase(r) {
+  const dk = dailyKindOf(r)
+  const d = (r && r.daily) || {}
+  const nm = dk === 'shenbu' ? '大唐神捕' : dk === 'fenghuo' ? '烽火大唐' : '分享日常'
+  if (String(d.state || '').toUpperCase() === 'STOPPED') return nm + '已停（等重新派发）'
+  return nm + '进行中（' + (d.state || '?') + '）'
+}
 
 // 一次遍历算完所有筛选计数（原来每个筛选各扫一遍全表）
 const countsByFilter = computed(() => {
@@ -598,6 +607,26 @@ function taskCell(r) {
   const done = Number(r.done) || 0
   const kind = chainKindOf(r)
   const subTask = r.task_index ? taskLabel(r.task_index) : ''
+
+  // ⓪ 2026-09-24（用户反馈"又抓鬼又神捕"）：分享日常在跑（神捕/烽火）优先 —— 本格只讲
+  // 正在跑的日常（与"在忙什么"列的日常标记同源），不再显示"👻 抓鬼（无会话）"这类
+  // 与实况打架的会话行。
+  const dk = dailyKindOf(r)
+  if (dk) {
+    const d = r.daily || {}
+    const dDone = Number(d.done) || 0
+    const dLimit = Number(d.limit) || 0
+    const dState = String(d.state || '?').toUpperCase()
+    const dStopped = dState === 'STOPPED'
+    const dFull = dLimit > 0 && dDone >= dLimit
+    return {
+      tag: dStopped ? 'dim' : (dFull ? 'ok' : 'info'),
+      bar: dStopped ? '' : (dFull ? 'full' : 'live'),
+      pct: dLimit > 0 ? Math.min(100, Math.round((dDone / dLimit) * 100)) : null,
+      text: `${dk === 'shenbu' ? '🕵️' : '🔥'} ${dk === 'shenbu' ? '大唐神捕' : '烽火大唐'} ${dDone}/${dLimit}`,
+      sub: subTask || (dStopped ? '分享日常已停（等重新派发）' : `分享日常进行中（${d.state || '?'}）`),
+    }
+  }
 
   // ① 抓鬼进行中：今日 x/50（离"当天收工"还有多远）
   if (ghostOn && !ghostFull) {
@@ -1098,7 +1127,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
             <el-tag v-else-if="r.err_code" size="small" type="info" effect="plain" disable-transitions
                     :title="recentErrTitle(r)">曾出错</el-tag>
           </div>
-          <div class="phrase muted small">{{ statePhrase(r.state) }}</div>
+          <div class="phrase muted small">{{ dailyKindOf(r) ? dailyPhrase(r) : statePhrase(r.state) }}</div>
         </template>
       </el-table-column>
       <el-table-column label="任务 / 进度" width="200">
