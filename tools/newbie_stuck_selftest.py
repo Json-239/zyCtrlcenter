@@ -139,6 +139,14 @@ def main():
         check("B6(反例): 无 m_srv_mapid → None", r is None, r)
 
     # ============================================================ C. 快照恢复函数
+    # __restore_optimistic_snapshot 现走统一位置写入点 robot_operator.set_pose
+    #   (落墙校正+可观测); 隔离测试里注入 stub 并记录调用。
+    _setpose_calls = []
+    _ro_stub = types.SimpleNamespace(
+        set_pose=lambda ro, x, y, source="": (
+            _setpose_calls.append((x, y, source)),
+            ro.m_pose.__setitem__(0, x), ro.m_pose.__setitem__(1, y)))
+    sys.modules["robot_operator"] = _ro_stub
     ns_snap = {}
     frag_snap = _extract_func(qe, "__restore_optimistic_snapshot")
     check("C0: 提取 __restore_optimistic_snapshot", frag_snap is not None)
@@ -149,14 +157,17 @@ def main():
             check("C0: exec __restore_optimistic_snapshot", False, str(e))
     snap = ns_snap.get("__restore_optimistic_snapshot")
     if snap is not None:
-        # C1 匹配(快照图==回滚目标图) → 恢复并清快照
+        # C1 匹配(快照图==回滚目标图) → 走 set_pose 恢复 + 清快照
         ro = _RO(m_mapid=11, srv=5, opt=11)
         ro.m_pose = [3512, 1032, 0]
         ro.m_pose_before_optimistic = [5, 1800, 344]
+        _setpose_calls[:] = []
         ok = snap(ro, 5)
         check("C1: 快照图匹配 → 恢复跳转前位置 + 清快照",
               ok is True and ro.m_pose[0] == 1800 and ro.m_pose[1] == 344
               and ro.m_pose_before_optimistic is None, (ro.m_pose, ro.m_pose_before_optimistic))
+        check("C1b: 恢复走统一位置写入点 set_pose(source=rollback_optimistic)",
+              _setpose_calls == [(1800, 344, "rollback_optimistic")], _setpose_calls)
         # C2 快照图 != 回滚目标图 → 不恢复(历史不同步, 不猜)
         ro2 = _RO(m_mapid=11, srv=609, opt=11)
         ro2.m_pose = [3512, 1032, 0]
@@ -264,8 +275,15 @@ def main():
     check("F1: 第三级兜底写回 quest.chain['npcs'](只增不减)",
           '_npcs_q[str(npc_id)] = candidates' in qe
           or "_npcs_q[str(npc_id)] = candidates" in qe)
-    check("F2: quest.chain 为 None 时建最小结构(与 shop_errand 同口径)",
-          'quest.chain = {"npcs": {}, "map_grids": {}, "dijkstra": {}, "grid_cell": 16}' in qe)
+    _i_f1 = qe.find("_npcs_q[str(npc_id)] = candidates")
+    _seg_f = qe[max(0, _i_f1 - 900): _i_f1 + 100] if _i_f1 > 0 else ""
+    check("F2(反例): 只写回'已是 dict 的链', chain 为 None 不建最小链"
+          "(防 __cmd_start_chain 空 task_order→chain_task_set=空集→忽略一切任务推送)",
+          "if isinstance(quest.chain, dict):" in _seg_f
+          and 'quest.chain = {"npcs": {}' not in _seg_f,
+          _seg_f[-260:])
+    check("F2b: 注释说明'不建链'的原因(chain_task_set 空集风险)",
+          "chain_task_set" in _seg_f)
     check("F3: 写回在第三级兜底命中分支内(静态表缺失日志同段)",
           qe.find("_npcs_q[str(npc_id)] = candidates") > 0
           and abs(qe.find("_npcs_q[str(npc_id)] = candidates")
@@ -287,6 +305,9 @@ def main():
     check("G5: 既有回滚(__rollback_optimistic_and_replan)接入快照恢复",
           qe.find("__restore_optimistic_snapshot(robot_object, robot_object.m_mapid)")
           > 0)
+    check("G6: 快照恢复走 set_pose(与位置校正链路同口径, 不绕过防穿墙兜底)",
+          "robot_operator.set_pose(robot_object, int(_snap[1]), int(_snap[2])," in qe
+          and 'source="rollback_optimistic"' in qe)
 
     nfail = 0
     for name, ok, detail in results:
