@@ -160,11 +160,19 @@ type State struct {
 }
 
 // Deps 依赖注入（壳层提供真实实现；测试注入假的）。
+//
+// **回调与锁的契约（2026-09-24 生产事故后明确）**：Candidates / OnlineCount 在 Runner
+// 持有内部锁（r.mu）时被调用 —— 实现里**禁止**回调 Runner 的任何方法
+// （States / Start / Stop / RunNow / NoteRegister …）：Go 的 sync.Mutex 不可重入，
+// 同 goroutine 重入即永久死锁（现场：shenbu 候选判定里读 States()，把 AUTOTASK 轮询、
+// RESTORE 恢复引擎、/api/autotask 全部拖死）。需要本策略配置时用入参 cfg，不要回读。
+// 其余回调（Online / Register / Launch / Tick / Log）都在**锁外**调用，没有此限制。
 type Deps struct {
-	Now         func() time.Time
-	Rand        func(n int) int                              // 返回 [0,n)；n<=0 → 0
-	Candidates  func(kind Kind) []Candidate                  // "该做但没在做"的号
-	OnlineCount func(kind Kind) int                          // 该策略当前在线数（MaxOnline 用）
+	Now  func() time.Time
+	Rand func(n int) int // 返回 [0,n)；n<=0 → 0
+	// Candidates "该做但没在做"的号（判据由壳层给；**持锁调用，禁止回读 Runner**，cfg 为本策略当前配置）。
+	Candidates  func(kind Kind, cfg Config) []Candidate
+	OnlineCount func(kind Kind) int                          // 该策略当前在线数（MaxOnline 用；**持锁调用，禁止回读 Runner**）
 	Online      func(kind Kind, accs []string) (int, error)  // 上线（机器人 add）；返回成功数
 	Register    func(kind Kind, count int) ([]string, error) // 自动注册；返回**计划/已建**的号（应尽快返回）
 	Launch      func(kind Kind, accs []string) bool          // 下发任务命令
@@ -362,7 +370,7 @@ func (r *Runner) tickKind(kind Kind, now time.Time) *Round {
 	// ④ 挑号（随机批量）
 	cands := []Candidate{}
 	if r.d.Candidates != nil {
-		cands = r.d.Candidates(kind)
+		cands = r.d.Candidates(kind, cfg) // 持锁回调：实现不得回读 Runner（见 Deps 契约）
 	}
 	if len(cands) == 0 {
 		st.nextAt = now.Add(r.interval(cfg))

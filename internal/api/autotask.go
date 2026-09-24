@@ -43,8 +43,11 @@ func (a *API) AutoTaskDeps() autotask.Deps {
 			}
 			return rand.Intn(n)
 		},
-		Candidates: func(kind autotask.Kind) []autotask.Candidate {
-			return a.autotaskCandidates(kind)
+		// Candidates / OnlineCount 会在 Runner 持锁时被回调（见 autotask.Deps 契约）：
+		// 这里只准读状态库/账号池等**外部**数据，**绝不能**再调 a.AutoTask 的任何方法
+		// （2026-09-24 生产死锁根因）；本策略配置一律用入参 cfg。
+		Candidates: func(kind autotask.Kind, cfg autotask.Config) []autotask.Candidate {
+			return a.autotaskCandidatesCfg(kind, cfg)
 		},
 		OnlineCount: func(kind autotask.Kind) int { return a.autotaskOnlineCount(kind) },
 		Online:      func(kind autotask.Kind, accs []string) (int, error) { return a.onlineForAuto(accs) },
@@ -173,7 +176,7 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 					if a.shareDailyFullToday(account, r) {
 						return true, "今日大唐神捕已满/不可用（等跨日）"
 					}
-					if a.shareDailyMoneyShort(r) {
+					if a.shareDailyMoneyShort(r, a.shareDailyBalanceGate()) {
 						return true, fmt.Sprintf("余额不足（%d < 闸值 %d，防传送卡死）",
 							r.Money, a.shareDailyBalanceGate())
 					}
@@ -540,7 +543,23 @@ func (a *API) ghostGateFor(acc string) (bool, string) {
 }
 
 // autotaskCandidates "该做该策略但没在做"的号（离线优先，其次在线空闲）。
+//
+// **无锁入口**（面板 /api/autotask、池统计 poolCounts）：自行取该策略当前配置再判定。
+// 持 Runner 锁的路径不要走这里 —— Runner 的 tick 回调走 autotaskCandidatesCfg(kind, cfg)，
+// 传配置而不是回读 Runner（2026-09-24 死锁事故的根因就是回调里回读 States()）。
 func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
+	cfg := autotask.Config{}
+	if a.AutoTask != nil {
+		if st, ok := a.AutoTask.States()[kind]; ok {
+			cfg = st.Config
+		}
+	}
+	return a.autotaskCandidatesCfg(kind, cfg)
+}
+
+// autotaskCandidatesCfg 候选判定主体。cfg = 该策略**本轮有效配置**（由调用方给出：
+// Runner 回调传入 / 无锁入口自行读取），函数内**禁止**再读 Runner 状态（锁重入）。
+func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []autotask.Candidate {
 	if a.Accounts == nil {
 		return nil
 	}
@@ -680,13 +699,15 @@ func (a *API) autotaskCandidates(kind autotask.Kind) []autotask.Candidate {
 			// 与抓鬼的分工（用户口径 2026-09-23"填补抓鬼满额后的空档"）：抓鬼未满且意图=抓鬼
 			// 的号归抓鬼；本候选只收"神捕意图 / 无意图 / **抓鬼已满**"的号（满额的号抓鬼池
 			// 已经不派它了）。轮转调度（随机起点 + 跑满自动转）P2 再接。
-			if level < a.shareDailyMinLevel() {
+			//
+			// 门槛/余额闸用入参 cfg（**不能**读 a.AutoTask：本函数会被 Runner 持锁回调）。
+			if level < a.shareDailyMinLevel(cfg) {
 				continue // 等级未知(0)/不足：服务端按票条件拒（≥40），别白跑
 			}
 			if a.shareDailyFullToday(acc, r) {
 				continue // 今日神捕已满/不可用（含"机器人已不再上报 daily"的独立表兜底）
 			}
-			if a.shareDailyMoneyShort(r) {
+			if a.shareDailyMoneyShort(r, cfg.BalanceGate) {
 				continue // 余额闸（策略配置 balance_gate；余额未知不拦）：传送费不够 → 派了又停
 			}
 			if k := kinds[acc]; k != "" && k != intent.KindShenbu {

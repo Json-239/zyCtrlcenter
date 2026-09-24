@@ -13,6 +13,7 @@ type fake struct {
 	now        time.Time
 	randVals   []int // 依次返回；用完就返回 0
 	candidates map[autotask.Kind][]autotask.Candidate
+	candCfg    map[autotask.Kind]autotask.Config // 记录回调收到的配置（合约：必须传本策略当前配置）
 	onlineN    map[autotask.Kind]int
 	onlineCall [][]string
 	regCall    []int
@@ -23,6 +24,7 @@ func newFake() *fake {
 	return &fake{
 		now:        time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 		candidates: map[autotask.Kind][]autotask.Candidate{},
+		candCfg:    map[autotask.Kind]autotask.Config{},
 		onlineN:    map[autotask.Kind]int{},
 	}
 }
@@ -41,7 +43,10 @@ func (f *fake) deps() autotask.Deps {
 			}
 			return v
 		},
-		Candidates:  func(k autotask.Kind) []autotask.Candidate { return f.candidates[k] },
+		Candidates: func(k autotask.Kind, cfg autotask.Config) []autotask.Candidate {
+			f.candCfg[k] = cfg
+			return f.candidates[k]
+		},
 		OnlineCount: func(k autotask.Kind) int { return f.onlineN[k] },
 		Online: func(k autotask.Kind, accs []string) (int, error) {
 			f.onlineCall = append(f.onlineCall, accs)
@@ -256,6 +261,30 @@ func TestTargetOnlineRefillsOnlyDeficit(t *testing.T) {
 	}
 	if msg := r.States()[autotask.KindGhost].LastMsg; msg == "" || !contains(msg, "已达标") {
 		t.Fatalf("应说明已达标: %q", msg)
+	}
+}
+
+// 回调契约（2026-09-24 生产死锁事故的配套）：Candidates 在 Runner **持锁时**被调用，
+// 因此本策略的当前配置必须**随回调传入**（shenbu 的 min_level/balance_gate 判据靠它），
+// 实现里不得再回读 Runner 方法（States() 等）——那会变成同 goroutine 锁重入 → 永久死锁。
+func TestCandidatesReceiveLiveConfig(t *testing.T) {
+	f := newFake()
+	f.candidates[autotask.KindShenbu] = []autotask.Candidate{{Account: "s1@x.com", Online: true}}
+	r := autotask.New(f.deps())
+	if err := r.Start(autotask.KindShenbu, autotask.Config{
+		TargetOnline: 5, BatchMin: 1, BatchMax: 1, MinLevel: 40, BalanceGate: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rounds := r.Tick(f.now); len(rounds) != 1 {
+		t.Fatalf("shenbu 应挑中在线候选并下发: %+v", rounds)
+	}
+	got, ok := f.candCfg[autotask.KindShenbu]
+	if !ok {
+		t.Fatal("Candidates 回调未被调用（挑号路径没走到）")
+	}
+	if got.MinLevel != 40 || got.BalanceGate != 1000 || got.TargetOnline != 5 {
+		t.Fatalf("Candidates 必须收到本策略当前配置（min_level/balance_gate 靠它判定）: %+v", got)
 	}
 }
 

@@ -142,15 +142,18 @@ func dailyRunningOf(r state.Robot, shareKey string) bool {
 // shareDailyKey 当前玩法键（配置 CTRL_SHARE_DAILY_KEY，默认 share_daily_大唐神捕）。
 func (a *API) shareDailyKey() string { return a.chainPayloads().ShareDailyKey() }
 
-// shareDailyMinLevel 分享日常等级门槛（服务端票条件）：
-// 策略配置 `min_level`（面板，覆盖全局）→ 全局 CTRL_SHARE_DAILY_MIN_LEVEL → 默认 40。
+// shareDailyMinLevel 分享日常等级门槛（服务端票条件）：策略配置 `min_level`（面板，覆盖全局）
+// → 全局 CTRL_SHARE_DAILY_MIN_LEVEL → 默认 40。
+//
+// **必须用入参 cfg，不能自行读 Runner**：本函数会被 Runner 在**持有 Runner.mu 时**经
+// Candidates 回调进来（services/autotask.tickKind）；在回调里再调 `a.AutoTask.States()`
+// 是同 goroutine 锁重入 → 永久死锁（2026-09-24 生产事故：AUTOTASK 轮询 / RESTORE 恢复
+// 引擎 / GET /api/autotask 全挂；报告见 docs/04-测试/事故-20260924-调度器死锁.md）。
 //
 // 只用于**自动派发**（候选/补发闸）；手动「启动」按用户意图走，不再按它过滤。
-func (a *API) shareDailyMinLevel() int {
-	if a.AutoTask != nil {
-		if st, ok := a.AutoTask.States()[autotask.KindShenbu]; ok && st.Config.MinLevel > 0 {
-			return st.Config.MinLevel
-		}
+func (a *API) shareDailyMinLevel(cfg autotask.Config) int {
+	if cfg.MinLevel > 0 {
+		return cfg.MinLevel
 	}
 	if a.Cfg != nil && a.Cfg.ShareDailyMinLevel > 0 {
 		return a.Cfg.ShareDailyMinLevel
@@ -160,6 +163,9 @@ func (a *API) shareDailyMinLevel() int {
 
 // shareDailyBalanceGate 神捕余额闸（策略配置 `balance_gate`；0 = 不启用）：
 // 候选/补发时过滤"余额已知且不足"的号（传送费不够 → 派了又停）。
+//
+// **仅限无锁场景**（恢复引擎补发闸等）；持 Runner 锁的候选判定请直接用传入 cfg 的
+// BalanceGate（原因同上：回调里读 States() 会锁重入）。
 func (a *API) shareDailyBalanceGate() int {
 	if a.AutoTask == nil {
 		return 0
@@ -171,8 +177,8 @@ func (a *API) shareDailyBalanceGate() int {
 }
 
 // shareDailyMoneyShort 余额不足（余额未知=不拦；闸值 0=不启用）。
-func (a *API) shareDailyMoneyShort(r state.Robot) bool {
-	gate := a.shareDailyBalanceGate()
+// gate 由调用方给出：无锁场景用 a.shareDailyBalanceGate()，持锁候选用 cfg.BalanceGate。
+func (a *API) shareDailyMoneyShort(r state.Robot, gate int) bool {
 	return gate > 0 && r.Money > 0 && r.Money < int64(gate)
 }
 
