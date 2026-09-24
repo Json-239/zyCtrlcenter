@@ -183,8 +183,9 @@ func main() {
 			return skipHook(kind, account)
 		},
 		GhostDailyLimit: func() int { return payloads.GhostDailyLimit() },
-		ShareDaily:      func() (string, int) { return payloads.ShareDailyKey(), payloads.ShareDailyLimit() },
-		Log:             log.Printf,
+		// 分享日常家族（shenbu / fenghuo）：补发参数按意图 kind 取（share_key + daily_limit）。
+		ShareDaily: payloads.ShareDailyParams,
+		Log:        log.Printf,
 	})
 	go restore.Run(ctx)
 

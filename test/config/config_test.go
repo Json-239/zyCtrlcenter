@@ -123,6 +123,48 @@ func TestGhostNavChainIDDefaultAndEnv(t *testing.T) {
 	}
 }
 
+// 烽火大唐（fenghuo，分享日常第二玩法）：开关默认关 + 声明文件/玩法键/日限/门槛默认值，
+// 且都能用独立环境变量覆盖（**不影响** shenbu 的 CTRL_SHARE_DAILY* 一族）。
+func TestFenghuoDefaultsAndEnv(t *testing.T) {
+	def := config.Default()
+	if def.FenghuoEnabled {
+		t.Fatal("FenghuoEnabled 默认必须关闭（灰度期由 CTRL_FENGHUO=1 显式打开）")
+	}
+	if def.FenghuoChainID != "fenghuo_nav" {
+		t.Fatalf("默认声明文件应为 fenghuo_nav: %q", def.FenghuoChainID)
+	}
+	if def.FenghuoKey != "share_daily_宫廷10" {
+		t.Fatalf("默认玩法键应为 share_daily_宫廷10（20021.xml share_daily_key）: %q", def.FenghuoKey)
+	}
+	if def.FenghuoDailyLimit != 20 {
+		t.Fatalf("默认日限应为 20（20021.xml daily_limit）: %d", def.FenghuoDailyLimit)
+	}
+	if def.FenghuoMinLevel != 40 {
+		t.Fatalf("默认等级门槛应为 40（票条件）: %d", def.FenghuoMinLevel)
+	}
+	// shenbu 的默认值不受影响（两族配置互不干扰）
+	if def.ShareDailyEnabled || def.ShareDailyKey != "share_daily_大唐神捕" || def.ShareDailyDailyLimit != 10 {
+		t.Fatalf("shenbu 默认配置被破坏: enabled=%v key=%q limit=%d",
+			def.ShareDailyEnabled, def.ShareDailyKey, def.ShareDailyDailyLimit)
+	}
+
+	t.Setenv("CTRL_FENGHUO", "1")
+	t.Setenv("CTRL_FENGHUO_CHAIN", "fenghuo_nav_alt")
+	t.Setenv("CTRL_FENGHUO_KEY", "share_daily_alt")
+	t.Setenv("CTRL_FENGHUO_LIMIT", "30")
+	t.Setenv("CTRL_FENGHUO_MIN_LEVEL", "45")
+	got := config.Load([]string{})
+	if !got.FenghuoEnabled || got.FenghuoChainID != "fenghuo_nav_alt" ||
+		got.FenghuoKey != "share_daily_alt" || got.FenghuoDailyLimit != 30 || got.FenghuoMinLevel != 45 {
+		t.Fatalf("环境变量应能覆盖烽火大唐配置: enabled=%v chain=%q key=%q limit=%d min_level=%d",
+			got.FenghuoEnabled, got.FenghuoChainID, got.FenghuoKey, got.FenghuoDailyLimit, got.FenghuoMinLevel)
+	}
+	// 覆盖 fenghuo 不应改变 shenbu 的开关（键名独立）
+	if got.ShareDailyEnabled {
+		t.Fatal("打开 CTRL_FENGHUO 不该连带打开 CTRL_SHARE_DAILY（两族开关独立）")
+	}
+}
+
 func TestCLIWinsOverEnv(t *testing.T) {
 	t.Setenv("CTRL_WEB_PORT", "28077")
 	cfg := config.Load([]string{"--web-port", "28088"})

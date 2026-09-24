@@ -106,7 +106,7 @@ func newTestEnvInDir(t *testing.T, token, dataDir string) *testEnv {
 				return skipHook(kind, account)
 			},
 			GhostDailyLimit: func() int { return payloads.GhostDailyLimit() },
-			ShareDaily:      func() (string, int) { return payloads.ShareDailyKey(), payloads.ShareDailyLimit() },
+			ShareDaily:      payloads.ShareDailyParams, // 分享日常家族：按意图 kind 取参数（shenbu/fenghuo）
 		}),
 		Payloads: payloads,
 	})

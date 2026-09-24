@@ -178,6 +178,8 @@ func TestIntentsRestoreShareDailyMergesAndCarriesKey(t *testing.T) {
 }
 
 // GET /api/daily/overview：没有心跳 = 空数组 + 玩法键（空值安全，不瞎编）。
+//
+// 2026-09-24（烽火大唐 P1）：share_keys 带**两个**玩法键（神捕 + 烽火大唐），前端表头两列。
 func TestDailyOverviewEmptySafe(t *testing.T) {
 	env := newTestEnv(t, "")
 	res := getJSON(t, env.srv.URL+"/api/daily/overview")
@@ -188,8 +190,8 @@ func TestDailyOverviewEmptySafe(t *testing.T) {
 		t.Fatalf("没有心跳时应给空数组: %v", res["rows"])
 	}
 	keys := asSlice(res["share_keys"])
-	if len(keys) != 1 || keys[0] != "share_daily_大唐神捕" {
-		t.Fatalf("应带玩法键（前端表头用）: %v", res["share_keys"])
+	if len(keys) != 2 || keys[0] != "share_daily_大唐神捕" || keys[1] != "share_daily_宫廷10" {
+		t.Fatalf("应带两个玩法键（前端表头用；次序 shenbu→fenghuo）: %v", res["share_keys"])
 	}
 }
 

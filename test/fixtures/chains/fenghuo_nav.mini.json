@@ -1,0 +1,24 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本仓 data/chains/fenghuo_nav.json（2026-09-24 新增的烽火大唐声明文件，只含玩法声明）原样搬运 task_order 全 6 个任务号（2002101/2002102/2002103/2002104/2002105/2002107；依据服务端 config/task/20021.xml 的 task_catcher 字段；2002106 在 XML 中不存在=跳号）。坐标/网格/路由按方案 §4.2 由中控从基座链 newbie_full 复用（见 internal/api/chainpayload.go:ShareDailyOf），夹具刻意不带 npcs/map_grids/dijkstra",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/fenghuo_nav.json"
+  },
+  "chain": {
+    "chain_id": "fenghuo_nav",
+    "name": "烽火大唐（夹具）",
+    "start_task": 2002101,
+    "end_task": 2002107,
+    "grid_cell": 16,
+    "task_order": [
+      {"task_index": 2002101, "name": "烽火大唐（押送的银两）", "catcher_npc": "30029", "catcher_name": "大唐军需官", "next": [2002107]},
+      {"task_index": 2002102, "name": "烽火大唐（巡逻杀突厥奸细）", "catcher_npc": "10149", "catcher_name": "秦琼", "next": [2002107]},
+      {"task_index": 2002103, "name": "烽火大唐（军需品寻物）", "catcher_npc": "10149", "catcher_name": "秦琼", "next": []},
+      {"task_index": 2002104, "name": "烽火大唐（刺杀突厥将军）", "catcher_npc": "30030", "catcher_name": "突厥将军", "next": [2002107]},
+      {"task_index": 2002105, "name": "烽火大唐（军机情报 ×3）", "catcher_npc": "10149", "catcher_name": "秦琼", "next": [2002107]},
+      {"task_index": 2002107, "name": "回复秦琼", "catcher_npc": "10149", "catcher_name": "秦琼", "next": []}
+    ]
+  }
+}

@@ -116,25 +116,76 @@ func (p *Payloads) ShareDailyLimit() int {
 	return p.cfg.ShareDailyDailyLimit
 }
 
-// ShareDaily 分享日常（大唐神捕）的链载荷：基座链（坐标/网格/路由）+ 专属声明（task_order 等）。
+// FenghuoChainID 烽火大唐专属声明文件（配置项 CTRL_FENGHUO_CHAIN，默认 fenghuo_nav）。
+func (p *Payloads) FenghuoChainID() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.FenghuoChainID) == "" {
+		return "fenghuo_nav"
+	}
+	return strings.TrimSpace(p.cfg.FenghuoChainID)
+}
+
+// FenghuoKey 烽火大唐玩法键（配置项 CTRL_FENGHUO_KEY，默认 share_daily_宫廷10）。
+func (p *Payloads) FenghuoKey() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.FenghuoKey) == "" {
+		return "share_daily_宫廷10"
+	}
+	return strings.TrimSpace(p.cfg.FenghuoKey)
+}
+
+// FenghuoDailyLimit 烽火大唐日限（配置项 CTRL_FENGHUO_LIMIT，默认 20，服务端 20021.xml 口径）。
+func (p *Payloads) FenghuoDailyLimit() int {
+	if p == nil || p.cfg == nil || p.cfg.FenghuoDailyLimit <= 0 {
+		return 20
+	}
+	return p.cfg.FenghuoDailyLimit
+}
+
+// ShareDailyParams 分享日常家族按 kind 取补发参数：返回该玩法的 (share_key, daily_limit)。
+//
+// kind = 意图 kind 字符串（shenbu / fenghuo，大小写不敏感）；认不出的（含空）回落神捕 ——
+// 与 P0 单链口径一致（当时 share_daily_start 补发一律神捕）。
+func (p *Payloads) ShareDailyParams(kind string) (string, int) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "fenghuo":
+		return p.FenghuoKey(), p.FenghuoDailyLimit()
+	default:
+		return p.ShareDailyKey(), p.ShareDailyLimit()
+	}
+}
+
+// ShareDaily 分享日常（大唐神捕）的链载荷 —— ShareDailyOf 的固定声明文件入口
+// （配置项 CTRL_SHARE_DAILY_CHAIN，默认 shenbu_nav）。
+func (p *Payloads) ShareDaily() (*chainlib.Chain, error) {
+	return p.ShareDailyOf(p.ShareDailyChainID())
+}
+
+// ShareDailyOf 分享日常家族（shenbu / fenghuo）的链载荷：基座链（坐标/网格/路由）+
+// 指定专属声明文件（task_order 等）。
 //
 // 与抓鬼导航同口径（方案 §4.2/§7）：机器人端只认 cmd["chain"]；专属文件只放**玩法声明**
 // （task_order 必须列全分支任务号 —— 少列会让后续环节被机器人当"链外任务"静默忽略，R1），
 // npcs/map_grids/dijkstra 从 GhostBaseChainID（默认 newbie_full）自动复用。
 //
+// navID = 声明文件名（shenbu_nav / fenghuo_nav / 配置覆盖值）。两个玩法共用本函数：
+// 组装结果按 "navID|基座版本|声明版本" 缓存（不同玩法不互相顶掉）。
+//
 // 硬校验（宁可明确报错，也不发一份"跑不动/少环节"的载荷）：task_order 非空且每条能解析出
 // task_index、基座 npcs/dijkstra 非空。文件缺失/解析失败同样硬失败（调用方一条命令都不发）。
-func (p *Payloads) ShareDaily() (*chainlib.Chain, error) {
-	baseID, navID := p.GhostBaseChainID(), p.ShareDailyChainID()
+func (p *Payloads) ShareDailyOf(navID string) (*chainlib.Chain, error) {
+	navID = strings.TrimSpace(navID)
+	if navID == "" {
+		return nil, errors.New("分享日常声明文件名不能为空")
+	}
+	baseID := p.GhostBaseChainID()
 	base, baseVer, err := p.byIDVersioned(baseID)
 	if err != nil {
 		return nil, fmt.Errorf("分享日常的基座链不可用（%s）：%w", baseID, err)
 	}
 	nav, navVer, err := p.byIDVersioned(navID)
 	if err != nil {
-		return nil, fmt.Errorf("分享日常声明文件不可用（%s，配置项 CTRL_SHARE_DAILY_CHAIN）：%w", navID, err)
+		return nil, fmt.Errorf("分享日常声明文件不可用（%s）：%w", navID, err)
 	}
-	key := baseVer + "|" + navVer
+	key := navID + "|" + baseVer + "|" + navVer
 	p.mu.Lock()
 	if c, ok := p.daily[key]; ok {
 		p.mu.Unlock()
@@ -150,7 +201,12 @@ func (p *Payloads) ShareDaily() (*chainlib.Chain, error) {
 		out.ChainID = navID
 	}
 	p.mu.Lock()
-	p.daily = map[string]cachedGhost{key: {chain: out}} // 只留最新一份（组装结果随两文件版本变化）
+	// 组装结果随两文件版本变化：条目本身不失效，但每份 2MB 级 —— 超过 4 条（两个玩法 ×
+	// 版本切换）时整表重来，只留当前这份，避免文件反复替换时长跑进程内存无界增长。
+	if len(p.daily) > 4 {
+		p.daily = make(map[string]cachedGhost, 2)
+	}
+	p.daily[key] = cachedGhost{chain: out}
 	p.mu.Unlock()
 	return out, nil
 }
@@ -191,7 +247,8 @@ func (p *Payloads) Ghost() (*chainlib.Chain, error) {
 // For 按意图 kind 取"要随命令下发的载荷"（restorer.Deps.Payload 用）。
 //
 //   - ghost → 抓鬼导航数据（不给就是原地不动，所以必须给）；
-//   - shenbu → 分享日常链载荷（基座 + 声明组装；不给机器人拿不到 task_order 与导航）；
+//   - shenbu → 大唐神捕链载荷（基座 + shenbu_nav 声明组装；不给机器人拿不到 task_order 与导航）；
+//   - fenghuo → 烽火大唐链载荷（基座 + fenghuo_nav 声明组装；同上）；
 //   - 其它 kind → nil：新手链/捉鬼链的补发只带 chain_id，机器人端有链缓存与网格缓存
 //     （quest_engine 的 g_chain_cache / g_chain_grid_cache），避免每条补发都塞 2MB。
 func (p *Payloads) For(kind, chainID string) (any, error) {
@@ -200,6 +257,8 @@ func (p *Payloads) For(kind, chainID string) (any, error) {
 		return p.Ghost()
 	case "shenbu":
 		return p.ShareDaily()
+	case "fenghuo":
+		return p.ShareDailyOf(p.FenghuoChainID())
 	}
 	return nil, nil
 }

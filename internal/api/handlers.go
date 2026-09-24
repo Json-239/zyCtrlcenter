@@ -271,11 +271,16 @@ func (a *API) restoreCommand(g restorer.Group) (map[string]any, error) {
 			cmd["daily_limit"] = a.chainPayloads().GhostDailyLimit()
 		}
 		if g.Command == "share_daily_start" {
-			// 分享日常（大唐神捕，2026-09-23）：补发与「启动」同口径 —— 带 share_key/daily_limit/done
-			//（done 取心跳 daily 块的已做次数，重新补发不丢进度）。
-			cmd["share_key"] = a.shareDailyKey()
-			cmd["daily_limit"] = a.chainPayloads().ShareDailyLimit()
-			if done := a.shareDailyDoneMap(g.Accounts); len(done) > 0 {
+			// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24 P1）：补发与「启动」同口径 ——
+			// 带 share_key/daily_limit/done（done 取心跳 daily 块的已做次数，重新补发不丢进度）。
+			// 玩法按补发意图 kind 取（g.Kind = shenbu/fenghuo）；认不出时回落神捕（旧行为）。
+			kind, ok := shareDailyKindFromString(g.Kind)
+			if !ok {
+				kind = autotask.KindShenbu
+			}
+			cmd["share_key"] = a.shareDailyKeyOf(kind)
+			cmd["daily_limit"] = a.shareDailyLimitOf(kind)
+			if done := a.shareDailyDoneMapOf(g.Accounts, kind); len(done) > 0 {
 				cmd["done"] = done
 			}
 		}
@@ -418,8 +423,9 @@ func (a *API) conditionWarnings(chainID string, accounts []string) []map[string]
 		switch kind {
 		case intent.KindGhost:
 			cmd, label = "ghost_start", "抓鬼"
-		case intent.KindShenbu:
-			cmd, label = "share_daily_start", "大唐神捕"
+		case intent.KindShenbu, intent.KindFenghuo:
+			// 意图 kind 字符串与 autotask.Kind 同名（shenbu/fenghuo）→ 直接用中文名。
+			cmd, label = "share_daily_start", autotask.Kind(kind).Label()
 		default:
 			continue
 		}
@@ -475,11 +481,12 @@ func warningsText(warnings []map[string]any) string {
 //	意图=新手链/捉鬼链 → start_chain（带链数据，链数据来源同 handleStart）
 //	意图=抓鬼        → ghost_start（钟馗抓鬼日常，不是剧情链）
 //	意图=大唐神捕     → share_daily_start（分享日常；载荷=基座+shenbu_nav 声明，缺失硬失败）
+//	意图=烽火大唐     → share_daily_start（同上但玩法键/声明/日限按 fenghuo 取）
 //	没有意图（等级未知/未登记）→ 回落请求给的 chain_id（不乱猜）
 //	意图=空闲        → 不发
 //
-// 2026-09-23 分享日常：开关 `CTRL_SHARE_DAILY` 默认关 → 意图表里不会出现 shenbu，
-// 本函数行为与旧版完全一致（=0 时 shenbu 分支不可达）。
+// 2026-09-23 分享日常：开关 `CTRL_SHARE_DAILY` 默认关 → 意图表里不会出现 shenbu；
+// 2026-09-24 烽火大唐同款（`CTRL_FENGHUO` 默认关）→ 两个开关都关时本函数行为与旧版一致。
 func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts []string, inlineChain any) {
 	kinds, reasons := a.intentKinds()
 	targets := append([]string(nil), accounts...)
@@ -501,8 +508,9 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	// 意图表里还没有这个号时（刚 add、还没报等级），回退用**账号池里的当前条件**判一次：
 	// ≥31 级或链已完成 → 抓鬼；<31 → 新手链。这样"启动自动分配"永远按当前条件分配**一条**，
 	// 而不是盲目发默认链（≥31 的号发 newbie_full 会被机器人端按 already_done 跳过 = 看起来"没分配"）。
-	var toChain, toGhost, toDaily []string
-	skipped := []string{} // 等级门槛拦下的号（不静默：回带原因）
+	var toChain, toGhost []string
+	toDaily := map[autotask.Kind][]string{} // shenbu / fenghuo 分组（日常玩法各自一条命令）
+	skipped := []string{}                   // 等级门槛拦下的号（不静默：回带原因）
 	assignments := make([]map[string]any, 0, len(targets))
 	for _, acc := range targets {
 		kind, reason := a.decideKind(acc, kinds, reasons)
@@ -521,12 +529,14 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			toGhost = append(toGhost, acc)
 			assignments = append(assignments, map[string]any{
 				"account": acc, "command": "ghost_start", "reason": "抓鬼（" + reason + "）"})
-		case intent.KindShenbu:
-			// 大唐神捕（分享日常，2026-09-23）：手动通道按用户意图派（等级/余额闸只在
-			// 自动通道生效 —— 意图已按门槛判过）。
-			toDaily = append(toDaily, acc)
+		case intent.KindShenbu, intent.KindFenghuo:
+			// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24）：手动通道按用户意图派
+			//（等级/余额闸只在自动通道生效 —— 意图已按门槛判过）。
+			dk := autotask.Kind(kind)
+			toDaily[dk] = append(toDaily[dk], acc)
 			assignments = append(assignments, map[string]any{
-				"account": acc, "command": "share_daily_start", "reason": "大唐神捕（" + reason + "）"})
+				"account": acc, "command": "share_daily_start",
+				"reason": dk.Label() + "（" + reason + "）"})
 		default:
 			toChain = append(toChain, acc)
 			why := "未登记意图且池内无等级 → 用指定链"
@@ -570,7 +580,9 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	}
 	toGhost = cutByQuota(toGhost, autotask.KindGhost, "抓鬼")
 	toChain = cutByQuota(toChain, autotask.KindNewbie, "新手")
-	toDaily = cutByQuota(toDaily, autotask.KindShenbu, "神捕")
+	for _, kind := range shareDailyFamilyKinds() {
+		toDaily[kind] = cutByQuota(toDaily[kind], kind, kind.Label())
+	}
 
 	// 2026-09-23 R1/R2（操作健壮性审计 · 连点去重）：去掉"最近 120 秒内已派发过"的号 ——
 	// 抓鬼原先只在配额不满时才会重复派（配额有余就重发命令 → 机器人端重启会话）；
@@ -581,7 +593,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		switch kind {
 		case autotask.KindGhost:
 			kept, dropped = a.ghostInflight.dropFresh(accs)
-		case autotask.KindShenbu:
+		case autotask.KindShenbu, autotask.KindFenghuo:
 			kept, dropped = a.dailyInflight.dropFresh(accs)
 		default:
 			kept, dropped = a.chainInflight.dropFresh(accs)
@@ -606,7 +618,9 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	}
 	toGhost = dropInflight(toGhost, autotask.KindGhost, "抓鬼")
 	toChain = dropInflight(toChain, autotask.KindNewbie, "新手")
-	toDaily = dropInflight(toDaily, autotask.KindShenbu, "神捕")
+	for _, kind := range shareDailyFamilyKinds() {
+		toDaily[kind] = dropInflight(toDaily[kind], kind, kind.Label())
+	}
 
 	// 抓鬼载荷**在发任何命令之前**取齐：导航数据缺失就是硬失败，一条命令都不发
 	// （否则会出现"新手链那组已经发出去了、抓鬼这组失败"的半成功状态）。
@@ -626,20 +640,24 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		ghostNav = nav
 	}
 	// 分享日常载荷同口径：声明文件缺失/缺 task_order 也是硬失败（一条都不发）。
-	var dailyNav *chainlib.Chain
-	if len(toDaily) > 0 {
-		nav, err := a.chainPayloads().ShareDaily()
+	// 每个玩法各取各的声明文件（shenbu_nav / fenghuo_nav）；任一不可用 → 整批不发。
+	dailyNav := map[autotask.Kind]*chainlib.Chain{}
+	for _, kind := range shareDailyFamilyKinds() {
+		if len(toDaily[kind]) == 0 {
+			continue
+		}
+		nav, err := a.chainPayloads().ShareDailyOf(a.shareDailyChainIDOf(kind))
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"ok": false, "mode": "auto", "sent": 0, "accounts": len(targets),
-				"groups":      map[string]any{"start_chain": []string{}, "ghost_start": []string{}, "share_daily_start": toDaily},
+				"groups":      a.startAutoGroups(toChain, toGhost, toDaily),
 				"assignments": assignments, "chain_id": defaultChainID,
-				"msg": "分享日常链数据不可用，未下发任何命令：" + err.Error() +
-					"（把声明文件放进链目录，或用 CTRL_SHARE_DAILY_CHAIN 指定别的文件名）",
+				"msg": kind.Label() + "链数据不可用，未下发任何命令：" + err.Error() +
+					"（把声明文件放进链目录，或用 " + a.shareDailyChainConfigEnv(kind) + " 指定别的文件名）",
 			})
 			return
 		}
-		dailyNav = nav
+		dailyNav[kind] = nav
 	}
 
 	sent, msgs := 0, []string{}
@@ -703,24 +721,30 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			chanFail = true // 2026-09-23 文案修复：真·传输失败才允许回"通道未连接"
 		}
 	}
-	if len(toDaily) > 0 {
-		// 分享日常（大唐神捕）：与「定时任务/补发」同口径 —— 带 share_key/chain/daily_limit/done。
-		key := a.shareDailyKey()
+	for _, kind := range shareDailyFamilyKinds() {
+		toD := toDaily[kind]
+		if len(toD) == 0 {
+			continue
+		}
+		// 分享日常（大唐神捕 / 烽火大唐）：与「定时任务/补发」同口径 ——
+		// 带 share_key/chain/daily_limit/done（玩法键/声明/日限按 kind 取）。
+		nav := dailyNav[kind]
+		key := a.shareDailyKeyOf(kind)
 		cmd := map[string]any{
-			"cmd": "share_daily_start", "share_key": key, "chain": dailyNav,
-			"daily_limit": a.chainPayloads().ShareDailyLimit(), "accounts": toDaily,
+			"cmd": "share_daily_start", "share_key": key, "chain": nav,
+			"daily_limit": a.shareDailyLimitOf(kind), "accounts": toD,
 		}
-		if dailyNav != nil && dailyNav.ChainID != "" {
-			cmd["chain_id"] = dailyNav.ChainID
+		if nav != nil && nav.ChainID != "" {
+			cmd["chain_id"] = nav.ChainID
 		}
-		if done := a.shareDailyDoneMap(toDaily); len(done) > 0 {
+		if done := a.shareDailyDoneMapOf(toD, kind); len(done) > 0 {
 			cmd["done"] = done
 		}
 		if a.Events.SendCmd(cmd, "share_daily_start_auto") {
 			sent++
-			a.markDailyDispatch(toDaily)
-			a.daily.track(toDaily, key)
-			msgs = append(msgs, fmt.Sprintf("%d 个走大唐神捕(%s)", len(toDaily), key))
+			a.markDailyDispatch(toD)
+			a.daily.track(toD, key)
+			msgs = append(msgs, fmt.Sprintf("%d 个走%s(%s)", len(toD), kind.Label(), key))
 		} else {
 			chanFail = true
 		}
@@ -745,10 +769,36 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		"accounts": targets, "sent": sent, "assignments": assignments, "channel_fail": chanFail})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": ok, "mode": "auto", "sent": sent, "accounts": len(targets),
-		"groups":      map[string]any{"start_chain": toChain, "ghost_start": toGhost, "share_daily_start": toDaily},
+		"groups":      a.startAutoGroups(toChain, toGhost, toDaily),
 		"assignments": assignments, "chain_id": defaultChainID, "skipped": skipped,
 		"channel_fail": chanFail, "msg": msg,
 	})
+}
+
+// startAutoGroups "自动分配"响应的分组视图。
+//
+// share_daily_start = **全部日常号**（shenbu + fenghuo 并集，键名即命令名）；
+// share_daily_shenbu / share_daily_fenghuo = 各玩法分组（面板/测试按玩法核对）。
+func (a *API) startAutoGroups(toChain, toGhost []string, toDaily map[autotask.Kind][]string) map[string]any {
+	allDaily := make([]string, 0, len(toDaily[autotask.KindShenbu])+len(toDaily[autotask.KindFenghuo]))
+	for _, kind := range shareDailyFamilyKinds() {
+		allDaily = append(allDaily, toDaily[kind]...)
+	}
+	g := map[string]any{
+		"start_chain": toChain, "ghost_start": toGhost, "share_daily_start": allDaily,
+	}
+	for _, kind := range shareDailyFamilyKinds() {
+		g["share_daily_"+string(kind)] = toDaily[kind]
+	}
+	return g
+}
+
+// shareDailyChainConfigEnv 该玩法声明文件对应的环境变量名（报错文案指路用）。
+func (a *API) shareDailyChainConfigEnv(kind autotask.Kind) string {
+	if kind == autotask.KindFenghuo {
+		return "CTRL_FENGHUO_CHAIN"
+	}
+	return "CTRL_SHARE_DAILY_CHAIN"
 }
 
 // assignmentsReasonText 汇总"被闸门拦下"的原因（去重+计数，最多列 2 条），供面板直接显示。
@@ -811,21 +861,27 @@ func (a *API) intentKinds() (map[string]intent.Kind, map[string]string) {
 // 开启后 ≥40 且心跳 daily 明确"今日未满" → 大唐神捕（与 intent.DecideDaily 同源）。
 func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[string]string) (intent.Kind, string) {
 	// 2026-09-24 用户口径：**启动 = 恢复当前任务**（掉任务/停机后点启动接着跑）；
-	// "派什么任务"完全交给定时任务策略 + 后续日常轮转。判据 = 心跳 daily 有该玩法且未满：
-	// 机器人只在 enabled=true 时上报 daily，所以"有条目"就是"当前确实在跑神捕"
-	//（与 CTRL_SHARE_DAILY 开关无关：开关只管意图判据的灰度，不管"恢复现状"）。
-	// 满额（含独立满额表）不走这条 → 回落意图，把神捕名额让出来。
+	// "派什么任务"完全交给定时任务策略 + 后续日常轮转。判据 = 心跳 daily 有**某玩法**且未满：
+	// 机器人只在 enabled=true 时上报 daily，所以"有条目"就是"当前确实在跑该玩法"
+	//（与 CTRL_SHARE_DAILY / CTRL_FENGHUO 开关无关：开关只管意图判据的灰度，不管"恢复现状"）。
+	// 满额（含独立满额表）不走这条 → 回落意图，把该玩法名额让出来。
 	// 2026-09-24 补：机器人端分享日常模块无状态持久化 —— 机器人进程一重启，心跳 daily 块
 	// 就没了（判据信号丢失）。用中控侧持久台账兜底：今天派过、且当前未见满额 → 仍按"续跑"
-	// 处理（真正的满额由独立满额表/心跳判满拦住，见 shareDailyFullToday）。
-	key := a.shareDailyKey()
+	// 处理（真正的满额由独立满额表/心跳判满拦住，见 shareDailyFullTodayOf）。
+	// 多玩法：按家族固定次序（shenbu → fenghuo）取第一个命中的。
 	if a.St != nil {
 		r, _ := a.St.Get(acc)
-		if e, has := r.DailyOf(key); has && !a.shareDailyFullToday(acc, r) {
-			return intent.KindShenbu, fmt.Sprintf("今日大唐神捕 %d/%d 未满（续跑）", e.Done, e.Limit)
-		}
-		if a.St.ShareDailyAssignedToday(acc, key) && !a.shareDailyFullToday(acc, r) {
-			return intent.KindShenbu, "今日大唐神捕已派未满（续跑·台账）"
+		for _, kind := range shareDailyFamilyKinds() {
+			key := a.shareDailyKeyOf(kind)
+			if key == "" {
+				continue
+			}
+			if e, has := r.DailyOf(key); has && !a.shareDailyFullTodayOf(acc, r, kind) {
+				return intent.Kind(kind), fmt.Sprintf("今日%s %d/%d 未满（续跑）", kind.Label(), e.Done, e.Limit)
+			}
+			if a.St.ShareDailyAssignedToday(acc, key) && !a.shareDailyFullTodayOf(acc, r, kind) {
+				return intent.Kind(kind), "今日" + kind.Label() + "已派未满（续跑·台账）"
+			}
 		}
 	}
 	if kind := kinds[acc]; kind != "" {
@@ -855,27 +911,36 @@ func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[s
 			}
 		}
 	}
-	d := a.Events.Intents.Decider().DecideDaily(lv, done, a.dailyInfoOfAccount(acc))
+	d := a.Events.Intents.Decider().DecideDailyStates(lv, done, a.dailyInfoOfAccount(acc))
 	if !d.Known {
 		return "", "" // 等级未知：不瞎判，回落请求给的链
 	}
 	return d.Kind, d.Reason + "（按池内记录）"
 }
 
-// dailyInfoOfAccount 该号分享日常的判据输入（心跳 daily 块；没有 = 未知 → 不判 shenbu）。
-func (a *API) dailyInfoOfAccount(acc string) intent.DailyInfo {
+// dailyInfoOfAccount 该号分享日常家族的判据输入（心跳 daily 块；没有 = 未知 → 不判该玩法）。
+func (a *API) dailyInfoOfAccount(acc string) intent.DailyStates {
 	if a.St == nil || a.Events == nil || a.Events.Intents == nil {
-		return intent.DailyInfo{}
+		return intent.DailyStates{}
 	}
 	r, ok := a.St.Get(acc)
 	if !ok {
-		return intent.DailyInfo{}
+		return intent.DailyStates{}
 	}
-	key := a.Events.Intents.Decider().ShareDailyKeyOf()
-	if _, has := r.DailyOf(key); !has {
-		return intent.DailyInfo{} // 老版上报/还没跑到：未知
+	dec := a.Events.Intents.Decider()
+	infoOf := func(key string) intent.DailyInfo {
+		if key == "" {
+			return intent.DailyInfo{}
+		}
+		if _, has := r.DailyOf(key); !has {
+			return intent.DailyInfo{} // 老版上报/还没跑到：未知
+		}
+		return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 	}
-	return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
+	return intent.DailyStates{
+		Shenbu:  infoOf(dec.ShareDailyKeyOf()),
+		Fenghuo: infoOf(dec.FenghuoKeyOf()),
+	}
 }
 
 func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -894,8 +959,9 @@ func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	ok := a.Events.SendCmd(cmd, "stop")
 	// 2026-09-24 用户口径：**停止 = 停当前任务** —— 既有 stop 只停任务链 + 抓鬼，
-	// 神捕（分享日常）会话不停（用户观感"点了停止神捕还在跑"）；对心跳 daily 在跑的号
-	// 补发 share_daily_stop 收工。账号为空（停全部）→ 取快照里所有活跃 daily 的号。
+	// 分享日常（神捕/烽火大唐）会话不停（用户观感"点了停止神捕还在跑"）；对心跳 daily
+	// 在跑的号补发 share_daily_stop 收工。账号为空（停全部）→ 取快照里所有活跃 daily 的号。
+	// 名单是**两个玩法的并集**（share_daily_stop 不带玩法键，一次停当前会话）。
 	dailyAccs := a.dailyActiveAccounts(accounts)
 	dailyN := a.shareDailyStop(dailyAccs)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "stop",
@@ -904,7 +970,7 @@ func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
 	msg := okMsg(ok, "已下发停链")
 	msg += "；已标人工暂停 " + itoa(pausedN) + " 个（自动编排不再拉起；再点「启动/立即补发/上线」解除）"
 	if dailyN > 0 {
-		msg += "；已给 " + itoa(dailyN) + " 个在跑的大唐神捕下发收工"
+		msg += "；已给 " + itoa(dailyN) + " 个在跑的分享日常（神捕/烽火大唐）下发收工"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "paused": pausedN, "daily_stop": dailyN, "msg": msg})
 }

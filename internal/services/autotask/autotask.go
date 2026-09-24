@@ -34,14 +34,19 @@ const (
 	// KindShenbu 大唐神捕（分享日常体系：2026-09-23 方案 §4.3；命令 share_daily_start，
 	// 与抓鬼同构 —— 载荷在发送时由中控组装：基座 newbie_full + shenbu_nav 声明）。
 	KindShenbu Kind = "shenbu"
+	// KindFenghuo 烽火大唐（分享日常体系，2026-09-24 P1 接入；命令 share_daily_start，
+	// 与 shenbu 同构 —— 载荷在发送时由中控组装：基座 newbie_full + fenghuo_nav 声明）。
+	// 日限 20（服务端 20021.xml）；玩法键 share_daily_宫廷10。
+	KindFenghuo Kind = "fenghuo"
 )
 
 // Kinds 固定顺序（面板与日志都用它，保证输出稳定）。
-var Kinds = []Kind{KindNewbie, KindGhost, KindHatch, KindShenbu}
+// 日常轮转总览的 queue 固定次序（ghost→newbie→shenbu→fenghuo）依赖末两段次序，勿改。
+var Kinds = []Kind{KindNewbie, KindGhost, KindHatch, KindShenbu, KindFenghuo}
 
 // Valid 是否是受支持的策略。
 func (k Kind) Valid() bool {
-	return k == KindNewbie || k == KindGhost || k == KindHatch || k == KindShenbu
+	return k == KindNewbie || k == KindGhost || k == KindHatch || k == KindShenbu || k == KindFenghuo
 }
 
 // Label 中文名（日志/面板用）。
@@ -55,6 +60,8 @@ func (k Kind) Label() string {
 		return "孵化"
 	case KindShenbu:
 		return "大唐神捕"
+	case KindFenghuo:
+		return "烽火大唐"
 	}
 	return string(k)
 }
@@ -235,7 +242,7 @@ func New(d Deps) *Runner {
 // Start 启动（或改参数后重启）某个策略；会**立即跑一轮**（参考实现 next_at=now 同口径）。
 func (r *Runner) Start(kind Kind, cfg Config) error {
 	if !kind.Valid() {
-		return fmt.Errorf("未知策略: %s（只支持 newbie / ghost / hatch / shenbu）", kind)
+		return fmt.Errorf("未知策略: %s（只支持 newbie / ghost / hatch / shenbu / fenghuo）", kind)
 	}
 	cfg.Kind = kind
 	cfg = cfg.WithDefaults()

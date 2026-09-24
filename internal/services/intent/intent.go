@@ -7,6 +7,8 @@
 //     ≥31 或已完成 → 抓鬼；**等级未知时判"待定"**（等机器人上线报一次等级，不瞎跑）。
 //   - 2026-09-23 分享日常（大唐神捕）：等级 ≥ ShareDailyMinLevel(40) 且心跳明确上报"今日未满"
 //     且开关启用 → shenbu；否则回落旧判据（详见 DecideDaily）。
+//   - 2026-09-24 烽火大唐（fenghuo，P1）：判据与 shenbu 同款独立开关（默认关），
+//     两个都满足时 shenbu 优先（详见 DecideDailyStates）。
 //   - 一个账号同一时刻只有一条链（切换 = 先停旧链再上新，Apply 会把 prev 还给调用方）。
 //   - 选号/上线前用 Conflict() 再校验一次：同账号要跑别的链就是冲突（两侧双保险）。
 //
@@ -37,6 +39,9 @@ const (
 	// KindShenbu 大唐神捕（分享日常体系，2026-09-23 接入）：等级达标 + 该玩法今日未满 →
 	// 跑神捕；判据由 Decider.ShareDailyEnabled 显式打开（默认关，灰度期 P2 再开）。
 	KindShenbu Kind = "shenbu"
+	// KindFenghuo 烽火大唐（分享日常体系，2026-09-24 P1 接入）：与神捕同口径 ——
+	// 等级 ≥40 + 该玩法今日未满 + Decider.FenghuoEnabled（默认关）→ 跑烽火大唐。
+	KindFenghuo Kind = "fenghuo"
 )
 
 // DefaultNewbieMaxLevel 新手链等级阈值（与参考实现 start_chain_done_level / NEWBIE_MAX_LEVEL 一致）。
@@ -48,7 +53,11 @@ const DefaultShareDailyMinLevel = 40
 // DefaultShareDailyKey 分享日常默认玩法键（随 share_daily_start 下发；与客户端口径一致）。
 const DefaultShareDailyKey = "share_daily_大唐神捕"
 
-// DailyInfo 一个账号"分享日常"的运行时信息（判据输入；**零值 = 未知 → 不判 shenbu**）。
+// DefaultFenghuoKey 烽火大唐默认玩法键（服务端 20021.xml 的 share_daily_key；
+// 与客户端 auto_task.csv 的「share_daily_宫廷10」行一致）。
+const DefaultFenghuoKey = "share_daily_宫廷10"
+
+// DailyInfo 一个账号"分享日常"的运行时信息（判据输入；**零值 = 未知 → 不判该玩法**）。
 //
 // 为什么要有 Known：机器人新版心跳才带 daily 块（{share_key,done,limit,state}）。
 // 老版上报（没有 daily）时"是否满额"无从判断，此时必须保守回落旧判据（≥31 → 抓鬼），
@@ -56,6 +65,15 @@ const DefaultShareDailyKey = "share_daily_大唐神捕"
 type DailyInfo struct {
 	Known bool // 心跳里有该玩法的计数（机器人已上报）
 	Full  bool // 今日已满/不可用（state=DONE 或 done ≥ limit）
+}
+
+// DailyStates 分享日常家族（shenbu / fenghuo）两个玩法各自的运行时信息（判据输入）。
+//
+// 单独成一个结构（而不是多一个 map）是为了**编译期**绑死两个 kind —— 忘填哪个字段
+// 时零值 = 未知 = 保守不判，不会把号误判去别的玩法。
+type DailyStates struct {
+	Shenbu  DailyInfo // 大唐神捕（share_daily_大唐神捕）
+	Fenghuo DailyInfo // 烽火大唐（share_daily_宫廷10）
 }
 
 // ErrNotDecided 等级未知：调用方先别登记意图（也不要覆盖已有意图）。
@@ -81,6 +99,15 @@ type Decider struct {
 	ShareDailyEnabled  bool
 	ShareDailyMinLevel int
 	ShareDailyKey      string
+	// Fenghuo* 烽火大唐判据（2026-09-24 P1 接入，口径与 shenbu 完全同款）：
+	//   - FenghuoEnabled=false（默认）→ **不做** fenghuo 判定（与旧版行为一致）；
+	//   - 打开后：等级 ≥ FenghuoMinLevel（默认 40，服务端票条件）且心跳明确"该玩法今日未满"
+	//     → 判 fenghuo。
+	// 两个玩法都启用且都未满时，按 Kinds 次序 **shenbu 优先**（先跑满一条再转下一条；
+	// 前端队列固定次序 ghost→newbie→shenbu→fenghuo 同一口径）。
+	FenghuoEnabled  bool
+	FenghuoMinLevel int
+	FenghuoKey      string
 }
 
 func (d Decider) normalized() Decider {
@@ -99,6 +126,13 @@ func (d Decider) normalized() Decider {
 	if d.ShareDailyKey == "" {
 		d.ShareDailyKey = DefaultShareDailyKey
 	}
+	if d.FenghuoMinLevel <= 0 {
+		// 烽火大唐票条件同为等级 ≥40（20021.xml:12-14），与神捕同值但**独立可配**。
+		d.FenghuoMinLevel = DefaultShareDailyMinLevel
+	}
+	if d.FenghuoKey == "" {
+		d.FenghuoKey = DefaultFenghuoKey
+	}
 	return d
 }
 
@@ -111,19 +145,36 @@ func (d Decider) Decide(level int, chainDone bool) Decision {
 
 // DecideDaily 同上，附该号"分享日常"的运行时信息（心跳 daily 块解析结果）。
 //
-// 判据（2026-09-23 方案 §4.3，G2）：
-//
-//	等级 ≥ ShareDailyMinLevel(40) + 今日未满 + 开关启用 → 大唐神捕（shenbu）
-//	31~39（或神捕不可用/满额/未知）            → 抓鬼
-//	< 31 且未毕业                              → 新手链
-//	等级未知                                   → 待定（不登记、不覆盖已有意图）
+// 只带 shenbu（大唐神捕）一个玩法的信息 —— 旧调用/旧测试的兼容入口；
+// 要同时判 shenbu + fenghuo（烽火大唐）请用 DecideDailyStates。
 func (d Decider) DecideDaily(level int, chainDone bool, day DailyInfo) Decision {
+	return d.DecideDailyStates(level, chainDone, DailyStates{Shenbu: day})
+}
+
+// DecideDailyStates 判定该账号该跑哪条链（附分享日常家族两个玩法的运行时信息）。
+//
+// 判据（2026-09-23 方案 §4.3 G2 + 2026-09-24 烽火大唐 P1）：
+//
+//	等级 ≥ 门槛(默认 40) + 该玩法今日未满 + 开关启用 → 大唐神捕 / 烽火大唐
+//	   （两个都满足时 **shenbu 优先** —— 与前端队列固定次序 ghost→newbie→shenbu→fenghuo 同口径）
+//	31~39（或日常不可用/满额/未知/开关关）        → 抓鬼
+//	< 31 且未毕业                                  → 新手链
+//	等级未知                                       → 待定（不登记、不覆盖已有意图）
+func (d Decider) DecideDailyStates(level int, chainDone bool, days DailyStates) Decision {
 	d = d.normalized()
 	graduated := chainDone || (level > 0 && level >= d.NewbieMaxLevel)
-	if graduated && d.ShareDailyEnabled && day.Known && !day.Full && level >= d.ShareDailyMinLevel {
+	if graduated && d.ShareDailyEnabled && days.Shenbu.Known && !days.Shenbu.Full &&
+		level >= d.ShareDailyMinLevel {
 		return Decision{
 			Known: true, Kind: KindShenbu,
 			Reason: fmt.Sprintf("等级 %d ≥ %d 且大唐神捕今日未满 → 大唐神捕", level, d.ShareDailyMinLevel),
+		}
+	}
+	if graduated && d.FenghuoEnabled && days.Fenghuo.Known && !days.Fenghuo.Full &&
+		level >= d.FenghuoMinLevel {
+		return Decision{
+			Known: true, Kind: KindFenghuo,
+			Reason: fmt.Sprintf("等级 %d ≥ %d 且烽火大唐今日未满 → 烽火大唐", level, d.FenghuoMinLevel),
 		}
 	}
 	switch {
@@ -144,8 +195,11 @@ func (d Decider) DecideDaily(level int, chainDone bool, day DailyInfo) Decision 
 	}
 }
 
-// ShareDailyKeyOf 返回归一化后的分享日常玩法键（下发给机器人用）。
+// ShareDailyKeyOf 返回归一化后的分享日常（大唐神捕）玩法键（下发给机器人用）。
 func (d Decider) ShareDailyKeyOf() string { return d.normalized().ShareDailyKey }
+
+// FenghuoKeyOf 返回归一化后的烽火大唐玩法键（下发给机器人用）。
+func (d Decider) FenghuoKeyOf() string { return d.normalized().FenghuoKey }
 
 // Intent 一个账号当前意图。
 type Intent struct {

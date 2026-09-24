@@ -99,6 +99,26 @@ type Config struct {
 	// 可用环境变量 CTRL_SHARE_DAILY_MIN_LEVEL 覆盖。
 	ShareDailyMinLevel int
 
+	// ---- 烽火大唐（fenghuo，分享日常体系第二玩法；2026-09-24 P1）----
+	//
+	// 与 shenbu 同构、**各自独立**的配置（不改动上面 CTRL_SHARE_DAILY* 的任何行为）：
+	// FenghuoEnabled 总开关（默认关；CTRL_FENGHUO=1 打开后才判 fenghuo 意图）。
+	FenghuoEnabled bool
+	// FenghuoChainID 烽火大唐的**专属声明文件**名（data/chains/<id>.json，默认 fenghuo_nav）。
+	// 坐标/网格/路由同样从 GhostBaseChainID（默认 newbie_full）复用。
+	// 可用环境变量 CTRL_FENGHUO_CHAIN 覆盖。
+	FenghuoChainID string
+	// FenghuoKey 下发给机器人的玩法键（share_daily_start.share_key；默认 share_daily_宫廷10，
+	// 服务端 20021.xml 的 share_daily_key）。
+	// 可用环境变量 CTRL_FENGHUO_KEY 覆盖。
+	FenghuoKey string
+	// FenghuoDailyLimit 烽火大唐日限（随命令下发；服务端 20021.xml 口径 20）。
+	// 可用环境变量 CTRL_FENGHUO_LIMIT 覆盖。
+	FenghuoDailyLimit int
+	// FenghuoMinLevel 烽火大唐等级门槛（票条件：等级 ≥40，20021.xml:12-14）。
+	// 可用环境变量 CTRL_FENGHUO_MIN_LEVEL 覆盖。
+	FenghuoMinLevel int
+
 	// AutoRegister* 定时任务的"没号时自动注册"用（默认按本项目的账号命名口径：
 	// robot + 7 位序号 + @xy3.com，如 robot0001000@xy3.com）。可用环境变量
 	// CTRL_AUTO_REGISTER_PREFIX / _SUFFIX / _PAD 覆盖。
@@ -290,6 +310,11 @@ func build(base string, opts *cliOpts) *Config {
 		ShareDailyKey:        env("CTRL_SHARE_DAILY_KEY", "share_daily_大唐神捕"),
 		ShareDailyDailyLimit: envInt("CTRL_SHARE_DAILY_LIMIT", 10),
 		ShareDailyMinLevel:   envInt("CTRL_SHARE_DAILY_MIN_LEVEL", 40),
+		FenghuoEnabled:       envBool("CTRL_FENGHUO", false),
+		FenghuoChainID:       env("CTRL_FENGHUO_CHAIN", "fenghuo_nav"),
+		FenghuoKey:           env("CTRL_FENGHUO_KEY", "share_daily_宫廷10"),
+		FenghuoDailyLimit:    envInt("CTRL_FENGHUO_LIMIT", 20),
+		FenghuoMinLevel:      envInt("CTRL_FENGHUO_MIN_LEVEL", 40),
 		AutoRegisterPrefix:   env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
 		AutoRegisterSuffix:   env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
 		AutoRegisterPad:      envInt("CTRL_AUTO_REGISTER_PAD", 7),

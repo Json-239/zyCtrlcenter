@@ -151,11 +151,22 @@ func InstallGhostNav(t *testing.T, chainDir string) {
 // InstallShareDailyNav 装齐"分享日常（大唐神捕）"载荷需要的**两份**链数据：
 // 基座（newbie_full：坐标/网格/路由）+ 专属声明（shenbu_nav：task_order 全 4 个任务号）。
 //
-// 口径同抓鬼：专属文件只放玩法声明，发送时由中控组装（见 chainpayload.go:ShareDaily）。
+// 口径同抓鬼：专属文件只放玩法声明，发送时由中控组装（见 chainpayload.go:ShareDailyOf）。
 func InstallShareDailyNav(t *testing.T, chainDir string) {
 	t.Helper()
 	InstallChainFixture(t, chainDir, "newbie_full", "chains/newbie_full.mini.json")
 	InstallChainFixture(t, chainDir, "shenbu_nav", "chains/shenbu_nav.mini.json")
+}
+
+// InstallFenghuoNav 装齐"烽火大唐"载荷需要的**两份**链数据：
+// 基座（newbie_full：坐标/网格/路由）+ 专属声明（fenghuo_nav：task_order 全 6 个任务号）。
+//
+// 与神捕同口径（2026-09-24 P1）：专属文件只放玩法声明，发送时由中控组装
+// （见 chainpayload.go:ShareDailyOf）；两个玩法的声明文件互不共用。
+func InstallFenghuoNav(t *testing.T, chainDir string) {
+	t.Helper()
+	InstallChainFixture(t, chainDir, "newbie_full", "chains/newbie_full.mini.json")
+	InstallChainFixture(t, chainDir, "fenghuo_nav", "chains/fenghuo_nav.mini.json")
 }
 
 // WriteChainFile 往链目录写一份自定义链数据（用例要构造"地址不全"等异常形状时用），返回路径。

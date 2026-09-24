@@ -64,6 +64,10 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 		dec.ShareDailyEnabled = cfg.ShareDailyEnabled
 		dec.ShareDailyMinLevel = cfg.ShareDailyMinLevel
 		dec.ShareDailyKey = cfg.ShareDailyKey
+		// 烽火大唐判据（2026-09-24 P1）：同款独立开关（CTRL_FENGHUO=1 才判 fenghuo）
+		dec.FenghuoEnabled = cfg.FenghuoEnabled
+		dec.FenghuoMinLevel = cfg.FenghuoMinLevel
+		dec.FenghuoKey = cfg.FenghuoKey
 	}
 	return &Handler{
 		Cfg:      cfg,
@@ -362,12 +366,13 @@ func (h *Handler) onRobotOnline(ev map[string]any) {
 // decideIntent 按判据登记/切换意图（等级未知时不登记、也不覆盖已有意图）。
 //
 // 2026-09-23 分享日常：附该号心跳 daily 块（判据 ≥40 且今日未满 → 大唐神捕）；
+// 2026-09-24 烽火大唐同款（同一次判定里带两个玩法的信息，shenbu 优先）；
 // 老版机器人没有 daily → "未知" → 回落旧判据（≥31 全判抓鬼），行为不变。
 func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, source string) {
 	if h.Intents == nil {
 		return
 	}
-	dec := h.Intents.Decider().DecideDaily(level, chainDone, h.dailyInfoOf(account))
+	dec := h.Intents.Decider().DecideDailyStates(level, chainDone, h.dailyInfoOf(account))
 	prev, changed, err := h.Intents.Apply(account, dec, zone, source)
 	if err != nil || !changed {
 		return
@@ -381,20 +386,29 @@ func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, 
 	h.Log.Printf("[INTENT] %s %s", account, msg)
 }
 
-// dailyInfoOf 该号分享日常的判据输入（心跳 daily 块；没有 = 未知 → 不判 shenbu）。
-func (h *Handler) dailyInfoOf(account string) intent.DailyInfo {
+// dailyInfoOf 该号分享日常家族的判据输入（心跳 daily 块；没有 = 未知 → 不判该玩法）。
+func (h *Handler) dailyInfoOf(account string) intent.DailyStates {
 	if h.St == nil || h.Intents == nil {
-		return intent.DailyInfo{}
+		return intent.DailyStates{}
 	}
 	r, ok := h.St.Get(account)
 	if !ok {
-		return intent.DailyInfo{}
+		return intent.DailyStates{}
 	}
-	key := h.Intents.Decider().ShareDailyKeyOf()
-	if _, has := r.DailyOf(key); !has {
-		return intent.DailyInfo{Known: false} // 老版上报/还没跑到：未知
+	dec := h.Intents.Decider()
+	infoOf := func(key string) intent.DailyInfo {
+		if key == "" {
+			return intent.DailyInfo{}
+		}
+		if _, has := r.DailyOf(key); !has {
+			return intent.DailyInfo{Known: false} // 老版上报/还没跑到：未知
+		}
+		return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 	}
-	return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
+	return intent.DailyStates{
+		Shenbu:  infoOf(dec.ShareDailyKeyOf()),
+		Fenghuo: infoOf(dec.FenghuoKeyOf()),
+	}
 }
 
 func (h *Handler) onRobotOffline(ev map[string]any) {
@@ -769,17 +783,23 @@ func isGhostUnavailableCode(code string) bool {
 //
 //	{type:"error", code:"SHARE_DAILY_<CODE>", msg, state:"STOPPED", reason, done, limit}
 //
-// 只有 done ≥ limit 才标（其它 code 的停止走常规错误处理）。**事件不带 share_key**
-// （P0 只有一条链）：用当前配置的玩法键；P1 多玩法时需机器人端在事件里带 share_key。
+// 只有 done ≥ limit 才标（其它 code 的停止走常规错误处理）。
+//
+// 玩法键优先取 `ev["share_key"]`（**2026-09-24 P1 起机器人端应在事件里带**，否则烽火大唐
+// 满额会被错记到神捕账上 —— 见交付报告"待联调项"）；事件没带时回落**当前配置的神捕键**
+// （P0 兼容口径：当时只有一条链，不带也能对）。
 func (h *Handler) markShareDailyFullFromStop(account string, ev map[string]any) {
 	done, limit := toInt(ev["done"]), toInt(ev["limit"])
 	if account == "" || limit <= 0 || done < limit {
 		return
 	}
-	key := intent.DefaultShareDailyKey
-	if h.Intents != nil {
-		if k := h.Intents.Decider().ShareDailyKeyOf(); k != "" {
-			key = k
+	key := strings.TrimSpace(toStr(ev["share_key"]))
+	if key == "" {
+		key = intent.DefaultShareDailyKey
+		if h.Intents != nil {
+			if k := h.Intents.Decider().ShareDailyKeyOf(); k != "" {
+				key = k
+			}
 		}
 	}
 	h.St.MarkShareDailyFull(account, key)
