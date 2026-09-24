@@ -76,12 +76,16 @@ sys.modules["protocol3"] = _p3_mod
 
 # robot_path: FakeFinder（用例控制返回路径）
 class _FakeFinder(object):
-    PATH = None            # None = 寻不到路
+    PATH = None            # None = 寻不到路（固定返回）
+    PATH_BY_TARGET = None  # {(tx,ty): path or None} 按目标返回（两步走用例）
 
     def __init__(self, grid):
         self.grid = grid
 
     def find_path(self, fx, fy, tx, ty):
+        if _FakeFinder.PATH_BY_TARGET is not None:
+            p = _FakeFinder.PATH_BY_TARGET.get((tx, ty))
+            return [tuple(x) for x in p] if p else None
         if _FakeFinder.PATH is None:
             return None
         return [tuple(p) for p in _FakeFinder.PATH]
@@ -90,6 +94,15 @@ class _FakeFinder(object):
 _rp_mod = types.ModuleType("robot_path")
 _rp_mod.GridPathFinder = _FakeFinder
 sys.modules["robot_path"] = _rp_mod
+
+
+class _FakeGrid(object):
+    """只把指定格标阻挡的网格（两步走兜底用例）。"""
+    def __init__(self, blocked_set):
+        self._b = set(blocked_set)
+
+    def blocked(self, gx, gy):
+        return (gx, gy) in self._b
 
 # quest_engine: grid_for 用例控制
 _qe_mod = types.ModuleType("quest_engine")
@@ -368,6 +381,41 @@ booth._PLAN_CACHE["ms"] = 0
 t += 2000
 booth.tick(ro, t)
 check("走路: 到点→OPEN", ro.m_booth.state == "OPEN", ro.m_booth.state)
+
+# 近距直线兜底: 目标格"阻挡"（摆摊点常标在建筑格上）→ find_path None 但 ≤160px 时用直线
+rm_plan()
+write_plan(base_plan(cell=[1409, 1109]))
+_FakeFinder.PATH = None              # 模拟"寻路算不出"
+ro = FakeRobot(pos=(1130, 1050))     # 距目标 ~283px(>160, ≤800 → 远距兜底)
+t = 45000
+booth.tick(ro, t)                    # INIT→GOTO
+t += 1000
+booth.tick(ro, t)                    # GOTO: 直线兜底 → 发批次
+mv2 = [x for x in ro.sent if x[0] == 10001]
+check("走路: 近距直线兜底(目标阻挡格)发送",
+      mv2 and mv2[-1][1][1][-1] == (1409, 1109),
+      "mv2=%s ALL=%s grid=%s st=%s" % (len(mv2), ro.sent[-3:], _qe_mod._GRID, ro.m_booth.state))
+_FakeFinder.PATH = [(1409, 1109)]
+
+
+# 两步走兜底: 目标格"阻挡" → 先 A* 到最近可走格, 末尾直线到目标
+rm_plan()
+write_plan(base_plan(cell=[1409, 1109]))
+_qe_mod._GRID = _FakeGrid({(88, 69)})     # 目标格(G88,69)阻挡, 其余可走
+_FakeFinder.PATH_BY_TARGET = {(1409, 1109): None, (1400, 1096): [(1400, 1096)]}
+ro = FakeRobot(pos=(1200, 1000))
+t = 48000
+booth.tick(ro, t)                         # INIT→GOTO
+t += 1000
+booth.tick(ro, t)                         # GOTO → 两步走
+mv3 = [x for x in ro.sent if x[0] == 10001]
+check("走路: 两步走兜底(目标阻挡→先到可走格+末尾直线)",
+      mv3 and mv3[-1][1][1][-2:] == [(1400, 1096), (1409, 1109)],
+      mv3[-1:] if mv3 else None)
+_qe_mod._GRID = object()
+_FakeFinder.PATH_BY_TARGET = None
+_FakeFinder.PATH = [(1409, 1109)]
+
 
 # ================================================================ 6) 开摊超时重试上限
 rm_plan()
