@@ -2036,6 +2036,59 @@ check("F11 B③ 对话中豁免零进展清理", _okB is False and _qB.walk_pend
 check("F11 B④ 源码: __clear_nav_fields 全形态 + NAV_STALL_MS",
       "def __clear_nav_fields" in _src_f11 and "NAV_STALL_MS" in _src_f11
       and "walk_pending_click" in _src_f11)
+# C① 开战窗口内不再点下一只（5256 形态：2s 内连点两只不同怪 → 双开战 → 战斗卡死）
+_rC = fresh_robot()
+_gC = new_state()
+_rC.m_share_daily = _gC
+_qC = _rC.m_quest
+_qC.tasks[2028302] = mk_task(2028302, counters=[counter(11883, 18140, 0, 1)])
+_gC.state = "KILL"
+_qC.dyn_npc_meta = {9001: 18140}          # 本图有可点实例（若无窗口会立刻点击）
+_qC.dynamic_npcs = {9001: [12, 100, 100]}
+_rC.m_mapid = 12
+_rC.m_pose = (100, 100)
+_gC.kill_click_sent_ms = time.time() * 1000 - 1000    # 1s 前刚发过开战点击（窗口内）
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__on_kill")(_rC, _gC, _qC, time.time() * 1000)
+check("F11 C① 开战窗口内不点下一只（防双开战）",
+      _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] == [],
+      str(_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]))
+# C② 窗口超时 → 清标记放行重试（服务端未回/被拒场景）
+_gC.kill_click_sent_ms = time.time() * 1000 - 4000    # 超 3.5s 窗口
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__on_kill")(_rC, _gC, _qC, time.time() * 1000)
+check("F11 C② 窗口超时 → 清标记放行重试",
+      _gC.kill_click_sent_ms > 0 and len(_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]) > 0,
+      "sent=%s clicks=%s" % (_gC.kill_click_sent_ms, _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"][:1]))
+# C③ __click_kill 发点即记窗口
+_rC2 = fresh_robot()
+_gC2 = new_state()
+_rC2.m_share_daily = _gC2
+_qC2 = _rC2.m_quest
+_gC2.click_gap_ms = 0
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__click_kill")(_rC2, _gC2, _qC2, 9001, 18140, time.time() * 1000)
+check("F11 C③ 开战点击即记窗口时刻",
+      _gC2.kill_click_sent_ms > 0, str(_gC2.kill_click_sent_ms))
+# C④ 源码级：常量 + 战斗结束复位窗口
+check("F11 C④ 源码: KILL_START_GRACE_MS + 战斗结束复位窗口",
+      "KILL_START_GRACE_MS" in _src_f11 and "g.kill_click_sent_ms = 0" in _src_f11)
+# C⑤ 热更兼容：旧实例（缺新字段）经 __check_watchdog 首帧补齐（client.py 热更约定）
+_rC3 = fresh_robot()
+_gC3 = new_state()
+_rC3.m_share_daily = _gC3
+_qC3 = _rC3.m_quest
+_f3list = ("nav_probe_ms", "tp_retry_count", "tp_abandon_task", "tp_abandon_until_ms",
+           "kill_click_sent_ms")
+for _f3 in _f3list:
+    try:
+        delattr(_gC3, _f3)
+    except Exception:
+        pass
+getattr(S, "__check_watchdog")(_rC3, _gC3, _qC3, time.time() * 1000)
+check("F11 C⑤ 热更兼容：旧实例缺新字段 → 首帧补齐",
+      all(hasattr(_gC3, _f3) for _f3 in _f3list),
+      str([_f3 for _f3 in _f3list if not hasattr(_gC3, _f3)]))
 
 # ================================================================
 # 24) 汇总
