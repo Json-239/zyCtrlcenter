@@ -5,6 +5,9 @@
 package state
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -270,6 +273,17 @@ type State struct {
 	// 候选会反复派、被机器人 done_limit 拒（还会打断该号已转的游荡/抓鬼）。
 	// 写入点：心跳看到 done≥limit（含 state=DONE）的那一刻（event.onStatusReply）。
 	shareDailyFull map[string]string
+	// shareDailyAssigned "账号|玩法键" → "今天已成功下发该玩法"的日期串（跨日自动失效）。
+	//
+	// 为什么需要：「启动 = 恢复当前任务」（2026-09-24 用户口径）原先靠心跳 daily 判"在跑"，
+	// 但**机器人端分享日常模块没有状态持久化** —— 机器人进程一重启，心跳 daily 块就没了，
+	// 判定信号随之中断（掉任务/停机后点启动会错判成败其它链）。本台账在**下发成功**那一刻登记
+	// （launchShareDaily），可选落盘（EnableShareDailyAssignedPersist，路径
+	// <DataDir>/share_daily_assign.json）：中控/机器人重启后都能继续把"今天已派、未满"的号
+	// 恢复成神捕。**只记"派过"，不表示未满** —— 满额仍以独立满额表 + 心跳为准。
+	shareDailyAssigned map[string]string
+	// shareDailyAssignPath 台账落盘路径（空 = 纯内存，不落盘；测试/未装配场景）。
+	shareDailyAssignPath string
 
 	mu sync.RWMutex
 
@@ -384,6 +398,137 @@ func (s *State) ShareDailyFullTodayCount() int {
 		}
 	}
 	return n
+}
+
+// ------------------------------------------------ shareDailyAssigned（今日已派神捕台账）
+
+// dailyAssignKey 已派台账的键（账号 + 玩法键；与 dailyFullKey 同形状，语义独立）。
+func dailyAssignKey(account, shareKey string) string { return account + "|" + shareKey }
+
+// MarkShareDailyAssigned 记下"今天已给该号下发过该玩法"（launchShareDaily 成功下发后调）。
+//
+// 幂等；跨日惰性失效 —— 写入前顺手清掉非今日条目（不跑后台线程，落盘文件也不随天数增长）。
+// 配了落盘路径时原子写（临时文件 + rename；失败静默：台账丢一条只影响"启动续跑"的兜底，
+// 不该反过来阻塞下发主流程）。
+func (s *State) MarkShareDailyAssigned(account, shareKey string) {
+	if account == "" || shareKey == "" {
+		return
+	}
+	today := time.Now().Format("20060102")
+	s.mu.Lock()
+	if s.shareDailyAssigned == nil {
+		s.shareDailyAssigned = map[string]string{}
+	}
+	for k, d := range s.shareDailyAssigned {
+		if d != today {
+			delete(s.shareDailyAssigned, k)
+		}
+	}
+	s.shareDailyAssigned[dailyAssignKey(account, shareKey)] = today
+	path, raw := s.shareDailyAssignPath, s.marshalShareDailyAssignedLocked()
+	s.mu.Unlock()
+	writeFileAtomic(path, raw)
+}
+
+// ShareDailyAssignedToday 该号今天是否已成功下发过该玩法（跨日自动 false）。
+//
+// 用途：「启动 = 恢复当前任务」的兜底判据 —— 机器人重启后心跳 daily 丢失，但今天派过的
+// 号点启动仍应续跑神捕；是否已满另由独立满额表/心跳判（本表只记"派过"）。
+func (s *State) ShareDailyAssignedToday(account, shareKey string) bool {
+	if account == "" || shareKey == "" {
+		return false
+	}
+	s.mu.RLock()
+	day, ok := s.shareDailyAssigned[dailyAssignKey(account, shareKey)]
+	s.mu.RUnlock()
+	return ok && day == time.Now().Format("20060102")
+}
+
+// shareDailyAssignedFile 台账落盘形态（JSON；见 EnableShareDailyAssignedPersist）。
+type shareDailyAssignedFile struct {
+	// Assigned "账号|玩法键" → "YYYYMMDD"（当天已成功下发 share_daily_start 的号）。
+	Assigned  map[string]string `json:"assigned"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
+}
+
+// EnableShareDailyAssignedPersist 开启台账落盘并载入既有文件（path 空 = 关闭，纯内存）。
+//
+// 返回载入的**今日**条目数（跨日条目丢弃，惰性失效）；文件不存在 = 首次运行，
+// 返回 (0, nil)，首次 Mark 时创建。载入/解析失败不阻断启动（调用方记日志即可）。
+func (s *State) EnableShareDailyAssignedPersist(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+	s.mu.Lock()
+	s.shareDailyAssignPath = path
+	s.mu.Unlock()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil // 首次运行：等首次 Mark 创建
+		}
+		return 0, err
+	}
+	var f shareDailyAssignedFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		return 0, err
+	}
+	today := time.Now().Format("20060102")
+	n := 0
+	s.mu.Lock()
+	if s.shareDailyAssigned == nil {
+		s.shareDailyAssigned = map[string]string{}
+	}
+	for k, d := range f.Assigned {
+		if d == today { // 跨日惰性失效：只载入今天的
+			s.shareDailyAssigned[k] = d
+			n++
+		}
+	}
+	s.mu.Unlock()
+	return n, nil
+}
+
+// ShareDailyAssignedTodayCount 今天已登记"已派"的号数（面板/排查用）。
+func (s *State) ShareDailyAssignedTodayCount() int {
+	today := time.Now().Format("20060102")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, d := range s.shareDailyAssigned {
+		if d == today {
+			n++
+		}
+	}
+	return n
+}
+
+// marshalShareDailyAssignedLocked 序列化台账（须持锁调用；未配路径/序列化失败 → nil = 不写盘）。
+func (s *State) marshalShareDailyAssignedLocked() []byte {
+	if s.shareDailyAssignPath == "" {
+		return nil
+	}
+	raw, err := json.MarshalIndent(shareDailyAssignedFile{
+		Assigned: s.shareDailyAssigned, UpdatedAt: time.Now(),
+	}, "", "  ")
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// writeFileAtomic 临时文件 + rename 原子落盘（path 空/内容空跳过；失败静默）。
+// 仓库既有落盘（waterline/roampool/accounts）同款写法。
+func writeFileAtomic(path string, raw []byte) {
+	if path == "" || len(raw) == 0 {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 func (s *State) Update(account string, fn func(r *Robot)) *Robot {

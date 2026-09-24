@@ -266,6 +266,14 @@ func (a *API) launchShareDaily(accs []string) (bool, string) {
 	}
 	a.markDailyDispatch(accs) // 在途记账：候选/池配额据此防重复派
 	a.daily.track(accs, key)  // 会话记账：停策略时按它下发 stop
+	// 2026-09-24：**下发成功即登记持久台账**（所有下发路径的总入口都走这里）——
+	// 机器人进程重启后心跳 daily 块丢失，「启动 = 恢复当前任务」/候选"不让路"由台账兜底；
+	// 是否满额另由独立满额表判（台账只记"派过"）。
+	if a.St != nil {
+		for _, acc := range accs {
+			a.St.MarkShareDailyAssigned(acc, key)
+		}
+	}
 	return true, "已下发大唐神捕: " + strings.Join(accs, ", ")
 }
 

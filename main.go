@@ -69,6 +69,13 @@ func main() {
 
 	// ---- 状态 / 运行历史 ----
 	st := state.New()
+	// 2026-09-24：分享日常"今日已派"台账落盘（机器人重启后心跳 daily 丢失时，
+	// 「启动 = 恢复当前任务」靠它续跑神捕）。文件 <DataDir>/share_daily_assign.json。
+	if n, err := st.EnableShareDailyAssignedPersist(filepath.Join(cfg.DataDir, "share_daily_assign.json")); err != nil {
+		log.Printf("[SHAREDAILY] 已派台账加载失败（忽略；按未派处理）: %v", err)
+	} else if n > 0 {
+		log.Printf("[SHAREDAILY] 今日已派神捕台账已载入: %d 条（重启恢复用）", n)
+	}
 	runStore := store.New(cfg.DataDir, cfg.RunsKeepDays, cfg.RunsMaxMB)
 	if removed := runStore.CleanupOldRuns(cfg.RunsKeepDays); len(removed) > 0 {
 		log.Printf("[STORE] 已清理超过 %d 天的历史运行日志: %v", cfg.RunsKeepDays, removed)

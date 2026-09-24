@@ -714,8 +714,14 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			// 神捕号不再让路** —— 该号确实在跑神捕（机器人只在 enabled=true 时上报 daily），
 			// 定时任务据此自动捡回"掉任务/停机"的当天神捕号（对齐轮转模型）。
 			// 无记录 / 满额的仍走原让路规则（满额上面已 continue，这里复判防顺序漂移）。
+			// 2026-09-24 补：机器人进程重启后心跳 daily 丢失 → 中控侧持久台账兜底
+			//（今天派过且未见满额视为在跑；满额表命中则不续跑）。
 			assigned := false
 			if _, has := r.DailyOf(a.shareDailyKey()); has && !a.shareDailyFullToday(acc, r) {
+				assigned = true
+			}
+			if !assigned && a.St != nil && a.St.ShareDailyAssignedToday(acc, a.shareDailyKey()) &&
+				!a.shareDailyFullToday(acc, r) {
 				assigned = true
 			}
 			if k := kinds[acc]; k != "" && k != intent.KindShenbu && !assigned {

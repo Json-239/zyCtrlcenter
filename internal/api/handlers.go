@@ -815,11 +815,17 @@ func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[s
 	// 机器人只在 enabled=true 时上报 daily，所以"有条目"就是"当前确实在跑神捕"
 	//（与 CTRL_SHARE_DAILY 开关无关：开关只管意图判据的灰度，不管"恢复现状"）。
 	// 满额（含独立满额表）不走这条 → 回落意图，把神捕名额让出来。
+	// 2026-09-24 补：机器人端分享日常模块无状态持久化 —— 机器人进程一重启，心跳 daily 块
+	// 就没了（判据信号丢失）。用中控侧持久台账兜底：今天派过、且当前未见满额 → 仍按"续跑"
+	// 处理（真正的满额由独立满额表/心跳判满拦住，见 shareDailyFullToday）。
+	key := a.shareDailyKey()
 	if a.St != nil {
-		if r, ok := a.St.Get(acc); ok {
-			if e, has := r.DailyOf(a.shareDailyKey()); has && !a.shareDailyFullToday(acc, r) {
-				return intent.KindShenbu, fmt.Sprintf("今日大唐神捕 %d/%d 未满（续跑）", e.Done, e.Limit)
-			}
+		r, _ := a.St.Get(acc)
+		if e, has := r.DailyOf(key); has && !a.shareDailyFullToday(acc, r) {
+			return intent.KindShenbu, fmt.Sprintf("今日大唐神捕 %d/%d 未满（续跑）", e.Done, e.Limit)
+		}
+		if a.St.ShareDailyAssignedToday(acc, key) && !a.shareDailyFullToday(acc, r) {
+			return intent.KindShenbu, "今日大唐神捕已派未满（续跑·台账）"
 		}
 	}
 	if kind := kinds[acc]; kind != "" {
