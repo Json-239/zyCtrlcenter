@@ -1447,6 +1447,17 @@ if os.path.exists(_nav_fh):
           str(sorted(_tis_fh)))
     check("F4 链声明 chain_id 与中控下发一致（fenghuo_nav 白名单放行）",
           _navfh.get("chain_id") == "fenghuo_nav", str(_navfh.get("chain_id")))
+    # 联调契约：中控 chain 载荷 task_order 6 项（2002106 是服务端跳号，非缺环）→
+    # 次数扫描必须得到 5 个主 root（排除 2002107），且不得假设任务号连续。
+    _fh_roots_nav = getattr(S, "__main_count_roots")(_navfh, _fh)
+    check("F4 真实链载荷 → 次数扫 5 主 root（2002106 跳号不影响、2002107 排除）",
+          _fh_roots_nav == [2002101, 2002102, 2002103, 2002104, 2002105],
+          str(_fh_roots_nav))
+    check("F4 链载荷 6 项均可归属本 run（含 2002107 收尾）",
+          all(S.belongs_to_run(CFG, _fh, _t, "", "",
+                              chain_tasks=getattr(S, "__roots_from_chain")(_navfh))
+              for _t in (2002101, 2002102, 2002103, 2002104, 2002105, 2002107)),
+          str(sorted(getattr(S, "__roots_from_chain")(_navfh))))
 else:
     check("F4 链声明文件 fenghuo_nav.json 存在", False, _nav_fh)
 
