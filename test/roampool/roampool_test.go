@@ -287,7 +287,9 @@ type fakeDeps struct {
 	robots  []state.Robot
 	deficit int
 	maps    []int
-	now     time.Time // 假时钟（零值 = time.Now）；P1 在途/退避用例用它控制 Status 的判定时刻
+	// taskMaps 任务图"热读"集合（2026-09-24 降权；nil = 壳层没给 → 只用内置兜底集合）。
+	taskMaps []int
+	now      time.Time // 假时钟（零值 = time.Now）；P1 在途/退避用例用它控制 Status 的判定时刻
 
 	disp        []dispatchCall
 	stopped     [][]string
@@ -300,6 +302,9 @@ func (f *fakeDeps) deps() roampool.Deps {
 		Robots:  func() []state.Robot { return f.robots },
 		Deficit: func() int { return f.deficit },
 		Maps:    func() []int { return f.maps },
+		TaskMaps: func() []int { // 任务图热读（2026-09-24 降权）；nil = 只用内置兜底集合
+			return f.taskMaps
+		},
 		Now: func() time.Time {
 			if f.now.IsZero() {
 				return time.Now()

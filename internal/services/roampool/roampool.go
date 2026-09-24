@@ -65,7 +65,28 @@ const (
 	// idleBackoffMax 空转退避上限：连续"无动作且无活可干"的轮次把轮询间隔 ×2 拉长到它为止
 	// （一有动作/有可动作候选立刻回到 interval_sec → 缺口回填延迟不受影响）。
 	idleBackoffMax = 60 * time.Second
+
+	// DefaultTaskMapBias 任务图"虚拟负载"偏移（2026-09-24 用户拍板：任务链图机器人已很多 →
+	// 游荡"降权少去，具体根据当前图数量动态"）。语义：任务图（抓鬼刷鬼图/新手链/日常会去图）
+	// 的**有效负载 = 实际在线人数 + 本偏移**，游荡补位（人最少的图优先）与回收（人多的图先回收）
+	// 都按有效负载评分 —— 任务图人少（如空图）时仍可能被选，人多时自动避开（动态降权）。
+	// 8 ≈ 一轮 max_step(5) 全派到同一张图的量级（可配 task_map_bias；<0 关闭）。
+	DefaultTaskMapBias = 8
+	// MaxTaskMapBias 偏移上限（Validate 用）。
+	MaxTaskMapBias = 100
 )
+
+// defaultTaskMaps 任务图兜底集合（降权对象；2026-09-24 口径，来源 = 链数据）：
+//   - 抓鬼刷鬼图（zhongkui_nav.json 的 ghost_maps）：9/10/11/12/13/25/26；
+//   - 新手链 NPC 图 + 神捕/烽火 patrol_map（12/5/9/11）+ 610（烽火接取图）；
+//   - 店铺/房内小图 602、604~618（任务链会进出）。
+//
+// 运行时以壳层热读（Deps.TaskMaps，链数据里的任务图）为准并与之合并；这里兜底 ——
+// 链数据不可用时降权仍生效。配置 task_maps 非空则**完全覆盖**（人工指定）。
+var defaultTaskMaps = []int{
+	5, 6, 7, 9, 10, 11, 12, 13, 24, 25, 26,
+	602, 604, 605, 606, 607, 608, 609, 610, 611, 612, 613, 614, 615, 616, 617, 618,
+}
 
 // defaultBackoffSec 默认退避档位（秒）：60s → 120s → 300s（上限）。
 // 为什么是这个序列：机器人收到命令到上报 walk.enabled 是秒级，第一次失败多半是"拒收/走不到"，
@@ -92,6 +113,8 @@ const (
 	envReclaim  = "CTRL_ROAMPOOL_RECLAIM_ON_DEFICIT"
 	envMaps     = "CTRL_ROAMPOOL_MAPS"
 	envMode     = "CTRL_ROAMPOOL_MODE"
+	envTaskBias = "CTRL_ROAMPOOL_TASK_MAP_BIAS"
+	envTaskMaps = "CTRL_ROAMPOOL_TASK_MAPS"
 )
 
 // Config 游荡池参数（落盘 data/roampool.json，重启后保留；**默认 enabled=false**）。
@@ -105,6 +128,12 @@ type Config struct {
 	ReclaimOnDeficit bool   `json:"reclaim_on_deficit"` // 任务池缺人时立刻回收游荡号
 	Maps             []int  `json:"maps,omitempty"`     // 可选白名单（空 = 用链数据里有网格的图）
 	Mode             string `json:"mode,omitempty"`     // 游荡档位（机器人端 ROAM_PROFILES；空=默认档）
+
+	// TaskMapBias 任务图"虚拟负载"偏移（2026-09-24 降权；0 = 用默认 DefaultTaskMapBias，
+	// <0 = 关闭降权）。只影响"选哪张图/先回收谁"的排序，不剔除任务图。
+	TaskMapBias int `json:"task_map_bias,omitempty"`
+	// TaskMaps 任务图集合（降权对象；空 = 壳层热读 + 内置兜底集合；非空 = 完全按它）。
+	TaskMaps []int `json:"task_maps,omitempty"`
 
 	// InflightTTLSec 「已派发、还没生效」的判定窗口（秒；2026-09-23 P1 派发节流）。
 	InflightTTLSec int `json:"inflight_ttl_sec"`
@@ -157,6 +186,19 @@ func (c Config) Normalize() Config {
 	if len(c.Maps) > 0 {
 		c.Maps = normMaps(c.Maps)
 	}
+	// 2026-09-24 降权参数：0 = 默认偏移（8）；负 = 关闭（夹到 0）；超上限夹回。
+	if c.TaskMapBias == 0 {
+		c.TaskMapBias = DefaultTaskMapBias
+	} else if c.TaskMapBias < 0 {
+		c.TaskMapBias = 0
+	} else if c.TaskMapBias > MaxTaskMapBias {
+		c.TaskMapBias = MaxTaskMapBias
+	}
+	if len(c.TaskMaps) > 0 {
+		c.TaskMaps = normMaps(c.TaskMaps)
+	} else {
+		c.TaskMaps = nil
+	}
 	// 2026-09-23 P1：在途/退避参数夹取（0/负/超范围都回到合法值，脏配置不会引发异常动作）。
 	if c.InflightTTLSec <= 0 {
 		c.InflightTTLSec = DefaultInflightTTLSec
@@ -186,6 +228,14 @@ func (c Config) Validate() error {
 	for _, m := range c.Maps {
 		if m <= 0 {
 			return fmt.Errorf("maps 里有非法图号 %d（应为正整数）", m)
+		}
+	}
+	if c.TaskMapBias > MaxTaskMapBias {
+		return fmt.Errorf("task_map_bias 不能大于 %d（0=默认 %d，<0=关闭降权）", MaxTaskMapBias, DefaultTaskMapBias)
+	}
+	for _, m := range c.TaskMaps {
+		if m <= 0 {
+			return fmt.Errorf("task_maps 里有非法图号 %d（应为正整数）", m)
 		}
 	}
 	if c.InflightTTLSec < MinInflightTTLSec || c.InflightTTLSec > MaxInflightTTLSec {
@@ -233,6 +283,14 @@ func (c Config) ApplyEnv() (Config, []string) {
 	}
 	if v := strings.TrimSpace(os.Getenv(envMode)); v != "" {
 		c.Mode, pinned = v, append(pinned, "mode")
+	}
+	if v, ok := envInt(envTaskBias); ok {
+		c.TaskMapBias, pinned = v, append(pinned, "task_map_bias")
+	}
+	if v := strings.TrimSpace(os.Getenv(envTaskMaps)); v != "" {
+		if maps, err := parseMaps(v); err == nil {
+			c.TaskMaps, pinned = maps, append(pinned, "task_maps")
+		}
 	}
 	return c, pinned
 }
@@ -291,6 +349,10 @@ type Deps struct {
 	Deficit func() int
 	// Maps 可用游荡图（链数据里有寻路网格的图；白名单为空时用它）。
 	Maps func() []int
+	// TaskMaps 任务图"热读"集合（2026-09-24 降权）：链数据里的任务图（如抓鬼 ghost_maps）。
+	// 与内置兜底集合（defaultTaskMaps）合并后作为降权对象；配置 task_maps 非空则覆盖之。
+	// nil / 读失败 = 只用兜底集合（降权不依赖链数据可用性）。
+	TaskMaps func() []int
 	// Dispatch 下发游荡：mapid 是 int（指定图）或 "random"（随机图，每号自抽）；
 	// 返回**实际下发成功**的号数（失败返回 err）。
 	Dispatch func(accounts []string, mapid any, mode string, minutes int) (int, error)
@@ -312,6 +374,8 @@ type Status struct {
 	ReclaimOnDeficit bool   `json:"reclaim_on_deficit"`
 	Maps             []int  `json:"maps,omitempty"`
 	Mode             string `json:"mode,omitempty"`
+	TaskMapBias      int    `json:"task_map_bias"`  // 生效的任务图虚拟负载偏移（0 = 关闭降权）
+	TaskMapCount     int    `json:"task_map_count"` // 生效的降权任务图张数
 	InflightTTLSec   int    `json:"inflight_ttl_sec"`
 	BackoffSec       []int  `json:"backoff_sec,omitempty"`
 	// Running 当前在游荡的号数；Idle 当前空闲（无任务/无抓鬼/未游荡/非战斗）在线号数；
@@ -397,9 +461,9 @@ func (k *Keeper) Load() error {
 	k.mu.Lock()
 	k.cfg = cfg
 	k.mu.Unlock()
-	k.logf("[ROAMPOOL] 已恢复参数：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 在途TTL=%ds 退避=%v",
+	k.logf("[ROAMPOOL] 已恢复参数：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 任务图降权=+%d/%v 在途TTL=%ds 退避=%v",
 		cfg.Enabled, cfg.Target, cfg.IntervalSec, cfg.MaxStep, cfg.Minutes, cfg.Balance, cfg.ReclaimOnDeficit, cfg.Maps,
-		cfg.InflightTTLSec, cfg.BackoffSec)
+		cfg.TaskMapBias, cfg.TaskMaps, cfg.InflightTTLSec, cfg.BackoffSec)
 	if len(pinned) > 0 {
 		k.logf("[ROAMPOOL] 环境变量覆盖了：%s（优先级：env > 文件 > 默认）", strings.Join(pinned, ","))
 	}
@@ -451,9 +515,9 @@ func (k *Keeper) SetConfig(c Config) error {
 	k.cfg = c
 	k.mu.Unlock()
 	k.save()
-	k.logf("[ROAMPOOL] 参数已更新：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 档位=%q 在途TTL=%ds 退避=%v",
+	k.logf("[ROAMPOOL] 参数已更新：enabled=%v target=%d 间隔=%ds 单轮≤%d 限时=%d 分钟 均匀=%v 立刻回收=%v 白名单=%v 档位=%q 任务图降权=+%d/%v 在途TTL=%ds 退避=%v",
 		c.Enabled, c.Target, c.IntervalSec, c.MaxStep, c.Minutes, c.Balance, c.ReclaimOnDeficit, c.Maps, c.Mode,
-		c.InflightTTLSec, c.BackoffSec)
+		c.TaskMapBias, c.TaskMaps, c.InflightTTLSec, c.BackoffSec)
 	return nil
 }
 
@@ -538,6 +602,21 @@ func MapCounts(robots []state.Robot) map[int]int {
 // MapLoads 把"候选游荡图"摊平成 MapLoad 列表（图号升序，stable）：每张候选图一行，
 // Count = 该图当前在线号数（没人的图 Count=0 → 优先被派到）。
 func MapLoads(robots []state.Robot, maps []int) []MapLoad {
+	return MapLoadsAs(robots, maps, nil, 0)
+}
+
+// MapLoadsAs 带"任务图虚拟负载偏移"的候选图负载（2026-09-24 降权）：
+// Count = 该图在线号数 +（该图是任务图 ? bias : 0）—— **有效负载**。
+//
+// BalanceAssign（人最少的图优先）与 PickReclaimAs（人多的图先回收）都按有效负载评分：
+// 任务图上做任务的号已多，虚拟偏移把它推到"人多"一侧 → 游荡补位自动避开；而任务图很空
+// （实际人数少）时有效负载仍可能最低 → 照样会被派（"降权少去，不去也行"的动态口径）。
+//
+// bias<=0 或 taskSet 为 nil = 无偏移（与 MapLoads 等价）。
+func MapLoadsAs(robots []state.Robot, maps []int, taskSet map[int]bool, bias int) []MapLoad {
+	if bias < 0 {
+		bias = 0
+	}
 	counts := MapCounts(robots)
 	out := make([]MapLoad, 0, len(maps))
 	seen := map[int]bool{}
@@ -546,7 +625,11 @@ func MapLoads(robots []state.Robot, maps []int) []MapLoad {
 			continue
 		}
 		seen[m] = true
-		out = append(out, MapLoad{MapID: m, Count: counts[m]})
+		c := counts[m]
+		if bias > 0 && taskSet[m] {
+			c += bias
+		}
+		out = append(out, MapLoad{MapID: m, Count: c})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].MapID < out[j].MapID })
 	return out
@@ -565,10 +648,28 @@ func MapLoads(robots []state.Robot, maps []int) []MapLoad {
 // 90s 后机器人端 auto_roam 又派去游荡 → 回收-重派来回损耗（实测 robot0001108/1127/1176
 // 各被回收 20+ 次，游荡产出被反复清空）。这两类号留在游荡池继续游荡更有价值。
 func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) []string {
+	return PickReclaimAs(robots, n, eligible, nil, 0)
+}
+
+// PickReclaimAs 带"任务图虚拟负载偏移"的回收（2026-09-24 降权）：排序用的"图负载"取有效负载
+// （人数 + 任务图偏移）—— 任务图天然负载高 → 其上的游荡号**更早被回收**（别滞留在任务图），
+// 与"游荡少去任务图"同向。其余口径与 PickReclaim 完全一致（领双置顶/并列按账号/资格闸）。
+func PickReclaimAs(robots []state.Robot, n int, eligible func(state.Robot) bool,
+	taskSet map[int]bool, bias int) []string {
 	if n <= 0 {
 		return nil
 	}
+	if bias < 0 {
+		bias = 0
+	}
 	load := MapCounts(robots) // 各图的在线号数（含非游荡号：口径是"这张图挤了多少我们的号"）
+	effLoad := func(mapID int) int {
+		c := load[mapID]
+		if bias > 0 && taskSet[mapID] {
+			c += bias
+		}
+		return c
+	}
 	type cand struct {
 		account string
 		count   int
@@ -585,7 +686,7 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 		if eligible != nil && !eligible(r) {
 			continue // 2026-09-22 P0：回收后进不了任务池的号不回收（详见函数头注释）
 		}
-		cands = append(cands, cand{account: r.Account, count: load[r.MapID],
+		cands = append(cands, cand{account: r.Account, count: effLoad(r.MapID),
 			prio: r.DoubleClaimedToday()})
 	}
 	if len(cands) == 0 {
@@ -750,6 +851,54 @@ func (k *Keeper) deficit() int {
 	return k.d.Deficit()
 }
 
+// taskMapSet 本轮"任务图降权"集合（2026-09-24）：
+//   - 配置 task_maps 非空 → **完全按它**（人工指定，含替换兜底）；
+//   - 否则 = 内置兜底集合（defaultTaskMaps）∪ 壳层热读（Deps.TaskMaps，链数据里的任务图）。
+//
+// 偏移为 0（关闭降权）时返回 nil（省一次集合构造；调用方按 nil = 无偏移处理）。
+func (k *Keeper) taskMapSet(cfg Config) map[int]bool {
+	if cfg.TaskMapBias <= 0 {
+		return nil
+	}
+	src := cfg.TaskMaps
+	if len(src) == 0 {
+		src = make([]int, 0, len(defaultTaskMaps)+8)
+		src = append(src, defaultTaskMaps...)
+		if k.d.TaskMaps != nil {
+			src = append(src, k.d.TaskMaps()...)
+		}
+	}
+	out := make(map[int]bool, len(src))
+	for _, m := range src {
+		if m > 0 {
+			out[m] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// taskBiasNote 动作文案里的降权说明（没开降权/没有任务图 → 空串）。
+// maps 非空时列出**候选图里命中降权**的图号（"选了哪些任务图"的日志口径）；
+// 为空（回收路径不取候选图）则只报偏移与集合大小。
+func taskBiasNote(taskSet map[int]bool, bias int, maps []int) string {
+	if bias <= 0 || len(taskSet) == 0 {
+		return ""
+	}
+	hits := make([]int, 0, 4)
+	for _, m := range maps {
+		if taskSet[m] {
+			hits = append(hits, m)
+		}
+	}
+	if len(hits) == 0 {
+		return fmt.Sprintf("；任务图降权 +%d（%d 张）", bias, len(taskSet))
+	}
+	return fmt.Sprintf("；任务图降权 +%d（候选命中 %v，共 %d 张）", bias, hits, len(taskSet))
+}
+
 // roamMaps 本轮可用的游荡图：白名单（cfg.Maps）∩ 链数据里有网格的图（Deps.Maps）。
 // 白名单为空 → 全部有网格的图。白名单里有图没有网格 → **明确记日志**（不静默丢项，warn=true 时）。
 // Status 也用同一份口径（warn=false：面板每 15 秒读一次，别刷日志）。
@@ -799,12 +948,14 @@ func (k *Keeper) Status() Status {
 		}
 	}
 	inflight, pending := k.inflightView(now, cfg)
+	taskSet := k.taskMapSet(cfg) // 生效的降权集合（面板可见：偏移 + 张数）
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return Status{
 		Enabled: cfg.Enabled, Target: cfg.Target, IntervalSec: cfg.IntervalSec, MaxStep: cfg.MaxStep,
 		Minutes: cfg.Minutes, Balance: cfg.Balance, ReclaimOnDeficit: cfg.ReclaimOnDeficit,
 		Maps: cfg.Maps, Mode: cfg.Mode,
+		TaskMapBias: cfg.TaskMapBias, TaskMapCount: len(taskSet),
 		InflightTTLSec: cfg.InflightTTLSec, BackoffSec: cfg.BackoffSec,
 		Running: running, Idle: idle, Deficit: k.deficit(), MapCount: mapCount,
 		InflightPending: pending, Inflight: inflight, IdleStreak: k.idleStreak,
@@ -845,10 +996,11 @@ func (k *Keeper) Tick(now time.Time) bool {
 	k.mu.Unlock()
 
 	deficit := k.deficit()
+	taskSet := k.taskMapSet(cfg) // 2026-09-24 降权：任务图集合（nil = 关闭/无任务图）
 	// ① 回收优先：任务池缺人 → 把游荡号还给任务池（本轮不再补位，名额让给任务池）
 	if deficit > 0 && cfg.ReclaimOnDeficit {
 		n := minInt(deficit, cfg.MaxStep, running)
-		picked := PickReclaim(robots, n, k.d.ReclaimEligible)
+		picked := PickReclaimAs(robots, n, k.d.ReclaimEligible, taskSet, cfg.TaskMapBias)
 		if len(picked) == 0 {
 			k.noop(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running),
 				"noreclaim|d"+notch(deficit)+"|i"+notch(idleN), now)
@@ -862,8 +1014,8 @@ func (k *Keeper) Tick(now time.Time) bool {
 			return false
 		}
 		k.noteAction(actionReclaim, len(sent),
-			fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少）：%s",
-				len(sent), deficit, strings.Join(sent, ",")), now)
+			fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少%s）：%s",
+				len(sent), deficit, taskBiasNote(taskSet, cfg.TaskMapBias, nil), strings.Join(sent, ",")), now)
 		k.markRound(true)
 		return true
 	}
@@ -919,7 +1071,9 @@ func (k *Keeper) Tick(now time.Time) bool {
 		k.markRound(false)
 		return false
 	}
-	groups := BalanceAssign(idle, MapLoads(robots, maps), len(idle))
+	// 2026-09-24 降权：候选图负载用**有效负载**（任务图 +TaskMapBias）—— BalanceAssign 的
+	// "人最少的图优先"自动少去任务图（任务图很空时仍可能被选；人多时避开）。
+	groups := BalanceAssign(idle, MapLoadsAs(robots, maps, taskSet, cfg.TaskMapBias), len(idle))
 	sent := map[int][]string{} // 只记**真的下发成功**的图（失败的不写进动作文案，别虚报）
 	for _, m := range sortedKeys(groups) {
 		got, err := k.doDispatch(groups[m], m)
@@ -936,8 +1090,9 @@ func (k *Keeper) Tick(now time.Time) bool {
 		return false
 	}
 	k.noteAction(actionDispatch, countAssigned(sent),
-		fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d）%s",
-			countAssigned(sent), assignText(sent), running, cfg.Target, excessNote), now)
+		fmt.Sprintf("补位 %d 个 → %s（在游荡 %d / 目标 %d%s）%s",
+			countAssigned(sent), assignText(sent), running, cfg.Target,
+			taskBiasNote(taskSet, cfg.TaskMapBias, maps), excessNote), now)
 	k.markRound(true)
 	return true
 }

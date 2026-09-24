@@ -232,13 +232,16 @@ func TestFenghuoLedgerAndFullIsolation(t *testing.T) {
 	if n := candF(); n != 1 {
 		t.Fatalf("池内可用、无意图的 45 级号应进 fenghuo 候选（基准）: %v", n)
 	}
+	// 2026-09-24 二次修正：跨日常让路**不再看另一玩法池启用** —— 号当天已派神捕且未满，
+	// fenghuo 就不该抢（两个池互为"另一个日常"，会互相顶掉；判据 = 心跳或台账命中且未满）。
 	env.st.MarkShareDailyAssigned(acc2, "share_daily_大唐神捕")
-	if n := candF(); n != 1 {
-		t.Fatalf("神捕台账命中不该影响 fenghuo 候选（按玩法键隔离）: %v", n)
+	if n := candF(); n != 0 {
+		t.Fatalf("神捕已派未满 → fenghuo 候选应让路（跨日常互斥，2026-09-24 二次修正）: %v", n)
 	}
+	// 满额 = 自由号 → 让路解除（按玩法键隔离：神捕满额不影响 fenghuo 自己的名额）
 	env.st.MarkShareDailyFull(acc2, "share_daily_大唐神捕")
 	if n := candF(); n != 1 {
-		t.Fatalf("神捕满额表命中不该影响 fenghuo 候选（按玩法键隔离）: %v", n)
+		t.Fatalf("神捕满额 = 自由号 → fenghuo 候选应恢复: %v", n)
 	}
 	env.st.MarkShareDailyFull(acc2, "share_daily_宫廷10")
 	if n := candF(); n != 0 {
@@ -311,8 +314,11 @@ func TestStartAutoWithFenghuoFlagDispatches(t *testing.T) {
 	}
 }
 
-// 抓鬼让路：烽火池启用 + 该号当天烽火未满（心跳）→ 不派 ghost_start；池停用 → 回抓鬼。
-func TestGhostYieldsToFenghuoWhenPoolEnabled(t *testing.T) {
+// 抓鬼让路（2026-09-24 二次修正）：该号当天烽火未满（心跳在跑）→ 不派 ghost_start ——
+// **不再要求烽火池启用**（P1 灰度是手动派 3 个号、池未启用；旧口径会误放行 →
+// RESTORE/reghost 的 ghost_start 把在跑的烽火顶掉 → 点钟馗卡死 → 熔断，robot0001029 实证）。
+// 停用（面板 = 清台账 + 停会话）后 → 回抓鬼（fcf923e 口径）。
+func TestGhostYieldsToFenghuo(t *testing.T) {
 	env := newTestEnv(t, "")
 	acc := "robot0001002@xy3.com"
 	feedRobot(t, env, acc, map[string]any{
@@ -326,9 +332,9 @@ func TestGhostYieldsToFenghuoWhenPoolEnabled(t *testing.T) {
 		n, _ := cands["ghost"].(float64)
 		return n
 	}
-	// 池未启用：不让路（对照）
-	if n := ghostN(); n != 1 {
-		t.Fatalf("烽火池未启用时应照常进抓鬼候选（对照）: %v", n)
+	// 池未启用（灰度手动派发）：心跳在跑未满 → 照让路（新口径；旧口径这里放行 → 顶掉事故）
+	if n := ghostN(); n != 0 {
+		t.Fatalf("烽火未满（在跑）→ 抓鬼候选应让路（池未启用也一样：保护手动派发的灰度号）: %v", n)
 	}
 	if err := env.api.AutoTask.Start(autotask.KindFenghuo, autotask.Config{
 		Kind: autotask.KindFenghuo, IntervalSec: 600, TargetOnline: 5, BatchMin: 1, BatchMax: 1,
@@ -338,9 +344,13 @@ func TestGhostYieldsToFenghuoWhenPoolEnabled(t *testing.T) {
 	if n := ghostN(); n != 0 {
 		t.Fatalf("烽火池启用且该号当天未满 → 抓鬼候选应让路: %v", n)
 	}
-	env.api.AutoTask.Stop(autotask.KindFenghuo)
+	// 面板停用（HTTP 路径）：清台账 + 在跑号收工；模拟机器人不再上报 daily → 回抓鬼
+	if _, res := postJSON(t, env.srv.URL+"/api/autotask/stop", map[string]any{"kind": "fenghuo"}, nil); res["ok"] != true {
+		t.Fatalf("停用烽火失败: %v", res)
+	}
+	feedRobot(t, env, acc, map[string]any{"daily": nil}) // 模拟机器人收到 share_daily_stop：心跳不再带 daily
 	if n := ghostN(); n != 1 {
-		t.Fatalf("烽火池停用 = 这些号回抓鬼（不让路，否则两头不跑）: %v", n)
+		t.Fatalf("烽火停用（记录作废+停会话）→ 这些号回抓鬼（不让路，否则两头不跑）: %v", n)
 	}
 }
 

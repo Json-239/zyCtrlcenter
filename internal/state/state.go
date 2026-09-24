@@ -444,6 +444,35 @@ func (s *State) ShareDailyAssignedToday(account, shareKey string) bool {
 	return ok && day == time.Now().Format("20060102")
 }
 
+// ClearShareDailyAssigned 清掉**某玩法**的全部"今日已派"台账（面板停用该玩法池时调；2026-09-24）。
+//
+// 语义：停用 = 该玩法今天派过的记录作废 —— 抓鬼让路（api.shareDailyBusyForGhost）据此停止
+// 让路，这些号回抓鬼（保持 fcf923e 口径：池停用不该让号两头不跑）。**灰度玩法**（池从未启用、
+// 用户手动派号）不走这里，台账保留 → 让路继续保护在跑/已派的号（2026-09-24 RESTORE 误补发
+// 事故：robot0001029 烽火 / robot0005278 神捕 被补发 ghost_start 顶掉 → 熔断）。
+//
+// 返回清掉的条目数；配了落盘路径时原子写盘（失败静默，同 Mark 口径）。
+func (s *State) ClearShareDailyAssigned(shareKey string) int {
+	if shareKey == "" {
+		return 0
+	}
+	suffix := "|" + shareKey
+	s.mu.Lock()
+	n := 0
+	for k := range s.shareDailyAssigned {
+		if strings.HasSuffix(k, suffix) {
+			delete(s.shareDailyAssigned, k)
+			n++
+		}
+	}
+	path, raw := s.shareDailyAssignPath, s.marshalShareDailyAssignedLocked()
+	s.mu.Unlock()
+	if n > 0 {
+		writeFileAtomic(path, raw)
+	}
+	return n
+}
+
 // shareDailyAssignedFile 台账落盘形态（JSON；见 EnableShareDailyAssignedPersist）。
 type shareDailyAssignedFile struct {
 	// Assigned "账号|玩法键" → "YYYYMMDD"（当天已成功下发 share_daily_start 的号）。

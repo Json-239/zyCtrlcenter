@@ -80,6 +80,12 @@ func (a *API) LoadAutoTask() {
 	for _, k := range autotask.Kinds {
 		it, ok := f.Tasks[string(k)]
 		if !ok || !it.Enabled {
+			// 2026-09-24：未启用的分享日常玩法 —— 顺手清"今日已派"台账（幂等兜底）。
+			// 停用动作发生在 handleAutoTaskStop（那里已清）；这里是跨重启的历史残留兜底，
+			// 保证"该玩法未启用 ⇒ 不让路 ⇒ 号回抓鬼"在重启后也成立（口径见 shareDailyBusyForGhost）。
+			if _, isDaily := shareDailyKindFromString(string(k)); isDaily {
+				a.clearShareDailyAssignedOf(k, "启动时该玩法未启用")
+			}
 			continue // 上次没开（或没记录）→ 保持停止，不擅自拉起
 		}
 		cfg := it.Config

@@ -83,9 +83,33 @@ func (a *API) ReghostDeps() reghost.Deps {
 					"accounts": []any{[]string{acc, pwd}}}, "reghost_add")
 		},
 		Launch: func(acc string) bool {
+			// 2026-09-24（RESTORE 误补发事故修复）：重登恢复**不再一律按 ghost/newbie 二分**——
+			//   - 意图 = shenbu/fenghuo（分享日常）→ 按该玩法补发 share_daily_start（恢复当前任务）；
+			//   - 意图 = ghost/未知/其它 → 若该号当天有"已派/在跑且未满"的日常 →
+			//     **按该日常恢复**，绝不补发 ghost_start。
+			// 背景（现场实证）：robot0001029（烽火）16:18:37 任务卡住重登，心跳 daily 丢失 →
+			// 意图被判回 ghost → 16:18:45 补发 ghost_start（机器人端日常与抓鬼互斥）→ 日常被顶掉
+			// →点钟馗连续无对话卡死（16:19:12 起循环）→ 当日熔断；robot0005278（神捕）同款。
+			// 判据与抓鬼候选/恢复引擎让路共用 shareDailyBusyForGhost（心跳或台账命中且未满）。
 			kind := autotask.KindGhost
-			if kinds, _ := a.intentKinds(); kinds[acc] == intent.KindNewbie {
+			kinds, _ := a.intentKinds()
+			switch k := kinds[acc]; k {
+			case intent.KindNewbie:
 				kind = autotask.KindNewbie
+			case intent.KindShenbu:
+				kind = autotask.KindShenbu
+			case intent.KindFenghuo:
+				kind = autotask.KindFenghuo
+			default:
+				if a.St != nil {
+					if r, ok := a.St.Get(acc); ok {
+						if kd, busy := a.shareDailyBusyForGhost(acc, r); busy {
+							kind = autotask.Kind(kd)
+							a.Log.Printf("[REGHOST] %s 意图=%q 但今日%s未满（已派/在跑）→ 按日常恢复（不补抓鬼）",
+								acc, string(k), kind.Label())
+						}
+					}
+				}
 			}
 			ok, msg := a.LaunchTask(kind, []string{acc})
 			if !ok {
@@ -1156,6 +1180,18 @@ func (a *API) handleAutoTaskStop(w http.ResponseWriter, r *http.Request) {
 		// **该玩法**在跑的号收工（否则号会一直跑到日限，用户观感"停不住"）。
 		if n := a.shareDailyStopAllOf(kind, kind.Label()+"定时任务已停止"); n > 0 {
 			msg += fmt.Sprintf("；已给 %d 个在跑的号下发 share_daily_stop 收工", n)
+		}
+		// 2026-09-24 二次修正：**停用 = 当天"已派"台账作废** —— 否则抓鬼让路
+		// （shareDailyBusyForGhost）会继续按台账拦着这些号，号既不被该池自动派、又进不了
+		// 抓鬼（fcf923e 修过的"两头不跑"）。清台账后让路自然失效 → 回抓鬼。
+		// （灰度玩法池从未启用，不走这里 → 台账保留，让路继续保护用户手动派的号。）
+		if n := a.clearShareDailyAssignedOf(kind, kind.Label()+"定时任务已停止"); n > 0 {
+			msg += fmt.Sprintf("；已清 %d 条今日已派台账（这些号回抓鬼）", n)
+		}
+		// 意图遗留也要一并改判：抓鬼候选对"别的链在用"（意图=shenbu/fenghuo）的号让路 ——
+		// 停用后意图不改，这些号当天既进不了已停用的日常池、又进不了抓鬼池（同样"两头不跑"）。
+		if n := a.reassignDailyIntentToGhostOf(kind, kind.Label()+"池已停用 → 回抓鬼"); n > 0 {
+			msg += fmt.Sprintf("；%d 个号的意图改判为抓鬼", n)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": a.AutoTask.States()[kind], "msg": msg})

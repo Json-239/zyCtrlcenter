@@ -34,6 +34,7 @@ func (a *API) RoampoolDeps() roampool.Deps {
 		ReclaimEligible: a.roamReclaimEligible,
 		Deficit:         a.roampoolDeficit,
 		Maps:            a.roampoolMaps,
+		TaskMaps:        a.roampoolTaskMaps,
 		Dispatch:        a.roampoolDispatch,
 		Stop:            a.roampoolStop,
 		Now:             time.Now, // P1：Status 算"在途/退避"用
@@ -142,6 +143,23 @@ func (a *API) roampoolMaps() []int {
 	return out
 }
 
+// roampoolTaskMaps 任务图"热读"集合（2026-09-24 游荡降权）：链数据里任务链会去到的图 ——
+// 目前取抓鬼导航声明的 ghost_maps（zhongkui_nav.json；动态跟随链数据变化）。
+//
+// keeper 侧会与内置兜底集合（roampool.defaultTaskMaps：新手链/神捕/烽火 patrol 图 + 店铺小图）
+// 合并作为降权对象；这里失败/为空**不刷日志**（keeper 每轮都调）—— 降权不依赖链数据可用性。
+func (a *API) roampoolTaskMaps() []int {
+	nav, err := a.chainPayloads().Ghost()
+	if err != nil {
+		return nil
+	}
+	ms, err := ghostMapsOf(nav)
+	if err != nil {
+		return nil
+	}
+	return ms
+}
+
 // roampoolDispatch 下发游荡（走面板同一个 DispatchRoam）。
 func (a *API) roampoolDispatch(accounts []string, mapid any, mode string, minutes int) (int, error) {
 	res := a.DispatchRoam(accounts, mapid, mode, minutes)
@@ -215,6 +233,7 @@ func (a *API) roampoolSnapshot() map[string]any {
 		"enabled": st.Enabled, "target": st.Target, "interval_sec": st.IntervalSec, "max_step": st.MaxStep,
 		"minutes": st.Minutes, "balance": st.Balance, "reclaim_on_deficit": st.ReclaimOnDeficit,
 		"maps": st.Maps, "mode": st.Mode,
+		"task_map_bias": st.TaskMapBias, "task_map_count": st.TaskMapCount,
 		"inflight_ttl_sec": st.InflightTTLSec, "backoff_sec": st.BackoffSec,
 		"running": st.Running, "idle": st.Idle, "deficit": st.Deficit, "map_count": st.MapCount,
 		"inflight_pending": st.InflightPending, "inflight": st.Inflight, "idle_streak": st.IdleStreak,
@@ -272,6 +291,22 @@ func (a *API) handleRoampoolPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := body["mode"]; ok {
 		cfg.Mode = strings.TrimSpace(toStr(body["mode"]))
+	}
+	// 2026-09-24 游荡降权：任务图虚拟负载偏移（0=默认 8，<0=关闭）+ 任务图集合（空=热读+兜底）。
+	if _, ok := body["task_map_bias"]; ok {
+		cfg.TaskMapBias = toInt(body["task_map_bias"], cfg.TaskMapBias)
+	}
+	if _, ok := body["task_maps"]; ok {
+		if isEmptyMapsVal(body["task_maps"]) {
+			cfg.TaskMaps = nil // 清空：回到"热读 + 内置兜底"
+		} else {
+			list, err := parseMapList(body["task_maps"])
+			if err != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "task_maps 非法：" + err.Error()})
+				return
+			}
+			cfg.TaskMaps = list
+		}
 	}
 	// 2026-09-23 P1（派发节流）：在途 TTL 与退避档位（可热改；backoff_sec 给空数组 = 恢复默认）。
 	if _, ok := body["inflight_ttl_sec"]; ok {

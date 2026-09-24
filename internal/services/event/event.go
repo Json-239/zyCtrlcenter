@@ -373,6 +373,17 @@ func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, 
 		return
 	}
 	dec := h.Intents.Decider().DecideDailyStates(level, chainDone, h.dailyInfoOf(account))
+	// 2026-09-24（RESTORE 误补发事故）：**台账兜底** —— 机器人端分享日常无状态持久化，
+	// 重登/进程重启后心跳 daily 丢失；单看心跳会把"当天在跑日常且未满"的号判回抓鬼
+	//（现场 robot0001029：16:18:42 重登瞬间 fenghuo → ghost），随后 RESTORE/reghost 按
+	// ghost 意图补发 ghost_start 把日常顶掉 → 点钟馗卡死 → 熔断（robot0005278 同款）。
+	// 口径与 handlers.decideKind 的「续跑·台账」一致：台账命中且未见满额 → 维持该玩法意图；
+	// 满额号照旧判抓鬼（名额让出来）。池停用时台账已被清（handleAutoTaskStop），不受影响。
+	if dec.Known && dec.Kind == intent.KindGhost {
+		if k, why, ok := h.dailyAssignedIntent(account); ok {
+			dec = intent.Decision{Known: true, Kind: k, Reason: why}
+		}
+	}
 	prev, changed, err := h.Intents.Apply(account, dec, zone, source)
 	if err != nil || !changed {
 		return
@@ -384,6 +395,39 @@ func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, 
 	h.Store.LogEvent(map[string]any{"type": "intent", "account": account, "zone": zone,
 		"kind": string(dec.Kind), "prev": string(prev.Kind), "chain_id": dec.ChainID, "msg": msg})
 	h.Log.Printf("[INTENT] %s %s", account, msg)
+}
+
+// dailyAssignedIntent 台账兜底（2026-09-24）：该号今天"已派该日常且未见满额" → 维持该玩法
+// 意图（按家族固定次序 shenbu → fenghuo 取第一个命中）。判据 = 中控持久台账
+// （state.ShareDailyAssignedToday）+ 满额双闸（独立满额表 / 心跳 daily），与
+// handlers.decideKind 的「续跑·台账」同款 —— 心跳丢失（重登/机器人进程重启）时意图不丢日常。
+func (h *Handler) dailyAssignedIntent(account string) (intent.Kind, string, bool) {
+	if h.St == nil || h.Intents == nil || account == "" {
+		return "", "", false
+	}
+	r, ok := h.St.Get(account)
+	if !ok {
+		return "", "", false
+	}
+	dc := h.Intents.Decider()
+	pairs := []struct {
+		kind  intent.Kind
+		key   string
+		label string
+	}{
+		{intent.KindShenbu, dc.ShareDailyKeyOf(), "大唐神捕"},
+		{intent.KindFenghuo, dc.FenghuoKeyOf(), "烽火大唐"},
+	}
+	for _, p := range pairs {
+		if p.key == "" || !h.St.ShareDailyAssignedToday(account, p.key) {
+			continue
+		}
+		if h.St.ShareDailyFullToday(account, p.key) || r.DailyFull(p.key) {
+			continue // 满额：自由号 → 照旧判抓鬼（把该玩法名额让出来）
+		}
+		return p.kind, "今日" + p.label + "已派未满（续跑·台账）", true
+	}
+	return "", "", false
 }
 
 // dailyInfoOf 该号分享日常家族的判据输入（心跳 daily 块；没有 = 未知 → 不判该玩法）。

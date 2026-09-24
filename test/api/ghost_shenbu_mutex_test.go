@@ -10,15 +10,17 @@
 //	   无台账 → 进（对照）；心跳命中同理。
 //	② 恢复引擎闸（GhostSkipFunc）：台账/心跳命中未满 → skip + 原因；满额/无台账 → 不 skip。
 //
-// 2026-09-24 缺口修复（本文件同时钉住）：让路**仅在神捕池启用（enabled）时生效** ——
-// 池停用后这些号既不会被神捕池自动派、再拦抓鬼就是"两头不跑"空烧到跨日；口径：池停用
-// = 回抓鬼（台账保留，重新启用后候选照旧能捡回）。池启用状态读 Runner.EnabledNoLock
-// （无锁，Start/Stop 的 atomic 镜像；持锁回调里可安全调用）。
+// 2026-09-24 二次修正（本文件同时钉住）：让路不再看"池启用"（灰度玩法池从未启用、
+// 用户手动派号，旧口径会误放行 → RESTORE/reghost 补发 ghost_start 顶掉在跑的日常，
+// robot0001029 实证 → 熔断）；改为**停用（面板）时清该玩法台账** —— 停用 = 当天"已派"
+// 记录作废 → 让路失效、回抓鬼（fcf923e 的"两头不跑"口径保持；清台账实现见
+// state.ClearShareDailyAssigned / api.clearShareDailyAssignedOf）。
 package api_test
 
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"zyctrlcenter/internal/services/accounts"
 	"zyctrlcenter/internal/services/autotask"
@@ -158,10 +160,15 @@ func TestGhostSkipFuncYieldsToDailyHeartbeat(t *testing.T) {
 	}
 }
 
-// 2026-09-24 缺口修复：让路**仅在神捕池启用时生效** —— 池停用（enabled=false）的号
-// 既不会被神捕池自动派、再拦抓鬼就是"两头不跑"空烧到跨日；口径：池停用 = 回抓鬼。
-// 同一组信号（台账 / 心跳）走三态：池启用拦 → Stop 放行 → 重新 Start 恢复拦。
-func TestGhostYieldOnlyWhileShenbuPoolEnabled(t *testing.T) {
+// 2026-09-24 二次修正：**停用（面板）= 当天台账作废** —— 停用走 HTTP（handleAutoTaskStop），
+// 会清该玩法台账 + 给在跑号下发 share_daily_stop；让路随之失效 → 这些号回抓鬼（fcf923e 口径）。
+//
+// 为什么从"池启用前提"改成"停用清台账"：旧实现让路要看池 EnabledNoLock —— 灰度玩法（池从未
+// 启用、用户手动派号，如烽火 P1 的 3 个号）会被误放行，RESTORE/reghost 的 ghost_start 把它们
+// 顶掉（robot0001029 实证 → 点钟馗卡死 → 熔断）。新口径下"从未启用"不清台账 → 让路继续保护。
+//
+// 三态：池启用拦 → 面板停用（清台账 + 停会话）放行回抓鬼 → 重新启用后无台账不再拦（记录已作废）。
+func TestGhostYieldRespectsShenbuPoolStop(t *testing.T) {
 	env := newTestEnv(t, "")
 	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
 	defer rb.Close()
@@ -183,7 +190,7 @@ func TestGhostYieldOnlyWhileShenbuPoolEnabled(t *testing.T) {
 
 	skip := env.api.GhostSkipFunc()
 
-	// ① 池启用：两种信号都拦（7e12197 的让路回归，对照 Tracks 池停用分支）。
+	// ① 池启用：两种信号都拦（7e12197 的让路回归，对照下面的停用分支）。
 	startShenbuPool(t, env)
 	for _, a := range []string{acc, hb} {
 		if blocked, why := skip("ghost", a); !blocked || !strings.Contains(why, "神捕") {
@@ -194,33 +201,44 @@ func TestGhostYieldOnlyWhileShenbuPoolEnabled(t *testing.T) {
 		t.Fatalf("池启用：两号都应让路，实得抓鬼候选 %v", n)
 	}
 
-	// ② 池停用：同信号全部放行（回抓鬼，不再两头不跑）。
-	env.api.AutoTask.Stop(autotask.KindShenbu)
+	// ② 面板停用（HTTP 路径 = 生产唯一入口）：台账被清 + 在跑号收工；
+	//    机器人收到 share_daily_stop 后不再上报 daily（模拟心跳条目消失）→ 让路失效、回抓鬼。
+	if _, res := postJSON(t, env.srv.URL+"/api/autotask/stop", map[string]any{"kind": "shenbu"}, nil); res["ok"] != true {
+		t.Fatalf("停用神捕失败: %v", res)
+	}
+	if env.st.ShareDailyAssignedToday(acc, ghostMutexShareKey) {
+		t.Fatal("停用 = 当天台账作废（须清空），否则让路会一直拦着这些号（两头不跑）")
+	}
+	feedRobot(t, env, hb, map[string]any{"daily": nil}) // 模拟机器人收到 share_daily_stop：心跳不再带 daily
 	for _, a := range []string{acc, hb} {
 		if blocked, why := skip("ghost", a); blocked {
-			t.Fatalf("池停用：%s 应放行回抓鬼，实被拦: %s", a, why)
+			t.Fatalf("停用后：%s 应放行回抓鬼，实被拦: %s", a, why)
 		}
 	}
 	if n := ghostCandCount(t, env); n != 2 {
-		t.Fatalf("池停用：两号都应回归抓鬼候选，实得 %v", n)
-	}
-	if !env.st.ShareDailyAssignedToday(acc, ghostMutexShareKey) {
-		t.Fatal("池停用不该清台账（重新启用后候选要能按台账捡回）")
+		t.Fatalf("停用后：两号都应回归抓鬼候选，实得 %v", n)
 	}
 	// 对照：shenbu 自身的补发闸不受影响 —— 池停用时不自动补发神捕（既有口径）。
 	if blocked, why := skip("shenbu", acc); !blocked || !strings.Contains(why, "未启用") {
 		t.Fatalf("池停用：shenbu 补发应仍被拦（池未启用），实得 blocked=%v why=%q", blocked, why)
 	}
 
-	// ③ 重新启用：让路恢复，台账照旧把该号捡回神捕候选。
+	// ③ 重新启用：台账已作废（停用那一刻清掉）→ 不再拦；但号意图=ghost 且抓鬼未满 →
+	// 神捕候选**不抢**（"续跑例外"随台账一起作废 —— 比旧的"按台账强抢回神捕"更保守）。
 	startShenbuPool(t, env)
-	if blocked, why := skip("ghost", acc); !blocked || !strings.Contains(why, "神捕") {
-		t.Fatalf("重新启用：台账命中应恢复拦，实得 blocked=%v why=%q", blocked, why)
+	for _, a := range []string{acc, hb} {
+		if blocked, why := skip("ghost", a); blocked {
+			t.Fatalf("重新启用后：%s 无台账应不再拦（停用已作废记录），实被拦: %s", a, why)
+		}
 	}
-	if n := ghostCandCount(t, env); n != 0 {
-		t.Fatalf("重新启用：两号都应恢复让路，实得 %v", n)
+	if n := shenbuCandCount(t, env); n != 0 {
+		t.Fatalf("重新启用后：号还在抓鬼（未满）→ 不抢（续跑例外已随台账作废）: %v", n)
 	}
+	// 抓鬼满额 = 自由号 → 自然进神捕候选（"拣回"路径仍在，只是不再靠台账强抢）
+	feedRobot(t, env, acc, map[string]any{"daily": nil,
+		"ghost": map[string]any{"done": 50, "limit": 50, "enabled": false,
+			"count_date": time.Now().Format("20060102")}})
 	if n := shenbuCandCount(t, env); n < 1 {
-		t.Fatalf("台账号应仍在神捕候选里（重新启用后可续跑），实得 %v", n)
+		t.Fatalf("抓鬼满额的自由号应能进神捕候选，实得 %v", n)
 	}
 }

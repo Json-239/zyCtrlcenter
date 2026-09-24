@@ -299,19 +299,69 @@ func (a *API) shareDailyPoolEnabled(kind autotask.Kind) bool {
 	return a.AutoTask != nil && a.AutoTask.EnabledNoLock(kind)
 }
 
-// shareDailyBusyForGhost 抓鬼让路判定：该号当天有"**池启用**且已派/在跑且未满"的日常玩法
+// shareDailyBusyForGhost 抓鬼让路判定：该号当天有"已派/在跑且未满"的日常玩法
 // （shenbu/fenghuo 任一）→ 返回该玩法 kind；没有 → ("", false)。
 //
-// 口径 = 各玩法 池启用(EnabledNoLock，无锁) ∧ shareDailyInFlightTodayOf（心跳或台账命中且未满）。
-// 满额号是自由号（回抓鬼）；池停用的号也回抓鬼（否则两头不跑）。
-// **无锁安全**：只读 St/r 与 EnabledNoLock，可在 Runner 持锁回调（抓鬼候选）里调用。
+// 口径（2026-09-24 二次修正，**不再看池启用**）= shareDailyInFlightTodayOf（心跳 daily 或
+// 持久台账命中，且未见满额）。
+//
+//   - 旧口径要求"池启用"才让路（fcf923e）；但烽火大唐 P1 灰度是**手动派 3 个号**（池未启用），
+//     旧口径让 RESTORE/reghost 的 ghost_start 把它们顶掉：现场 robot0001029（烽火）
+//     16:18:45 被补发 ghost_start → 点钟馗连续无对话卡死 → 重登→再补发循环 → 熔断；
+//     robot0005278（神捕）同款（restore 被让路拦了，但 reghost 补发没闸）。
+//   - "池明确停用"无需在这里判：面板停策略时 handleAutoTaskStop 会**清掉该玩法台账**
+//     （clearShareDailyAssignedOf）并给在跑号下发 share_daily_stop —— 台账没了、心跳也停，
+//     让路自然失效 → 这些号回抓鬼（fcf923e 口径保持）。池从未启用的灰度玩法不清台账。
+//   - 满额号是自由号（回抓鬼）。
+//
+// **无锁安全**：只读 St/r，可在 Runner 持锁回调（抓鬼候选）里调用。
 func (a *API) shareDailyBusyForGhost(acc string, r state.Robot) (autotask.Kind, bool) {
 	for _, kind := range shareDailyFamilyKinds() {
-		if a.shareDailyPoolEnabled(kind) && a.shareDailyInFlightTodayOf(acc, r, kind) {
+		if a.shareDailyInFlightTodayOf(acc, r, kind) {
 			return kind, true
 		}
 	}
 	return "", false
+}
+
+// reassignDailyIntentToGhostOf 把"意图仍指向该日常玩法"的号改判为抓鬼（面板停用该玩法池时调；
+// 2026-09-24）。为什么必须做：抓鬼候选对"别的链在用"的号让路（kinds[acc] != ghost → skip）——
+// 停用只清台账不够，意图不改这些号当天既进不了已停用的日常池、又进不了抓鬼池（两头不跑）。
+// 改判 ghost = 立即回抓鬼（下次 decide 触发会按心跳/池内记录自然重判）。
+func (a *API) reassignDailyIntentToGhostOf(kind autotask.Kind, reason string) int {
+	if a.Events == nil || a.Events.Intents == nil {
+		return 0
+	}
+	n := 0
+	for _, it := range a.Events.Intents.Snapshot() {
+		if string(it.Kind) != string(kind) {
+			continue
+		}
+		zone := it.Zone
+		if zone == "" {
+			zone = a.currentZoneKey()
+		}
+		if _, changed, err := a.Events.Intents.Apply(it.Account,
+			intent.Decision{Known: true, Kind: intent.KindGhost, Reason: reason}, zone, "decide"); err == nil && changed {
+			n++
+		}
+	}
+	return n
+}
+
+// clearShareDailyAssignedOf 清掉该玩法"今日已派"台账（面板停用该玩法池时调；2026-09-24）：
+// 停用 = 当天派过的记录作废 → 抓鬼让路停止生效，这些号回抓鬼（口径见 state.ClearShareDailyAssigned）。
+func (a *API) clearShareDailyAssignedOf(kind autotask.Kind, reason string) int {
+	key := a.shareDailyKeyOf(kind)
+	if key == "" || a.St == nil {
+		return 0
+	}
+	n := a.St.ClearShareDailyAssigned(key)
+	if n > 0 {
+		a.Log.Printf("[SHAREDAILY] %s：已清 %d 条「今日已派」台账（%s）→ 停止让路，这些号回抓鬼",
+			reason, n, key)
+	}
+	return n
 }
 
 // shareDailyCandidateOf 该号能否进"某日常玩法"（shenbu/fenghuo）的候选。
@@ -355,16 +405,17 @@ func (a *API) shareDailyCandidateOf(kind autotask.Kind, acc string, r state.Robo
 			return autotask.Candidate{}, false // 别的链在用（新手链 / 抓鬼未满）→ 让路
 		}
 	}
-	// 跨日常让路（2026-09-24 P1 保守口径）：号已在跑/已派**另一个**日常玩法（且那个池启用、
-	// 未满）→ 本玩法候选让路 —— 否则两个日常池同时启用时会把同一个号各派一次，后派者顶掉前者
-	//（机器人端同驱动互斥）。本玩法自己有 assigned（续跑）时不让路（优先收回自己的号）。
-	// 轮转（跑满自动转下一条）P2 再做，这里只保证两个池不互相抢。
+	// 跨日常让路（2026-09-24 P1 保守口径）：号已在跑/已派**另一个**日常玩法（未满）→
+	// 本玩法候选让路 —— 否则两个日常池会把同一个号各派一次，后派者顶掉前者（机器人端同驱动互斥）。
+	//   2026-09-24 二次修正：**不再看 another 池是否启用** —— 号在跑/已派另一玩法（如灰度手动跑的
+	//   烽火）就不该被抢；"池停用"的号台账已被清（handleAutoTaskStop），不会命中。
+	// 本玩法自己有 assigned（续跑）时不让路（优先收回自己的号）。轮转（跑满自动转下一条）P2 再做。
 	if !assigned {
 		for _, other := range shareDailyFamilyKinds() {
 			if other == kind {
 				continue
 			}
-			if a.shareDailyPoolEnabled(other) && a.shareDailyInFlightTodayOf(acc, r, other) {
+			if a.shareDailyInFlightTodayOf(acc, r, other) {
 				return autotask.Candidate{}, false
 			}
 		}
