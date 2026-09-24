@@ -27,7 +27,7 @@ func TestPressableJudgement(t *testing.T) {
 		r    state.Robot
 		want bool
 	}{
-		{"空闲", online("a"), true},
+		{"空闲（不游荡，2026-09-24 起不再压）", online("a"), false},
 		{"纯游荡", roaming("b"), true},
 		{"抓鬼会话", ghosting("c"), false},
 		{"任务推进 NAV", state.Robot{Account: "d", Online: true, State: "NAV"}, false},
@@ -44,15 +44,18 @@ func TestPressableJudgement(t *testing.T) {
 	}
 }
 
-// PickOffline：纯游荡号直接进 now（旧实现进 pending"等收工"→ 永不收工，压号死等）。
+// PickOffline：纯游荡号直接进 now；空闲号**既不压也不等**（2026-09-24 用户口径：只压在游荡的）。
 func TestPickOfflineRoamingGoesNowDirectly(t *testing.T) {
 	robots := []state.Robot{roaming("roam1"), online("idle1"), ghosting("busy1")}
 	now, pending := waterline.PickOffline(robots, 3, true)
-	if len(now) != 2 || now[0] != "roam1" || now[1] != "idle1" {
-		t.Fatalf("游荡号与空闲号都应立刻可压: now=%v", now)
+	if len(now) != 1 || now[0] != "roam1" {
+		t.Fatalf("只有游荡号可立刻压: now=%v", now)
 	}
 	if len(pending) != 1 || pending[0] != "busy1" {
 		t.Fatalf("抓鬼中的号仍只进待下线: pending=%v", pending)
+	}
+	if len(now)+len(pending) != 2 {
+		t.Fatalf("空闲号不参与（不压不等）: now=%v pending=%v", now, pending)
 	}
 }
 
@@ -75,10 +78,10 @@ func TestTickPressRoamingStopsRoamFirst(t *testing.T) {
 	if len(f.stopRoamCalls) != 1 || len(f.stopRoamCalls[0]) != 2 {
 		t.Fatalf("压号前应先对 2 个游荡号停游荡: %v", f.stopRoamCalls)
 	}
-	if len(f.offlineCalls) != 1 || len(f.offlineCalls[0]) != 3 {
-		t.Fatalf("3 个可压号（2 游荡 + 1 空闲）都应下发下线: %v", f.offlineCalls)
+	if len(f.offlineCalls) != 1 || len(f.offlineCalls[0]) != 2 {
+		t.Fatalf("2 个游荡号下发下线（空闲号不压）: %v", f.offlineCalls)
 	}
 	if st := k.Status(); len(st.Pending) != 0 {
-		t.Fatalf("没有忙号 → 不该有待下线: %+v", st.Pending)
+		t.Fatalf("没有忙号 → 不该有待下线（空闲号也不进 pending）: %+v", st.Pending)
 	}
 }

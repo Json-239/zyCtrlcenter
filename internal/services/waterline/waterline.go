@@ -384,17 +384,18 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 			if len(now)+len(pending) >= n {
 				break
 			}
-			if r.Account == "" || !r.Online || r.Paused {
-				continue
-			}
-			if !Pressable(r) {
-				pending = append(pending, r.Account)
-			} else {
-				now = append(now, r.Account)
-			}
+		if r.Account == "" || !r.Online || r.Paused {
+			continue
 		}
-		return now, pending
+		if Pressable(r) {
+			now = append(now, r.Account)
+		} else if Busy(r) {
+			pending = append(pending, r.Account)
+		}
+		// 空闲（既不游荡也不忙）→ 既不压也不等（2026-09-24 用户口径：只压在游荡的）
 	}
+	return now, pending
+}
 	for _, r := range robots {
 		if len(now) >= n {
 			break
@@ -408,7 +409,7 @@ func PickOffline(robots []state.Robot, n int, preferIdle bool) (now []string, pe
 		if len(now)+len(pending) >= n {
 			break
 		}
-		if r.Account == "" || !r.Online || r.Paused || Pressable(r) {
+		if r.Account == "" || !r.Online || r.Paused || Pressable(r) || !Busy(r) {
 			continue
 		}
 		pending = append(pending, r.Account)
@@ -502,33 +503,22 @@ func Busy(r state.Robot) bool {
 	return false
 }
 
-// Pressable 是否"现在就能压下线"（比 Busy 宽的**仅压号**判据）。
+// Pressable 是否"现在就能压下线"：**仅"正在游荡"的号**（2026-09-24 用户口径收紧）。
 //
-// 2026-09-23 现场：在线 243 超出水位目标 230，压号一直显示"待下线 N 个，等它们收工"
-// 却永远不断 —— 根因是 Busy() 把"游荡（Walking）"也算忙，游荡号只能进待下线，
-// 而**游荡不会收工** → 压号死等。压号是"降低在线数"的动作、游荡是低价值填充活动，
-// 因此压号场景要比 Busy 更宽一档：纯游荡号可直接压（压前会先停游荡，见 stopRoamFor）。
+// 沿革：
+//   - 2026-09-23（修复"压不下来"）：Busy 把游荡算忙、游荡不会收工 → 采用
+//     "纯游荡可压，压前先停游荡"（stopRoamFor）。
+//   - 2026-09-24（用户口径）：**只压"正在游荡"的号** —— 空闲/等待中的号不再压。
+//     现场 robot0001024/1029：上线后未接到任务即被旧白名单当"纯游荡（IDLE）"压掉；
+//     空闲号不占任务槽，压它没有收益、反而打断"刚上线等派活"的号。
 //
-// 不压（保持与 Busy 同口径的"不打扰"）：
-//   - 人工暂停 / 战斗 / 活跃抓鬼会话 / 孵化会话；
-//   - 任务推进态 NAV/CLICK/DIALOG/FIGHT/SHOP/ALLOC/WAIT_NEXT/SUBMIT（压下去=任务半途而废）；
-//   - 抓鬼会话态 WAIT_GHOST/ACCEPT/HEAL（等鬼/接取/治疗，属活跃会话）；
-//   - ERROR 异常号（既有口径：等人工重登或机器人端自愈，不拿它当可回收空闲号）。
-//
-// 可压：IDLE/READY/ONLINE 等空闲态，**以及 Walking（纯游荡）但无任务/抓鬼/战斗的号**。
-// 关系：Pressable ⊇ {!Busy}，差异只有"Walking 且非任务态"这一档。
+// 判据 = Walking（walk.enabled=true；含孵化，与 stopRoamFor 一致）；
+// 人工暂停 / 战斗 / 抓鬼会话 / 孵化会话仍先排除。
 func Pressable(r state.Robot) bool {
 	if r.Paused || r.Fight || r.GhostActive() || r.HatchActive() {
 		return false
 	}
-	switch strings.ToUpper(strings.TrimSpace(r.State)) {
-	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT", "SUBMIT",
-		"ERROR", "WAIT_GHOST", "ACCEPT", "HEAL":
-		return false
-	case "WAIT_TASK":
-		return r.TaskIndex == 0
-	}
-	return true
+	return r.Walking()
 }
 
 // stopRoamFor 压号前对"纯游荡"号先停游荡（Deps.StopRoam 未接时跳过；失败只记日志不阻断压号）。

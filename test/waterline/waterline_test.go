@@ -219,22 +219,24 @@ func TestComputeAdjustClampAndGuards(t *testing.T) {
 
 // ---------------------------------------------------------------- PickOffline
 
-func TestPickOfflinePrefersIdle(t *testing.T) {
+// 2026-09-24 用户口径：空闲号不再可压（只压"正在游荡"的号）——本用例改名自
+// TestPickOfflinePrefersIdle，断言"空闲号不参与压号"。
+func TestPickOfflineIdleNotPressed(t *testing.T) {
 	robots := []state.Robot{ghosting("busy1"), online("idle1"), online("idle2"), online("idle3")}
 	now, pending := waterline.PickOffline(robots, 2, true)
-	if len(now) != 2 || now[0] != "idle1" || now[1] != "idle2" {
-		t.Fatalf("应优先断空闲号（按输入顺序）: now=%v", now)
+	if len(now) != 0 {
+		t.Fatalf("空闲号不压（2026-09-24 起只压在游荡的）: now=%v", now)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("空闲号够时不该有忙号进待下线: %v", pending)
+	if len(pending) != 1 || pending[0] != "busy1" {
+		t.Fatalf("忙号进待下线: pending=%v", pending)
 	}
 }
 
 func TestPickOfflineBusyGoesPending(t *testing.T) {
 	robots := []state.Robot{ghosting("busy1"), online("idle1"), online("idle2")}
 	now, pending := waterline.PickOffline(robots, 3, true)
-	if len(now) != 2 || now[0] != "idle1" || now[1] != "idle2" {
-		t.Fatalf("2 个空闲号应先进 now: now=%v", now)
+	if len(now) != 0 {
+		t.Fatalf("空闲号不压: now=%v", now)
 	}
 	if len(pending) != 1 || pending[0] != "busy1" {
 		t.Fatalf("忙号（抓鬼中）只能进待下线、绝不硬断: pending=%v", pending)
@@ -248,14 +250,14 @@ func TestPickOfflineNotEnoughAndOfflineSkipped(t *testing.T) {
 		ghosting("busy1"),
 	}
 	now, pending := waterline.PickOffline(robots, 5, true)
-	if len(now) != 1 || now[0] != "idle1" {
-		t.Fatalf("不足时也只给 1 个空闲号: now=%v", now)
+	if len(now) != 0 {
+		t.Fatalf("空闲号不压: now=%v", now)
 	}
 	if len(pending) != 1 || pending[0] != "busy1" {
 		t.Fatalf("不足时忙号进待下线: pending=%v", pending)
 	}
-	if len(now)+len(pending) != 2 {
-		t.Fatalf("离线号不能被选中（总选中数=2）: now=%v pending=%v", now, pending)
+	if len(now)+len(pending) != 1 {
+		t.Fatalf("离线/空闲号都不能被选中（总选中数=1）: now=%v pending=%v", now, pending)
 	}
 	if n, p := waterline.PickOffline(robots, 0, true); n != nil || p != nil {
 		t.Fatalf("n<=0 应返回空: %v %v", n, p)
@@ -268,30 +270,31 @@ func TestPickOfflineWithoutIdlePreference(t *testing.T) {
 	if len(pending) != 1 || pending[0] != "busy1" {
 		t.Fatalf("不挑空闲也绝不硬断忙号: pending=%v", pending)
 	}
-	if len(now) != 1 || now[0] != "idle1" {
-		t.Fatalf("按输入顺序取（忙碌的先进 pending）: now=%v", now)
+	if len(now) != 0 {
+		t.Fatalf("空闲号不压（2026-09-24 起只压在游荡的）: now=%v", now)
 	}
 }
 
 // 2026-09-23（与地图页 26f4660 同口径）：交付中（SUBMIT）与卡住（ERROR）的号都不能
-// 当"空闲号"立刻压 —— 前者在推进、后者是异常（等人工/机器人端自愈）；两者都只进"待下线"。
+// 立刻压 —— 前者在推进、后者是异常（等人工/机器人端自愈）；两者都只进"待下线"。
+// 2026-09-24 用户口径：只压"正在游荡"的号 —— 本用例的可压样本改用游荡号。
 func TestPickOfflineSubmitAndErrorGoPending(t *testing.T) {
 	robots := []state.Robot{
-		online("idle1"),
+		roaming("roam1"),
 		{Account: "sub1", Online: true, State: "SUBMIT"},
 		{Account: "err1", Online: true, State: "ERROR"},
 	}
 	now, pending := waterline.PickOffline(robots, 3, true)
-	if len(now) != 1 || now[0] != "idle1" {
-		t.Fatalf("只有真空闲号能立刻压: now=%v", now)
+	if len(now) != 1 || now[0] != "roam1" {
+		t.Fatalf("只有游荡号能立刻压: now=%v", now)
 	}
 	if len(pending) != 2 || pending[0] != "sub1" || pending[1] != "err1" {
 		t.Fatalf("SUBMIT（推进中）/ ERROR（异常）只进待下线: pending=%v", pending)
 	}
-	// 不挑空闲（prefer_idle=false）也一样：忙/异常号绝不进 now
+	// 不挑游荡优先（prefer_idle=false）也一样：忙/异常号绝不进 now
 	now2, pending2 := waterline.PickOffline(robots, 3, false)
-	if len(now2) != 1 || now2[0] != "idle1" {
-		t.Fatalf("prefer_idle=false 时 now 仍只含空闲号: now=%v", now2)
+	if len(now2) != 1 || now2[0] != "roam1" {
+		t.Fatalf("prefer_idle=false 时 now 仍只含游荡号: now=%v", now2)
 	}
 	if len(pending2) != 2 {
 		t.Fatalf("prefer_idle=false 时 SUBMIT/ERROR 仍进待下线: pending=%v", pending2)
@@ -435,14 +438,14 @@ func TestPickSkipsPaused(t *testing.T) {
 		t.Fatalf("暂停号不能被自动拉起（补号候选应排除）: %v", got)
 	}
 
-	pIdle := online("p-idle")
-	pIdle.Paused = true
+	pRoam := roaming("p-roam")
+	pRoam.Paused = true
 	pBusy := ghosting("p-busy")
 	pBusy.Paused = true
-	robots := []state.Robot{online("i1"), pIdle, ghosting("b1"), pBusy}
+	robots := []state.Robot{roaming("r1"), pRoam, ghosting("b1"), pBusy}
 	now, pending := waterline.PickOffline(robots, 3, true)
-	if len(now) != 1 || now[0] != "i1" {
-		t.Fatalf("暂停的空闲号不该被断: now=%v", now)
+	if len(now) != 1 || now[0] != "r1" {
+		t.Fatalf("暂停的游荡号不该被断: now=%v", now)
 	}
 	if len(pending) != 1 || pending[0] != "b1" {
 		t.Fatalf("只有非暂停的忙号能进待下线（暂停号既不 now 也不 pending）: pending=%v", pending)
@@ -450,7 +453,7 @@ func TestPickSkipsPaused(t *testing.T) {
 	// preferIdle=false（随机补选）同样跳过暂停号
 	now2, pending2 := waterline.PickOffline(robots, 3, false)
 	if len(now2)+len(pending2) != 2 {
-		t.Fatalf("非空闲优先模式下也只能选到 2 个非暂停号: now=%v pending=%v", now2, pending2)
+		t.Fatalf("非游荡优先模式下也只能选到 2 个非暂停号: now=%v pending=%v", now2, pending2)
 	}
 }
 
@@ -583,7 +586,7 @@ func TestTickDeadZoneNoAction(t *testing.T) {
 func TestTickOfflineIdleNowBusyPendingThenRelease(t *testing.T) {
 	dir := t.TempDir()
 	f := newFake()
-	f.robots = []state.Robot{online("i1"), online("i2"), online("i3"), online("i4"), ghosting("b1")}
+	f.robots = []state.Robot{roaming("r1"), roaming("r2"), roaming("r3"), roaming("r4"), ghosting("b1")}
 	f.local = 5
 	// 服务端含真人读数 500：超目标 400 → 要压（远大于 maxStep，每轮只压 5）
 	f.svr, f.svrOK, f.svrTSms = 500, true, float64(f.now.UnixMilli())
@@ -598,7 +601,7 @@ func TestTickOfflineIdleNowBusyPendingThenRelease(t *testing.T) {
 		t.Fatal("远超目标应触发压号")
 	}
 	if len(f.offlineCalls) != 1 || len(f.offlineCalls[0]) != 4 {
-		t.Fatalf("空闲号应立刻断（4 个）: %v", f.offlineCalls)
+		t.Fatalf("游荡号应立刻断（4 个）: %v", f.offlineCalls)
 	}
 	for _, a := range f.offlineCalls[0] {
 		if strings.HasPrefix(a, "b") {
@@ -613,14 +616,15 @@ func TestTickOfflineIdleNowBusyPendingThenRelease(t *testing.T) {
 		t.Fatalf("本轮动作量应 ≤ maxStep=5: offline=%d pending=%d", len(f.offlineCalls[0]), len(st.Pending))
 	}
 
-	// 下一轮：b1 收工（转空闲）→ 由"待下线"批次断掉；号池已空，不会再乱选
+	// 下一轮：b1 收工（转游荡）→ 由"待下线"批次断掉；号池已空，不会再乱选
 	b1 := f.robots[len(f.robots)-1]
-	b1.State, b1.Ghost = "ONLINE", nil
+	b1.State, b1.Ghost = "IDLE", nil
+	b1.Walk = map[string]any{"enabled": true}
 	f.robots[len(f.robots)-1] = b1
 	f.offlineCalls = nil
 	k.Tick(f.now.Add(60 * time.Second))
 	if len(f.offlineCalls) != 1 || len(f.offlineCalls[0]) != 1 || f.offlineCalls[0][0] != "b1" {
-		t.Fatalf("待下线号收工后应被断掉: %v", f.offlineCalls)
+		t.Fatalf("待下线的抓鬼号收工转游荡后应被断掉: %v", f.offlineCalls)
 	}
 	if st := k.Status(); len(st.Pending) != 0 {
 		t.Fatalf("断开后待下线应清空: %+v", st.Pending)
@@ -671,7 +675,7 @@ func TestTickSurplusRevokesPendingWhenBackInDeadZone(t *testing.T) {
 
 func TestTickMinKeepFloor(t *testing.T) {
 	f := newFake()
-	f.robots = []state.Robot{online("i1"), online("i2"), online("i3")}
+	f.robots = []state.Robot{roaming("r1"), roaming("r2"), roaming("r3")}
 	f.local = 3
 	f.svr, f.svrOK, f.svrTSms = 300, true, float64(f.now.UnixMilli())
 	k := waterline.New(filepath.Join(t.TempDir(), "waterline.json"), f.deps())
