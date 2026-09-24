@@ -293,6 +293,14 @@ def _install_stubs():
     dg.dispatch_cmd = lambda ro, cmd: {"cmd": cmd.get("cmd"), "result": "ok"}
     dg.on_task_limited = lambda ro, dl, is_load=None: None
     sys.modules["daily_ghost"] = dg
+    # 2026-09-24：会话内吃药接线（share_daily.tick → auto_summon.heal_tick）
+    asm = types.ModuleType("auto_summon")
+    asm.CALL_LOG = {"heal_tick": 0}
+    def _asm_heal_tick(ro, now_ms=None):
+        asm.CALL_LOG["heal_tick"] += 1
+        return 0
+    asm.heal_tick = _asm_heal_tick
+    sys.modules["auto_summon"] = asm
 
 
 def _load_share_daily():
@@ -1047,6 +1055,21 @@ try:
 except Exception as e:
     _err = "%s: %s" % (type(e).__name__, e)
 check("S0 tick 集成: 启用 + 无任务(ACCEPT) 不抛异常", _err is None, _err or "")
+# 2026-09-24：会话内吃药接线 —— daily_ghost 有自己的疗伤，share_daily 此前没有（低血硬扛
+# 定制战斗打输掉任务）；现在 share_daily.tick 应调用 auto_summon.heal_tick。
+import auto_summon as _asm_stub
+_hb = _asm_stub.CALL_LOG["heal_tick"]
+r_h = fresh_robot()
+g_h = new_state()
+r_h.m_share_daily = g_h
+g_h.state = "READY"
+g_h.state_since_ms = time.time() * 1000
+try:
+    S.tick(r_h, time.time() * 1000)
+except Exception:
+    pass
+check("S0 tick 集成: 启用后调用 auto_summon.heal_tick（会话内吃药）",
+      _asm_stub.CALL_LOG["heal_tick"] > _hb, str(_asm_stub.CALL_LOG))
 r = fresh_robot()
 g = new_state()
 r.m_share_daily = g
