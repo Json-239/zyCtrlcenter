@@ -216,6 +216,22 @@ func (a *API) shareDailyInFlightToday(acc string, r state.Robot) bool {
 	return busy && !a.shareDailyFullToday(acc, r)
 }
 
+// shenbuPoolEnabled 大唐神捕池当前是否**启用**（自动通道开关）。
+//
+// 为什么需要（2026-09-24 缺口修复）：抓鬼让路（shareDailyInFlightToday）只看"当天派过神捕"
+// ——神捕池被停用（面板 enabled=false）后，这些号既不会被神捕池自动派、又被让路拦在抓鬼外，
+// 当天两头不跑空烧到跨日。口径：**池停用 = 这些号回抓鬼**（台账保留：重新启用神捕池后
+// 候选照旧能捡回；行内「启动」不受影响，仍是显式恢复）。
+//
+// **无锁安全**：走 autotask.Runner.EnabledNoLock（纯 atomic.Load，Start/Stop 同步的镜像）
+// —— 本函数会被 Runner 持锁回调（autotaskCandidatesCfg 的抓鬼候选）调用，那里禁止
+// States()（锁重入死锁，见 autotask.Deps 契约与 docs/04-测试/事故-20260924-调度器死锁.md）。
+// AutoTask 未装配（测试/嵌入式）→ false（没有神捕自动通道，视同"池停用"：不让路，
+// 否则没人再会把这些号拉起来）。
+func (a *API) shenbuPoolEnabled() bool {
+	return a.AutoTask != nil && a.AutoTask.EnabledNoLock(autotask.KindShenbu)
+}
+
 // shareDailyStateEnum 队列状态语义（契约枚举，2026-09-23 lead 裁决 A）：
 //
 //	done    满额（limit>0 且 done≥limit，或相位 DONE——满额收工的两种表达）

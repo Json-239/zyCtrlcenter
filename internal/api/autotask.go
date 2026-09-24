@@ -191,7 +191,9 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		// 重启后按意图补发走的正是这条闸（restorer.TickForce：Skip 在生成 Action 之前，
 		// restorer.go:251），此前会把当天的神捕号抢回抓鬼（现场 robot0005274：神捕被
 		// ghost_start 顶掉）。满额号是自由号，照补；台账兜底见 shareDailyInFlightToday。
-		if a.St != nil {
+		// 2026-09-24 缺口修复：让路**仅当神捕池处于启用状态**——池停用的号既不会被神捕池
+		// 自动派、再拦抓鬼就是两头不跑（空烧到跨日）；停用 = 回抓鬼（口径见 shenbuPoolEnabled）。
+		if a.shenbuPoolEnabled() && a.St != nil {
 			rb, _ := a.St.Get(account)
 			if a.shareDailyInFlightToday(account, rb) {
 				return true, "今日神捕未满（已派/在跑），不补抓鬼"
@@ -657,7 +659,10 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			// 会话互斥）→ 当天已派/在跑神捕且未满的号，不让抓鬼派发/补位（心跳或持久台账
 			// 命中即可，判据见 shareDailyInFlightToday）。满额（done≥limit）= 自由号，
 			// 不拦，正常归抓鬼。
-			if a.shareDailyInFlightToday(acc, r) {
+			// 2026-09-24 缺口修复：让路**仅当神捕池启用**（池停用 = 这些号回抓鬼；否则
+			// 既不会被神捕池自动派、又被让路拦在抓鬼外，两头不跑空烧到跨日）。
+			// 池启用状态读 shenbuPoolEnabled()（无锁，可在本回调里安全调用）。
+			if a.shenbuPoolEnabled() && a.shareDailyInFlightToday(acc, r) {
 				continue
 			}
 			// 2026-09-22 今日抓鬼已满（服务端 50 次上限，钟馗只回闲聊菜单）→ 当天不再派，

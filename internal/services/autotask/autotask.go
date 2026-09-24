@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -205,6 +206,11 @@ type Runner struct {
 	d  Deps
 	mu sync.Mutex
 	st map[Kind]*state
+	// on 各策略启用状态的**无锁镜像**（2026-09-24 新增）：Start/Stop 在持 r.mu 时一并
+	// Store；EnabledNoLock 只做 atomic.Load —— 供 Runner **持锁回调**（Deps.Candidates /
+	// Deps.OnlineCount）判断"某池当前是否启用"而不触发锁重入（那些回调里调 States() 会
+	// 同 goroutine 锁重入死锁，见 Deps 契约与 2026-09-24 事故报告）。map 在 New 之后只读。
+	on map[Kind]*atomic.Bool
 }
 
 // New 创建执行器（各套策略默认都是"未启动"）。
@@ -218,9 +224,10 @@ func New(d Deps) *Runner {
 	if d.Log == nil {
 		d.Log = func(string, ...any) {}
 	}
-	r := &Runner{d: d, st: map[Kind]*state{}}
+	r := &Runner{d: d, st: map[Kind]*state{}, on: map[Kind]*atomic.Bool{}}
 	for _, k := range Kinds {
 		r.st[k] = &state{cfg: Config{Kind: k}.WithDefaults()}
+		r.on[k] = &atomic.Bool{}
 	}
 	return r
 }
@@ -238,6 +245,9 @@ func (r *Runner) Start(kind Kind, cfg Config) error {
 	st.enabled = true
 	st.nextAt = r.d.Now()
 	st.lastMsg = kind.Label() + "定时任务已启动"
+	if b := r.on[kind]; b != nil {
+		b.Store(true) // 无锁镜像（与 st.enabled 同临界区更新，见 Runner.on 注释）
+	}
 	r.mu.Unlock()
 	r.d.Log("[AUTOTASK] %s 定时任务启动（间隔 %ds + 随机 %ds，每轮 %d~%d 个，上限 %d，自动注册=%v×%d）",
 		kind.Label(), cfg.IntervalSec, cfg.JitterSec, cfg.BatchMin, cfg.BatchMax, cfg.MaxOnline,
@@ -253,6 +263,9 @@ func (r *Runner) Stop(kind Kind) {
 	st.lastMsg = kind.Label() + "定时任务已停止"
 	if st.queueKind == kind {
 		st.queue, st.queueKind, st.queueNote = nil, "", ""
+	}
+	if b := r.on[kind]; b != nil {
+		b.Store(false) // 无锁镜像（见 Runner.on 注释）
 	}
 	r.mu.Unlock()
 	r.d.Log("[AUTOTASK] %s 定时任务已停止", kind.Label())
@@ -283,6 +296,20 @@ func (r *Runner) NoteRegister(kind Kind, created int) {
 	if created <= 0 {
 		r.record(kind, Round{At: now, Msg: "自动注册一个都没成功（可能被同 IP 风控），30 分钟后再试"})
 	}
+}
+
+// EnabledNoLock 该策略当前是否启用（**无锁**：只做 atomic.Load，不取 r.mu、不调用任何回调）。
+//
+// 供 Runner **持锁回调**（Deps.Candidates / Deps.OnlineCount）查询"某池当前是否启用"用：
+// 那些回调里调 States() 会锁重入死锁（2026-09-24 生产事故），本方法可安全调用 —— atomic
+// Load 不阻塞、不参与 r.mu 的所有权，读到的值是 Start/Stop 某一次写入的结果（seq-cst），
+// 与启停并发时最多"瞬时过期"一次调度周期，只影响一次决策，不影响正确性。
+func (r *Runner) EnabledNoLock(kind Kind) bool {
+	if r == nil {
+		return false
+	}
+	b := r.on[kind] // map 在 New 之后只读，并发读安全；未登记的 kind → nil
+	return b != nil && b.Load()
 }
 
 // States 运行态快照（面板用；新→旧排列轮次）。
