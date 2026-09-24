@@ -70,3 +70,25 @@ func TestAutoTaskPersistSurvivesRestart(t *testing.T) {
 		t.Fatalf("停过的 newbie 重启后不该自动拉起: %+v", st[autotask.KindNewbie])
 	}
 }
+
+// 2026-09-24（17:23 事故防回归）：**未启用的分享日常玩法，LoadAutoTask 不得清"今日已派"台账**。
+// 现场：fenghuo 灰度手动派 3 号（池未启用），重启被误清 3 条 share_daily_宫廷10 →
+// 意图/候选链断 → 池永远没号（用户报"开了烽火没有号被拉起"）。
+func TestLoadAutoTaskKeepsShareDailyLedgerForDisabledPool(t *testing.T) {
+	env := newTestEnv(t, "")
+	// 先启动一套无关策略，保证 autotask.json 存在（LoadAutoTask 才会进入逐项循环）
+	if _, res := postJSON(t, env.srv.URL+"/api/autotask/start", map[string]any{
+		"kind": "ghost", "interval_sec": 300, "jitter_sec": 300, "target_online": 50,
+	}, nil); res["ok"] != true {
+		t.Fatalf("启动 ghost 策略失败: %v", res)
+	}
+	// 等价"灰度手动派过烽火、池未启用"：台账有、池无记录
+	acc := "robot0001024@xy3.com"
+	env.st.MarkShareDailyAssigned(acc, "share_daily_宫廷10")
+
+	env.api.LoadAutoTask() // 未启用的 fenghuo（!ok）→ 不得清台账
+
+	if !env.st.ShareDailyAssignedToday(acc, "share_daily_宫廷10") {
+		t.Fatalf("未启用玩法的台账不得被 LoadAutoTask 清掉（17:23 事故防回归）")
+	}
+}

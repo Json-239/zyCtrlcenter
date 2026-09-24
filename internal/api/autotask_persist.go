@@ -80,12 +80,13 @@ func (a *API) LoadAutoTask() {
 	for _, k := range autotask.Kinds {
 		it, ok := f.Tasks[string(k)]
 		if !ok || !it.Enabled {
-			// 2026-09-24：未启用的分享日常玩法 —— 顺手清"今日已派"台账（幂等兜底）。
-			// 停用动作发生在 handleAutoTaskStop（那里已清）；这里是跨重启的历史残留兜底，
-			// 保证"该玩法未启用 ⇒ 不让路 ⇒ 号回抓鬼"在重启后也成立（口径见 shareDailyBusyForGhost）。
-			if _, isDaily := shareDailyKindFromString(string(k)); isDaily {
-				a.clearShareDailyAssignedOf(k, "启动时该玩法未启用")
-			}
+			// 2026-09-24（lead 现场二次修正）：**删去"启动时清台账"** —— 原实现不区分
+			// "从未启用（灰度手动派，如 fenghuo 的 3 个试跑号）"与"曾启用后停用"，
+			// 在 17:23 重启时把 3 条 share_daily_宫廷10 灰度台账误清（日志
+			// "[SHAREDAILY] 启动时该玩法未启用：已清 3 条"）→ 意图/候选链断 → 池永远没号。
+			// 语义已由两处保证，无需此处兜底：
+			//   · "未启用"时让路照旧生效 —— shareDailyBusyForGhost 只看心跳/台账（不看池）；
+			//   · 真正"停用"时 handleAutoTaskStop 清台账 + 意图改判回抓鬼（幂等）。
 			continue // 上次没开（或没记录）→ 保持停止，不擅自拉起
 		}
 		cfg := it.Config
