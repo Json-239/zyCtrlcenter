@@ -19,6 +19,7 @@ import hashlib
 import os
 import re
 import sys
+import types
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -98,7 +99,12 @@ m_rb = re.search(
 assert m_rb, "未提取到回滚块"
 body = m_rb.group(0)
 code = "def _rb(robot_object, hop, __emit):\n" + body
-ns2 = {}
+# 2026-09-24: 提取块新增"回滚后图不匹配 → 拉黑可疑跳 + 换路重规划"分支（引用
+#   quest/data/__hop_blacklist/__replan_after_bad_hop）—— 以函数 globals 注入。
+_bl_calls = []
+ns2 = {"data": (83,), "quest": None,
+       "__hop_blacklist": lambda ro, q, h: _bl_calls.append(("BL", h.get("destination_index"))),
+       "__replan_after_bad_hop": lambda ro, q, dest, note: _bl_calls.append(("REPLAN", dest, note))}
 exec(compile(code, "<rollback>", "exec"), ns2)
 RB = ns2["_rb"]
 
@@ -112,18 +118,32 @@ class FakeRobot(object):
 
 emits = []
 q1 = FakeRobot(m_mapid=11, srv=5, opt=11)   # 乐观态：本地 11，服务端确认 5
-RB(q1, {"retry": 0}, lambda ro, ev: emits.append(ev))
+ns2["quest"] = types.SimpleNamespace(
+    last_hop_done={"destination_index": 156, "_from_map": 5, "target_map": 11})
+_bl_calls[:] = []
+_aq = {"destination_index": 83, "from_map": 11, "retry": 0}   # hop 83 属图 11, 号已被回滚到 5
+RB(q1, _aq, lambda ro, ev: emits.append(ev))
 check("D2 乐观态被拒 → 回滚到服务端确认图并清标记",
       q1.m_mapid == 5 and q1.m_mapid_optimistic == 0 and len(emits) == 1,
       "mapid=%s opt=%s emits=%d" % (q1.m_mapid, q1.m_mapid_optimistic, len(emits)))
+check("D2d 回滚后图不匹配(hop 属 11, 当前 5) → 拉黑可疑跳 156 + 换路重规划(不重走)",
+      ("BL", 156) in _bl_calls
+      and any(c[0] == "REPLAN" and c[1] == 83 for c in _bl_calls)
+      and _aq["retry"] == 0,
+      str(_bl_calls) + " retry=%s" % _aq["retry"])
 
 q2 = FakeRobot(m_mapid=11, srv=11, opt=0)   # 非乐观态：不应动
-RB(q2, {"retry": 0}, lambda ro, ev: None)
+ns2["quest"] = None
+_bl_calls[:] = []
+_q2h = {"destination_index": 61, "from_map": 11, "retry": 0}   # 图匹配 → 不触发换路分支
+RB(q2, _q2h, lambda ro, ev: None)
 check("D2b 非乐观态被拒 → 不动 m_mapid（保持旧行为）",
       q2.m_mapid == 11 and q2.m_mapid_optimistic == 0)
+check("D2e 图匹配(hop 属 11, 当前 11) → 不走换路分支(仍走原'重走跳转点'重试)",
+      not _bl_calls and _q2h["retry"] == 1, str(_bl_calls) + " retry=%s" % _q2h["retry"])
 
 q3 = FakeRobot(m_mapid=612, srv=612, opt=612)  # 乐观态但已与服务端一致 → 只清标记
-RB(q3, {"retry": 0}, lambda ro, ev: None)
+RB(q3, {"destination_index": 83, "from_map": 612, "retry": 0}, lambda ro, ev: None)
 check("D2c 乐观但已一致 → 不回退，仅清标记",
       q3.m_mapid == 612 and q3.m_mapid_optimistic == 0)
 
@@ -151,6 +171,6 @@ print("\n自检目标: %s" % script_dir)
 for f, s in ((qe_path, qe), (op_path, op)):
     print("  %s sha1=%s" % (os.path.basename(f),
                             hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]))
-total = 6 + 5
+total = 6 + 7
 print("结果：%d 项，失败 %d 项" % (total, fails))
 sys.exit(1 if fails else 0)

@@ -620,6 +620,152 @@ def main():
                       _r_npc is not None and _r_npc[0].get("kind") == "npc_jumper"
                       and _r_npc[0].get("cost_money") == 10, _r_npc)
 
+    # ============================================================ D. 新手链 7001115 卡死修复(2026-09-24)
+    # 现场(robot0003001/robot0005017, 09-23/09-24): 反复 TASK_STUCK, 每轮 2-3 分钟永不自愈。
+    #   链条一: 跨图 5→612 BFS 直选 5→11(付费 3银, dest 156)→612; 余额不足的号点付费传送
+    #     被服务端 1116 拒, 但跳转NPC 流程已"乐观改图 11" → 走到 11 的跳转点发 dest 83 →
+    #     服务端按(真实在 5)拒 → 回滚 11→5 后"重走跳转点"仍在源图上走向目标图坐标 →
+    #     __do_walk 等换图推送 12 次 → TASK_STUCK 死循环。
+    #   链条二: NPC 13520(交付对象, 图11)在机器人当前 quest.chain 的 npcs 表查不到 →
+    #     "无坐标盲点"→ CLICK 重试 ×4 → STUCK_CLICK(3001 首轮会话)。
+    # 修复面: 免费优先规划(prefer_free 两阶段) / 回滚后换路重规划(__replan_after_bad_hop) /
+    #   __do_walk 双保险 / 全局导航链缓存坐标兜底(P4)。
+    check("D0: __find_dijkstra_route 支持 _free_only 免费优先参数",
+          "_ignore_blacklist=False, _free_only=None):" in qe)
+    check("D1: prefer_free 时先试全免费路线(入口两阶段, 不通再放开付费)",
+          'if bool(getattr(quest, "prefer_free", False)) and not _ignore_blacklist:' in qe
+          and "_ignore_blacklist=False, _free_only=True)" in qe)
+    check("D2: 免费阶段跳过付费边(cost_money>0)",
+          'if _free_only and int(e.get("cost_money") or 0) > 0:' in qe)
+    check("D3: 忽略黑名单再找时保持免费阶段(_free_only=_free_only)",
+          "_ignore_blacklist=True,\n\t\t\t\t_free_only=_free_only)" in qe)
+    check("D4: __teleport_click 全局导航链缓存坐标兜底(g_nav_chain, 只增不减)",
+          'g_nav_chain.get("npcs")' in qe
+          and "NPC %s 静态表缺失, 用全局导航链缓存坐标" in qe)
+    check("D5: 跳转NPC主动完成这跳时记 last_hop_done(供回滚定位元凶跳)",
+          "quest.last_hop_done = _done" in qe)
+    check("D6: 被拒+回滚后图不匹配 → 拉黑可疑跳+换路重规划(__replan_after_bad_hop)",
+          "def __replan_after_bad_hop(robot_object, quest, dest, note):" in qe
+          and 'if int(hop.get("from_map", 0) or 0) != int(robot_object.m_mapid or 0):' in qe
+          and "__replan_after_bad_hop(robot_object, quest, data[0], _note)" in qe)
+    check("D7: __do_walk 等换图双保险(已拒 retry>0 且图不匹配 → 不再空转 12 次报 TASK_STUCK)",
+          'if int(hop.get("retry", 0) or 0) > 0:' in qe
+          and '"本跳已被拒 retry=%d"' in qe)
+    check("D8: __reset_quest 重置 prefer_free(切链/重置不残留)",
+          "quest.prefer_free = False" in qe)
+
+    # ---- D9: 行为测试 —— 提取 __find_dijkstra_route(免费优先) ----
+    _dn = __import__("types")
+    fr = None
+    try:
+        _ns2 = {"__hop_key": lambda fm, e: (int(fm or 0), e.get("destination_index")),
+                "time": __import__("time"), "g_chain_grid_cache": {}, "g_chain_dijkstra_cache": {}}
+        _frag2 = _extract_func(qe, "__find_dijkstra_route")
+        check("D9: 提取 __find_dijkstra_route(免费优先版)", _frag2 is not None)
+        if _frag2:
+            exec(_frag2, _ns2)
+            fr = _ns2.get("__find_dijkstra_route")
+    except Exception as _e9:  # noqa
+        check("D9: 提取 __find_dijkstra_route(免费优先版)", False, str(_e9))
+    if fr is not None:
+        # 表: 5→11(付费300, dest156) 与 5→9(免费, dest155) → 9→10(dest9) → 10→11(dest12)
+        #     → 11→612(dest83) —— 对应生产真实拓扑
+        FREE_TB = {
+            "5": [{"kind": "npc_jumper", "destination_index": 156, "target_map": 11,
+                   "cost_money": 300, "npc_index": 13003, "x": 1792, "y": 351},
+                  {"kind": "npc_jumper", "destination_index": 155, "target_map": 9,
+                   "cost_money": 0, "npc_index": 13003, "x": 1792, "y": 351}],
+            "9": [{"kind": "map_skip", "destination_index": 9, "target_map": 10, "x": 95, "y": 842}],
+            "10": [{"kind": "map_skip", "destination_index": 12, "target_map": 11, "x": 347, "y": 315}],
+            "11": [{"kind": "map_skip", "destination_index": 83, "target_map": 612, "x": 3900, "y": 649}],
+        }
+        _q_np = _dn.SimpleNamespace(chain={"dijkstra": dict(FREE_TB)}, hop_black={})
+        _r1 = fr(_q_np, 5, 612)
+        check("D9a: 默认(不免费优先)最短跳: 5→11(付费)→612 两跳",
+              _r1 is not None and len(_r1) == 2 and _r1[0].get("destination_index") == 156, _r1)
+        _q_pf = _dn.SimpleNamespace(chain={"dijkstra": dict(FREE_TB)}, hop_black={}, prefer_free=True)
+        _r2 = fr(_q_pf, 5, 612)
+        check("D9b: prefer_free → 全免费路线 5→9→10→11→612(4 跳, 全 cost 0)",
+              _r2 is not None and len(_r2) == 4
+              and [h.get("destination_index") for h in _r2] == [155, 9, 12, 83]
+              and all(int(h.get("cost_money") or 0) == 0 for h in _r2), _r2)
+        PAID_ONLY = {"5": [{"kind": "npc_jumper", "destination_index": 999, "target_map": 11,
+                            "cost_money": 300, "npc_index": 13003, "x": 1, "y": 2}]}
+        _q_po = _dn.SimpleNamespace(chain={"dijkstra": dict(PAID_ONLY)}, hop_black={}, prefer_free=True)
+        _r3 = fr(_q_po, 5, 11)
+        check("D9c: prefer_free 无免费路线 → 回退付费边(不返回 None)",
+              _r3 is not None and _r3[0].get("destination_index") == 999, _r3)
+
+    # ---- D10: 行为测试 —— 提取 __replan_after_bad_hop(回滚换路统一出口) ----
+    _ev2 = []
+    rp = None
+    _frag3 = _extract_func(qe, "__replan_after_bad_hop")
+    check("D10: 提取 __replan_after_bad_hop", _frag3 is not None)
+    if _frag3:
+        try:
+            _ns3 = {"__emit": lambda ro, ev: _ev2.append(ev.get("msg") or ""),
+                    "__report_stuck": lambda ro, q, why: _ev2.append("STUCK:" + why),
+                    "__teleport_click": lambda ro, q, *a, **kw: _ev2.append("REPLAN:%s:%s" % (a, kw))}
+            exec(_frag3, _ns3)
+            rp = _ns3.get("__replan_after_bad_hop")
+        except Exception as _e10:  # noqa
+            check("D10: exec __replan_after_bad_hop", False, str(_e10))
+    if rp is not None:
+        class _RO3(object):
+            pass
+        _ro3 = _RO3()
+        _q3 = _dn.SimpleNamespace(
+            dijkstra_plan={"npc_id": 13021, "npc_index": 13021, "click_type": 0,
+                           "delay_ms": 500, "no_npc_jumper": False, "pos": [612, 1150, 831]},
+            prefer_free=False, dijkstra_route=[{"destination_index": 83}],
+            dijkstra_waiting=True, dijkstra_jumper={"npc_id": 13003}, dijkstra_final={"x": 1})
+        _ev2[:] = []
+        _rok = rp(_ro3, _q3, 83, "回滚后图不匹配; 拉黑跳转点 156(地图 5)")
+        check("D10a: 换路: 返回 True + 置 prefer_free + 清跨图状态",
+              _rok is True and _q3.prefer_free is True and _q3.dijkstra_route == []
+              and _q3.dijkstra_waiting is False and _q3.dijkstra_jumper is None
+              and _q3.dijkstra_final is None, (_rok, dict(_q3.__dict__)))
+        check("D10b: 换路: 有 plan → 调 __teleport_click 重规划(带 +300ms 退避)",
+              any(str(m).startswith("REPLAN") for m in _ev2) and any("+300" in str(m) or "800" in str(m) for m in _ev2),
+              _ev2)
+        _q4 = _dn.SimpleNamespace(dijkstra_plan=None, prefer_free=False, dijkstra_route=[],
+                                  dijkstra_waiting=False, dijkstra_jumper=None, dijkstra_final=None)
+        _ev2[:] = []
+        _rok2 = rp(_ro3, _q4, 83, "no plan")
+        check("D10c: 换路: 无 plan → 停链报错(STUCK)不静默",
+              _rok2 is True and any(str(m).startswith("STUCK:") for m in _ev2), _ev2)
+
+    # ---- D11: 真实链数据回归(可选; 找不到数据文件跳过) ----
+    _chain_fp = None
+    for _cand in (
+        os.path.join(script_dir, "..", "..", "..", "..", "data", "chains", "newbie_full.json"),
+        os.path.join(script_dir, "..", "..", "..", "data", "chains", "newbie_full.json"),
+    ):
+        if os.path.exists(_cand):
+            _chain_fp = _cand
+            break
+    if _chain_fp and fr is not None:
+        try:
+            import json as _json9
+            _cd = _json9.load(open(_chain_fp, encoding="utf-8"))
+            _q_r = _dn.SimpleNamespace(chain={"dijkstra": _cd.get("dijkstra", {})},
+                                       hop_black={}, prefer_free=True)
+            _rr = fr(_q_r, 5, 612)
+            check("D11a: 真实链数据: prefer_free 5→612 全免费(末跳 dest 83)",
+                  _rr is not None and all(int(h.get("cost_money") or 0) == 0 for h in _rr)
+                  and _rr[-1].get("destination_index") == 83,
+                  [(h.get("destination_index"), h.get("cost_money")) for h in (_rr or [])])
+            _q_r2 = _dn.SimpleNamespace(chain={"dijkstra": _cd.get("dijkstra", {})},
+                                        hop_black={}, prefer_free=False)
+            _rr2 = fr(_q_r2, 5, 612)
+            check("D11b: 真实链数据: 默认仍为最短跳(付费 156 在前, 行为不回退)",
+                  _rr2 is not None and _rr2[0].get("destination_index") == 156,
+                  [(h.get("destination_index"), h.get("cost_money")) for h in (_rr2 or [])])
+        except Exception as _e11:  # noqa
+            check("D11: 真实链数据回归", False, str(_e11))
+    else:
+        print("[SKIP] D11: 未找到 data/chains/newbie_full.json(或 D9 提取失败), 跳过真实数据回归")
+
     nfail = 0
     for name, ok, detail in results:
         if ok:
