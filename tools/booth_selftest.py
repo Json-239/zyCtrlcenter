@@ -71,6 +71,7 @@ _p3_mod.C2S_SELLER_START_BOOTH = 80170
 _p3_mod.C2S_UP_SELLER_ITEM = 80236
 _p3_mod.C2S_SELLER_CLOSE_BOOTH = 80070
 _p3_mod.C2S_PLAYERMOVE = 10001
+_p3_mod.C2S_NOTIFY_POSITION = 10002
 sys.modules["protocol3"] = _p3_mod
 
 # robot_path: FakeFinder（用例控制返回路径）
@@ -100,6 +101,18 @@ sys.modules["quest_engine"] = _qe_mod
 _cfg_mod = types.ModuleType("config")
 _cfg_mod.quest_walk_speed = 5.0
 sys.modules["config"] = _cfg_mod
+
+# robot_operator: set_pose 直接写 m_pose（本地推进用）
+_ro_op = types.ModuleType("robot_operator")
+
+
+def _fake_set_pose(ro, x, y, mapid=None, source=""):
+    ro.m_pose[0] = int(x)
+    ro.m_pose[1] = int(y)
+
+
+_ro_op.set_pose = _fake_set_pose
+sys.modules["robot_operator"] = _ro_op
 
 # client: 物品名表
 _cl_mod = types.ModuleType("client")
@@ -257,7 +270,7 @@ check("流程: INIT→GOTO", ro.m_booth.state == "GOTO", ro.m_booth.state)
 t += 1000
 booth.tick(ro, t)                    # GOTO: 已到位 → OPEN
 check("流程: GOTO 到位→OPEN", ro.m_booth.state == "OPEN", ro.m_booth.state)
-t += 1000
+t += 2000                         # 等 open_hold_until(1.5s) 过
 booth.tick(ro, t)                    # OPEN: 发开摊
 sent0 = list(ro.sent)
 check("流程: 开摊发包 80170 [name,poster]",
@@ -339,7 +352,16 @@ booth.tick(ro, t)                    # GOTO: 发一批 PLAYERMOVE
 mv = [x for x in ro.sent if x[0] == 10001]
 check("走路: 发送 C2S_PLAYERMOVE 批次",
       mv and mv[-1][1][0] == 2 and len(mv[-1][1][1]) == 4, mv[-1:] if mv else None)
-# 模拟服务端推进位置到最后一格（dist<=20 → arrived, 不再寻路）
+# 本地推进：时间推过批次估算 → tick 应把 m_pose 推到该批终点（服务端不回发本人移动）
+t += 3000
+booth.tick(ro, t)
+check("走路: 本地推进 m_pose → 批终点(1360,1050)",
+      tuple(ro.m_pose[:2]) == (1360, 1050), tuple(ro.m_pose[:2]))
+npos = [x for x in ro.sent if x[0] == 10002]
+check("走路: 本地推进时上报 C2S_NOTIFY_POSITION [2,x,y,1]",
+      npos and npos[-1][1] == [2, 1360, 1050, 1], npos[-1:] if npos else None)
+
+# 到最后一格附近（dist<=20 → arrived, 不再寻路）
 _FakeFinder.PATH = None
 ro.m_pose = [1409, 1109, 0]
 booth._PLAN_CACHE["ms"] = 0
@@ -364,6 +386,43 @@ booth.tick(ro, t)                    # 超时 → 超上限 → FAIL
 check("开摊: 超时重试上限 → FAIL", ro.m_booth.state == "FAIL"
       and len([x for x in ro.sent if x[0] == 80170]) == 2,
       [x for x in ro.sent if x[0] == 80170])
+
+# ================================================================ 6b) 1191 扫描换点
+rm_plan()
+write_plan(base_plan(cell=[1409, 1109],
+                     scan={"cx": 1409, "cy": 1109, "step": 32, "max": 3}))
+_FakeFinder.PATH = [(1377, 1077)]
+ro = FakeRobot(pos=(1409, 1109))
+t = 46000
+booth.tick(ro, t)                    # 激活 INIT→GOTO
+t += 1000
+booth.tick(ro, t)                    # GOTO(到位)→OPEN
+t += 2000                         # 等 open_hold_until(1.5s) 过
+booth.tick(ro, t)                    # 发开摊 try1
+b = ro.m_booth
+check("扫描: 初始 cell", b.cell == (1409, 1109) and b.scan_enabled, (b.cell, b.scan_enabled))
+open1 = [x for x in ro.sent if x[0] == 80170]
+check("扫描: 第一次开摊已发", len(open1) == 1, open1)
+booth.on_notice(ro, "[1191, []]")     # 此地禁止摆摊
+t += 500
+booth.tick(ro, t)                     # → 换点 → GOTO
+check("扫描: 1191 → 换点 GOTO", b.state == "GOTO" and b.cell == (1377, 1077),
+      (b.state, b.cell))
+check("扫描: 失败点入 tried", b.scan_tried and b.scan_tried[-1] == (1409, 1109),
+      b.scan_tried)
+check("扫描: 剩余点 2", len(b.scan_points) == 2, b.scan_points)
+t += 1000
+booth.tick(ro, t)                     # GOTO: 发批次走 45px
+t += 3000
+booth.tick(ro, t)                     # 本地推进 → arrived → OPEN
+t += 2000                             # 等 open_hold_until(1.5s) 过
+booth.tick(ro, t)                     # 发开摊 try1（新点）
+check("扫描: 新点开摊已发", len([x for x in ro.sent if x[0] == 80170]) == 2,
+      [x for x in ro.sent if x[0] == 80170])
+booth.on_seller_start_booth(ro, [8000216, 1, "杂货小摊", 1377, 1077])
+t += 500
+booth.tick(ro, t)                     # → UP
+check("扫描: 第二点开摊成功 → UP", b.state == "UP" and b.open_ok, (b.state, b.cell))
 
 # ================================================================ 7) 上架被拒 notice
 rm_plan()
@@ -453,6 +512,12 @@ n_before = len([x for x in _diag_lines if "NOTICE" in x])
 booth.on_notice(ro2, "摆摊成功")     # ro2 无 m_booth
 check("S2C: notice 非激活不记录",
       len([x for x in _diag_lines if "NOTICE" in x]) == n_before)
+# 数字码形态的 notice（如 [1191, []] = 此地禁止摆摊）也要记录（曾被关键词过滤漏记）
+n0 = len([x for x in _diag_lines if x.startswith("BOOTH_SELFTEST NOTICE")])
+booth.on_notice(ro, "[1191, []]")    # ro 激活中（b.enabled=True）
+n1 = len([x for x in _diag_lines if x.startswith("BOOTH_SELFTEST NOTICE")])
+check("S2C: 数字码 notice 也记录(已去关键词过滤)",
+      n1 == n0 + 1 and "[1191" in _diag_lines[-1], _diag_lines[-1] if _diag_lines else "")
 
 # ================================================================ 10) 激活中撤计划 → DISABLED
 rm_plan()
@@ -516,6 +581,24 @@ booth._PLAN_CACHE["ms"] = 0
 t += 1000
 booth.tick(ro, t)
 check("占位: 停用恢复为残留对象", ro.m_collect_walk is old_dead, ro.m_collect_walk)
+
+# 上一轮占位的残留（跨 reload 换类：isinstance 失效 → 必须靠标记识别）——
+# 不能被当"真实游荡"保留, 停用后必须恢复为 None（防残留被 random_walk 消费：生产事故）
+rm_plan()
+write_plan(base_plan())
+ro = FakeRobot(mapid=11, pos=(1409, 1109))
+leftover = types.SimpleNamespace(_booth_dummy=True, enabled=True, mapid=11, state="booth")
+ro.m_collect_walk = leftover
+t = 78000
+booth.tick(ro, t)
+check("占位: 残留占位按标记识别替换(walk_saved=None)",
+      ro.m_booth.walk_dummy and ro.m_booth.walk_saved is None
+      and getattr(ro.m_collect_walk, "_booth_dummy", False) is True, ro.m_collect_walk)
+rm_plan()
+booth._PLAN_CACHE["ms"] = 0
+t += 1000
+booth.tick(ro, t)
+check("占位: 停用后不留残留（恢复 None）", ro.m_collect_walk is None, ro.m_collect_walk)
 
 # ================================================================ 11) dispatch_cmd
 rm_plan()
