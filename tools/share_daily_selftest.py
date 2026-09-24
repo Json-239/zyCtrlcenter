@@ -1083,6 +1083,8 @@ getattr(S, "__request_stop")(r, g, "DAILY_LIMIT", "x")
 ev = _EMITTED[-1] if _EMITTED else {}
 check("S23 上报事件含 state/reason/done/limit",
       all(k in ev for k in ("state", "reason", "done", "limit")), str(ev)[:120])
+check("S23 上报事件含 share_key（中控按 key 记账，防落回神捕；P1 联调契约）",
+      ev.get("share_key") == "share_daily_大唐神捕", str(ev)[:120])
 r = fresh_robot()
 g = new_state()
 r.m_share_daily = g
