@@ -282,6 +282,41 @@ func (a *API) shareDailyStop(accs []string) int {
 	return 0
 }
 
+// dailyActiveAccounts 给定账号集合中"有活跃分享日常"的号（accs 为空 = 全部号，升序稳定）。
+//
+// 判据（2026-09-24）：心跳 daily 条目存在且相位非 STOPPED —— 机器人只在 enabled=true 时
+// 上报 daily，所以"有条目"就是"当前在跑"；满额收工的号机器人会自己 request_stop
+// （且相位为 STOPPED），不需要再补一刀。用于「停止」= 停当前任务时的收工名单：
+// 既有 stop 只停任务链 + 抓鬼，神捕会话不会停（用户观感"点了停止神捕还在跑"）。
+func (a *API) dailyActiveAccounts(accs []string) []string {
+	if a.St == nil {
+		return nil
+	}
+	key := a.shareDailyKey()
+	want := map[string]bool{}
+	for _, acc := range accs {
+		if acc != "" {
+			want[acc] = true
+		}
+	}
+	out := []string{}
+	for _, r := range a.St.Snapshot() {
+		if len(want) > 0 && !want[r.Account] {
+			continue
+		}
+		e, ok := r.DailyOf(key)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(e.State), "STOPPED") {
+			continue
+		}
+		out = append(out, r.Account)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // shareDailyStopAll 停掉全部在跑分享日常的号（停策略时收工）；返回下发条数。
 func (a *API) shareDailyStopAll(reason string) int {
 	accs := a.daily.accounts()

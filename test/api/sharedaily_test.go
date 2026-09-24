@@ -495,7 +495,9 @@ func TestShareDailyFullMarkedAfterStop(t *testing.T) {
 	}
 }
 
-// 开关默认关：≥40 号在「自动分配」仍走抓鬼（旧路径），shenbu 分支不可达。
+// 开关默认关 + 没有神捕会话（无 daily 心跳条目）：≥40 号在「自动分配」仍走抓鬼（旧路径），
+// shenbu 意图分支不可达。（2026-09-24 调整：带 daily 未满条目的号改走"续跑"，见
+// restore_task_test.go 的 TestStartResumesRunningShareDaily。）
 func TestStartAutoWithoutShareDailyFlagKeepsLegacy(t *testing.T) {
 	env := newTestEnv(t, "")
 	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
@@ -505,8 +507,7 @@ func TestStartAutoWithoutShareDailyFlagKeepsLegacy(t *testing.T) {
 
 	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
 		"robots": []any{map[string]any{"account": "sd7@xy3.com", "level": 45, "online": true,
-			"state": "IDLE", "task_index": 0,
-			"daily": map[string]any{"share_key": "share_daily_大唐神捕", "done": 0, "limit": 10, "state": "IDLE"}}},
+			"state": "IDLE", "task_index": 0}},
 		"_zone": testsupportZone()})
 
 	_, body := postJSON(t, env.srv.URL+"/api/start", map[string]any{
@@ -516,7 +517,7 @@ func TestStartAutoWithoutShareDailyFlagKeepsLegacy(t *testing.T) {
 	}
 	cmd := rb.ReadCmd(t, 2*time.Second)
 	if cmd["cmd"] != "ghost_start" {
-		t.Fatalf("开关默认关：45 级号（daily 未满）应仍走抓鬼旧路径: %v", cmd)
+		t.Fatalf("开关默认关：45 级号（无神捕会话）应仍走抓鬼旧路径: %v", cmd)
 	}
 	groups, _ := body["groups"].(map[string]any)
 	if len(asSlice(groups["share_daily_start"])) != 0 {

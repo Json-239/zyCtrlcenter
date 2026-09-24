@@ -710,7 +710,15 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			if a.shareDailyMoneyShort(r, cfg.BalanceGate) {
 				continue // 余额闸（策略配置 balance_gate；余额未知不拦）：传送费不够 → 派了又停
 			}
-			if k := kinds[acc]; k != "" && k != intent.KindShenbu {
+			// 2026-09-24 用户口径（启动/轮转 = 恢复当前任务）：**当天有 daily 心跳记录且未满的
+			// 神捕号不再让路** —— 该号确实在跑神捕（机器人只在 enabled=true 时上报 daily），
+			// 定时任务据此自动捡回"掉任务/停机"的当天神捕号（对齐轮转模型）。
+			// 无记录 / 满额的仍走原让路规则（满额上面已 continue，这里复判防顺序漂移）。
+			assigned := false
+			if _, has := r.DailyOf(a.shareDailyKey()); has && !a.shareDailyFullToday(acc, r) {
+				assigned = true
+			}
+			if k := kinds[acc]; k != "" && k != intent.KindShenbu && !assigned {
 				ghostFull := (a.St != nil && a.St.GhostDoneToday(acc)) || ghostDailyFull(r)
 				if !(k == intent.KindGhost && ghostFull) {
 					continue // 别的链在用（新手链 / 抓鬼未满）→ 让路
@@ -836,14 +844,24 @@ func (a *API) autotaskOnlineCount(kind autotask.Kind) int {
 			}
 			continue
 		}
+		if kind == autotask.KindShenbu {
+			// 2026-09-24 大唐神捕改按**心跳 daily 在跑**计（同抓鬼/孵化口径）：
+			// 开关关（意图恒 ghost）时 online 也能正确（此时按意图算永远是 0，池会空转
+			// "没号可拉"、配额口径失真）；条目存在且相位非 STOPPED、未满 = 真在跑。
+			// 判据与 decideKind 的"续跑"一致（机器人只在 enabled=true 时上报 daily）。
+			if e, ok := r.DailyOf(a.shareDailyKey()); ok &&
+				strings.ToUpper(strings.TrimSpace(e.State)) != "STOPPED" &&
+				!(e.Limit > 0 && e.Done >= e.Limit) {
+				n++
+			}
+			continue
+		}
 		if string(kinds[r.Account]) != string(kind) {
 			continue
 		}
 		if kind == autotask.KindGhost && !r.GhostActive() {
 			continue // 在线但无活跃抓鬼会话 = 没真在跑（卡死/会话丢失/已停），不计入保持数
 		}
-		// 大唐神捕（shenbu）暂按"在线 + 意图"计（与新手链同款，见上：心跳 daily 块落地前
-		// 拿不到活跃会话）；口径保守（宁可少派，不会超发），后续收紧为"活跃会话 + 意图兜底"。
 		n++
 	}
 	return n

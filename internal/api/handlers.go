@@ -802,7 +802,7 @@ func (a *API) intentKinds() (map[string]intent.Kind, map[string]string) {
 	return kinds, reasons
 }
 
-// decideKind 该账号"应该跑哪条链"：优先运行时意图表，其次账号池里的当前条件。
+// decideKind 该账号"应该跑哪条链"：先"恢复当前任务"，其次运行时意图表，最后账号池里的当前条件。
 //
 // 池内回退的由来（判据与「自动分配」完全一致，勿改）：
 // ≥31 级或链已完成 → 抓鬼；<31 → 新手链；等级未知 → 不瞎判（返回空 kind，由调用方回落指定链）。
@@ -810,6 +810,18 @@ func (a *API) intentKinds() (map[string]intent.Kind, map[string]string) {
 // 2026-09-23 分享日常：开关关闭（默认）时与旧判据完全一致（心跳缺失=未知，不判 shenbu）；
 // 开启后 ≥40 且心跳 daily 明确"今日未满" → 大唐神捕（与 intent.DecideDaily 同源）。
 func (a *API) decideKind(acc string, kinds map[string]intent.Kind, reasons map[string]string) (intent.Kind, string) {
+	// 2026-09-24 用户口径：**启动 = 恢复当前任务**（掉任务/停机后点启动接着跑）；
+	// "派什么任务"完全交给定时任务策略 + 后续日常轮转。判据 = 心跳 daily 有该玩法且未满：
+	// 机器人只在 enabled=true 时上报 daily，所以"有条目"就是"当前确实在跑神捕"
+	//（与 CTRL_SHARE_DAILY 开关无关：开关只管意图判据的灰度，不管"恢复现状"）。
+	// 满额（含独立满额表）不走这条 → 回落意图，把神捕名额让出来。
+	if a.St != nil {
+		if r, ok := a.St.Get(acc); ok {
+			if e, has := r.DailyOf(a.shareDailyKey()); has && !a.shareDailyFullToday(acc, r) {
+				return intent.KindShenbu, fmt.Sprintf("今日大唐神捕 %d/%d 未满（续跑）", e.Done, e.Limit)
+			}
+		}
+	}
 	if kind := kinds[acc]; kind != "" {
 		return kind, reasons[acc]
 	}
@@ -875,11 +887,20 @@ func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
 		cmd["accounts"] = accounts
 	}
 	ok := a.Events.SendCmd(cmd, "stop")
+	// 2026-09-24 用户口径：**停止 = 停当前任务** —— 既有 stop 只停任务链 + 抓鬼，
+	// 神捕（分享日常）会话不停（用户观感"点了停止神捕还在跑"）；对心跳 daily 在跑的号
+	// 补发 share_daily_stop 收工。账号为空（停全部）→ 取快照里所有活跃 daily 的号。
+	dailyAccs := a.dailyActiveAccounts(accounts)
+	dailyN := a.shareDailyStop(dailyAccs)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "stop",
-		"zone": a.currentZoneKey(), "accounts": accounts, "paused": pausedN, "sent": ok})
+		"zone": a.currentZoneKey(), "accounts": accounts, "paused": pausedN, "sent": ok,
+		"daily_stop": dailyN, "daily_accounts": dailyAccs})
 	msg := okMsg(ok, "已下发停链")
 	msg += "；已标人工暂停 " + itoa(pausedN) + " 个（自动编排不再拉起；再点「启动/立即补发/上线」解除）"
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "paused": pausedN, "msg": msg})
+	if dailyN > 0 {
+		msg += "；已给 " + itoa(dailyN) + " 个在跑的大唐神捕下发收工"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "paused": pausedN, "daily_stop": dailyN, "msg": msg})
 }
 
 // cancelRegHost 取消自动重登恢复：给了账号就取消这些；没给（=全部）就清空待恢复列表。
