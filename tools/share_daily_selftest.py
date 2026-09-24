@@ -14,7 +14,7 @@
   S10 多点轮换（当前图优先 / 跳过已去过 / 耗尽清空）
   S11 重生等待（三点耗尽→退避，坐标不缓存）
   S12 巡逻选点（复用 walk_point_connected / 范围 = PATROL_RANGE / 基准点回退当前图）
-  S16 接取白名单放宽（源码级：zhuaogui 与 share_daily_ 前缀 / allow_auto_accept 覆盖）
+  S16 接取白名单放宽（源码级：zhuaogui/shenbu_nav/fenghuo_nav 与 share_daily_ 前缀 / allow_auto_accept 覆盖）
   S17 __roots_from_chain 列全四个任务号
   S18 parse_task_attr 与抓鬼实测样本回归一致 + 12055 可解析
   S19 点击怪先置 quest.fight_ctx（普攻闸）
@@ -915,9 +915,9 @@ check("S12 巡逻参数照抄客户端(400/300)",
 # 13) S16 · 接取白名单（源码级）
 # ================================================================
 src_qe = open(os.path.join(SCRIPT_DIR, "quest_engine.py"), encoding="utf-8").read()
-check("S16 白名单含 zhuaogui + shenbu_nav + share_daily_ 前缀",
+check("S16 白名单含 zhuaogui + shenbu_nav + fenghuo_nav + share_daily_ 前缀",
       'startswith("share_daily_")' in src_qe and '_chain_id != "zhuaogui"' in src_qe
-      and '"shenbu_nav"' in src_qe)
+      and '"shenbu_nav"' in src_qe and '"fenghuo_nav"' in src_qe)
 check("S16 支持链数据 allow_auto_accept 覆盖", "allow_auto_accept" in src_qe)
 
 # ================================================================

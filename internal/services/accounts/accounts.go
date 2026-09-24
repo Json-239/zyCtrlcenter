@@ -458,7 +458,8 @@ func (p *Pool) Stats(zone string) map[string]int {
 // 反复选中，新手号/号段靠后的号永远轮不到）：
 //  1. 从没上过线（LastOnline<=0）排最前；
 //  2. 其余按 LastOnline 升序（最久没上的优先）；
-//  3. 同值用随机源打破平局（先整体洗牌再稳定排序 → 平局组内顺序随机）。
+//  3. 同值用随机源打破平局（先按名字定序、再整体洗牌、最后稳定排序 → 平局组内顺序
+//     完全由随机源决定：注入固定序列可复现，生产上即"从平局组里随机挑"）。
 //
 // LastOnline 的维护见 TouchOnline（上线下发成功后回写；不更新会退化成"固定一批号"）。
 func (p *Pool) Pick(zone string, limit int, onlyUsable bool, exclude map[string]bool) []string {
@@ -475,6 +476,11 @@ func (p *Pool) Pick(zone string, limit int, onlyUsable bool, exclude map[string]
 		}
 		cands = append(cands, a)
 	}
+	// 先按名字定序：p.accounts 是 map（遍历顺序随机），不定序会引入"map 随机 × 随机源"
+	// 双重随机 —— 平局结果无法注入复现（TestPickTieBreakUsesInjectedRand 曾偶发失败：
+	// 两次调用的 map 顺序恰好相反时，不同随机源给出同一个平局结果）。定序后随机性只
+	// 来自 rnd 一处：平局分布不变，注入固定序列即可复现/验证。
+	sort.Slice(cands, func(i, j int) bool { return cands[i].Name < cands[j].Name })
 	shuffleAccounts(cands, p.rndOr())
 	sort.SliceStable(cands, func(i, j int) bool {
 		return onlineLess(cands[i].LastOnline, cands[j].LastOnline)
