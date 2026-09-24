@@ -632,8 +632,11 @@ def main():
     #   __do_walk 双保险 / 全局导航链缓存坐标兜底(P4)。
     check("D0: __find_dijkstra_route 支持 _free_only 免费优先参数",
           "_ignore_blacklist=False, _free_only=None):" in qe)
-    check("D1: prefer_free 时先试全免费路线(入口两阶段, 不通再放开付费)",
-          'if bool(getattr(quest, "prefer_free", False)) and not _ignore_blacklist:' in qe
+    # 2026-09-24 更新锚点: 入口重构为 _pf 变量(同语义) + newbie_full 默认免费优先
+    #   (见 tools/newbie_shop_conflict_selftest.py Q1; 付费边放开路径不变)。
+    check("D1: 免费优先两阶段入口保留(不通再放开付费; 含 newbie_full 默认)",
+          '_pf = bool(getattr(quest, "prefer_free", False))' in qe
+          and 'if _pf and not _ignore_blacklist:' in qe
           and "_ignore_blacklist=False, _free_only=True)" in qe)
     check("D2: 免费阶段跳过付费边(cost_money>0)",
           'if _free_only and int(e.get("cost_money") or 0) > 0:' in qe)

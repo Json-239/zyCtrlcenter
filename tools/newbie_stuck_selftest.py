@@ -296,7 +296,9 @@ def main():
           and "def __rollback_optimistic_and_replan(robot_object, quest, hop, note):" in qe)
     check("G2: 换路重规划 + prefer_free 两阶段保留",
           "def __replan_after_bad_hop(robot_object, quest, dest, note):" in qe
-          and 'if bool(getattr(quest, "prefer_free", False)) and not _ignore_blacklist:' in qe)
+          # 2026-09-24 更新锚点: 两阶段入口重构为 _pf(同语义) + newbie_full 默认免费优先
+          and '_pf = bool(getattr(quest, "prefer_free", False))' in qe
+          and 'if _pf and not _ignore_blacklist:' in qe)
     check("G3: 坐标三级兜底(静态→实时→全局缓存)保留",
           "用全局导航链缓存坐标" in qe and "用实时坐标" in qe)
     check("G4: 乐观改图('主动同步'+m_mapid_optimistic 标记)本身未改",
