@@ -190,7 +190,7 @@ const svrOnline = computed(() => {
   const source = String(s.source || '')
   const sourceText = source === 'svr_provider' ? '直连游戏服 /gm/online'
     : source === 'svr' ? '机器人 @online 回执'
-    : source === 'local' ? '无服务端读数' : ''
+      : source === 'local' ? '无服务端读数' : ''
   return { count: Number(s.count || 0), ageText, source, sourceText }
 })
 
@@ -547,7 +547,7 @@ async function removeOffline() {
     if (res && res.ok) ok += chunk.length
     await new Promise((r) => setTimeout(r, 200))
   }
-      // 每批都被 post() 弹过一次提示，这里再汇总一句总数（批量操作要看最后结果）
+  // 每批都被 post() 弹过一次提示，这里再汇总一句总数（批量操作要看最后结果）
   ElMessage({ type: ok === accs.length ? 'success' : 'warning', message: `已移除掉线号 ${ok}/${accs.length} 个` })
 }
 
@@ -706,7 +706,7 @@ function taskCellHint(r) {
   lines.push(`新手链：${r.chain_done ? '已完成' : '未完成'}，链内已完成 ${Number(r.done) || 0} 个任务`)
   lines.push(g
     ? `抓鬼会话：${g.enabled === true ? '进行中' : '已停'}${g.state ? `（${g.state}）` : ''}` +
-      `，今日 ${Number(g.done) || 0}/${Number(g.limit) || 0}`
+    `，今日 ${Number(g.done) || 0}/${Number(g.limit) || 0}`
     : '抓鬼会话：无')
   return lines.join('\n')
 }
@@ -736,7 +736,9 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
   <!-- 第一行统计卡：信息与原来一致，改成 el-card + 图标 + 大字号数字（数字跳动动画保留） -->
   <div class="grid cols-5 stat-grid">
     <el-card class="stat-card" shadow="never">
-      <div class="label"><el-icon><UserFilled /></el-icon>在线 / 机器人（握手口径）</div>
+      <div class="label"><el-icon>
+          <UserFilled />
+        </el-icon>在线 / 机器人（握手口径）</div>
       <div class="value">
         {{ counts.handshake }}<span class="unit">在线</span>
         <span class="unit">·</span>
@@ -744,34 +746,42 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       </div>
       <div class="sub">在线 = 握手完成（已连上游戏服）· 机器人 = 表内全部 · 已登录角色 {{ counts.online }} 个</div>
       <div class="sub" v-if="svrOnline.count"
-           :title="`服务端全服在线角色数（含真实玩家，不只是我们的号）${svrOnline.sourceText ? ' · ' + svrOnline.sourceText : ''}`">
+        :title="`服务端全服在线角色数（含真实玩家，不只是我们的号）${svrOnline.sourceText ? ' · ' + svrOnline.sourceText : ''}`">
         🌐 全服在线（含真人）：<b>{{ svrOnline.count }}</b>
         <span class="muted">（{{ svrOnline.ageText }}）</span>
         <span class="muted" v-if="svrOnline.sourceText"> · {{ svrOnline.sourceText }}</span>
       </div>
     </el-card>
     <el-card class="stat-card" shadow="never">
-      <div class="label"><el-icon><Connection /></el-icon>控制通道</div>
+      <div class="label"><el-icon>
+          <Connection />
+        </el-icon>控制通道</div>
       <div class="value">
         <span class="dot" :class="state.status.robot_connected ? 'ok' : 'bad'"
-              :style="state.status.robot_connected ? 'animation: breath 2.4s ease-in-out infinite' : ''" />
+          :style="state.status.robot_connected ? 'animation: breath 2.4s ease-in-out infinite' : ''" />
         {{ state.status.robot_connected ? '已连接' : '未连接' }}
       </div>
       <div class="sub mono">{{ state.status.ctrl_addr || '--' }}</div>
     </el-card>
     <el-card class="stat-card" shadow="never">
-      <div class="label"><el-icon><Monitor /></el-icon>机器人进程</div>
+      <div class="label"><el-icon>
+          <Monitor />
+        </el-icon>机器人进程</div>
       <div class="value">{{ robotRunning ? '运行中' : '未运行' }}</div>
       <div class="sub">程序{{ exeExists ? '存在' : '缺失' }} · WS 客户端 {{ state.status.ws_clients ?? 0 }}</div>
     </el-card>
     <el-card class="stat-card" shadow="never">
-      <div class="label"><el-icon><WarningFilled /></el-icon>需要处理</div>
+      <div class="label"><el-icon>
+          <WarningFilled />
+        </el-icon>需要处理</div>
       <div class="value" :class="{ warnText: failed.count }">{{ failed.count }}</div>
       <div class="sub">{{ failed.count ? '重复出错 ≥ 2 次的账号' : '一切正常' }}</div>
     </el-card>
     <!-- 2026-09-23 战斗统计卡（fightStats 聚合：场次/野怪/抓鬼/耗时；数据来自机器人心跳） -->
     <el-card class="stat-card" shadow="never">
-      <div class="label"><el-icon><Aim /></el-icon>今日战斗</div>
+      <div class="label"><el-icon>
+          <Aim />
+        </el-icon>今日战斗</div>
       <div class="value">
         {{ fightStats.total }}<span class="unit">场</span>
         <span class="unit">·</span>
@@ -786,12 +796,14 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     <template #header>
       <div class="card-head">
         <span class="card-title">在线水位</span>
-        <el-tag :type="!wlReady ? 'warning' : (wl.enabled ? 'success' : 'info')" effect="plain" size="small" disable-transitions>
+        <el-tag :type="!wlReady ? 'warning' : (wl.enabled ? 'success' : 'info')" effect="plain" size="small"
+          disable-transitions>
           {{ !wlReady ? '未装配' : (wl.enabled ? '已启用' : '已停用') }}
         </el-tag>
         <span class="spacer" />
         <el-tooltip placement="top" content="开启后按间隔检查：人数不足从号池补号，超出优先断空闲号（正在抓鬼/任务的号只标“待下线”，等它收工再断）">
-          <el-switch v-model="wlForm.enabled" :disabled="!wlReady" size="small" active-text="启用" @change="toggleWaterline" />
+          <el-switch v-model="wlForm.enabled" :disabled="!wlReady" size="small" active-text="启用"
+            @change="toggleWaterline" />
         </el-tooltip>
       </div>
     </template>
@@ -807,21 +819,22 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         <b class="v" :title="wlPending.join(', ') || '没有待下线的号'">{{ wlPending.length }}</b>
         <span class="k">个（在忙，等收工）</span>
       </div>
-      <div class="metric"><span class="k">数据来源</span><b class="v" :class="{ warnText: !wl.fresh }">{{ wlSource }}</b></div>
+      <div class="metric"><span class="k">数据来源</span><b class="v" :class="{ warnText: !wl.fresh }">{{ wlSource }}</b>
+      </div>
     </div>
     <div class="param-row">
       <span class="k">目标</span>
-      <el-input-number v-model="wlForm.target" size="small" :min="0" :max="10000" :controls="false"
-                       class="num" @change="wlDirty = true" />
+      <el-input-number v-model="wlForm.target" size="small" :min="0" :max="10000" :controls="false" class="num"
+        @change="wlDirty = true" />
       <span class="k">死区 ±</span>
-      <el-input-number v-model="wlForm.dead_zone" size="small" :min="0" :controls="false"
-                       class="num-sm" @change="wlDirty = true" />
+      <el-input-number v-model="wlForm.dead_zone" size="small" :min="0" :controls="false" class="num-sm"
+        @change="wlDirty = true" />
       <span class="k">单轮上限</span>
-      <el-input-number v-model="wlForm.max_step" size="small" :min="1" :max="50" :controls="false"
-                       class="num-sm" @change="wlDirty = true" />
+      <el-input-number v-model="wlForm.max_step" size="small" :min="1" :max="50" :controls="false" class="num-sm"
+        @change="wlDirty = true" />
       <span class="k">间隔(秒)</span>
-      <el-input-number v-model="wlForm.interval_sec" size="small" :min="10" :max="3600" :controls="false"
-                       class="num-sm" @change="wlDirty = true" />
+      <el-input-number v-model="wlForm.interval_sec" size="small" :min="10" :max="3600" :controls="false" class="num-sm"
+        @change="wlDirty = true" />
       <el-button type="primary" size="small" :disabled="!wlReady" @click="saveWaterlineNums">保存水位参数</el-button>
       <span v-if="!wlReady" class="muted">中控还没装配水位保持器（需重启中控）</span>
     </div>
@@ -844,11 +857,13 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     <template #header>
       <div class="card-head">
         <span class="card-title">游荡池</span>
-        <el-tag :type="rpTag.cls === 'ok' ? 'success' : (rpTag.cls === 'warn' ? 'warning' : 'info')"
-                effect="plain" size="small" disable-transitions>{{ rpTag.text }}</el-tag>
+        <el-tag :type="rpTag.cls === 'ok' ? 'success' : (rpTag.cls === 'warn' ? 'warning' : 'info')" effect="plain"
+          size="small" disable-transitions>{{ rpTag.text }}</el-tag>
         <span class="spacer" />
-        <el-tooltip placement="top" content="开启后每轮检查：任务池（抓鬼/新手）缺人 → 回收游荡号；否则把空闲号按各图人数从少到多轮流派出去游荡。参数落盘 data/roampool.json（默认关）">
-          <el-switch v-model="rpForm.enabled" :disabled="!rpReady" size="small" active-text="启用" @change="toggleRoampool" />
+        <el-tooltip placement="top"
+          content="开启后每轮检查：任务池（抓鬼/新手）缺人 → 回收游荡号；否则把空闲号按各图人数从少到多轮流派出去游荡。参数落盘 data/roampool.json（默认关）">
+          <el-switch v-model="rpForm.enabled" :disabled="!rpReady" size="small" active-text="启用"
+            @change="toggleRoampool" />
         </el-tooltip>
       </div>
     </template>
@@ -870,21 +885,21 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     </div>
     <div class="param-row">
       <span class="k">目标</span>
-      <el-input-number v-model="rpForm.target" size="small" :min="0" :max="10000" :controls="false"
-                       class="num" @change="rpDirty = true" />
+      <el-input-number v-model="rpForm.target" size="small" :min="0" :max="10000" :controls="false" class="num"
+        @change="rpDirty = true" />
       <span class="k">间隔(秒)</span>
-      <el-input-number v-model="rpForm.interval_sec" size="small" :min="10" :max="3600" :controls="false"
-                       class="num-sm" @change="rpDirty = true" />
+      <el-input-number v-model="rpForm.interval_sec" size="small" :min="10" :max="3600" :controls="false" class="num-sm"
+        @change="rpDirty = true" />
       <span class="k">单轮上限</span>
-      <el-input-number v-model="rpForm.max_step" size="small" :min="1" :max="50" :controls="false"
-                       class="num-sm" @change="rpDirty = true" />
+      <el-input-number v-model="rpForm.max_step" size="small" :min="1" :max="50" :controls="false" class="num-sm"
+        @change="rpDirty = true" />
       <span class="k" title="0 = 不限时（机器人端不自动收工）">限时(分)</span>
-      <el-input-number v-model="rpForm.minutes" size="small" :min="0" :max="1440" :controls="false"
-                       class="num-sm" @change="rpDirty = true" />
+      <el-input-number v-model="rpForm.minutes" size="small" :min="0" :max="1440" :controls="false" class="num-sm"
+        @change="rpDirty = true" />
       <el-checkbox v-model="rpForm.balance" size="small" title="勾选=按各图在线数从少到多轮流派（均匀）；不勾=每号自抽随机图"
-                   @change="saveRoampoolNums">按图均匀</el-checkbox>
+        @change="saveRoampoolNums">按图均匀</el-checkbox>
       <el-checkbox v-model="rpForm.reclaim_on_deficit" size="small" title="勾选=任务池缺人时立刻回收游荡号（会打断正在走的游荡，路程损耗可接受）"
-                   @change="saveRoampoolNums">缺人立刻回收</el-checkbox>
+        @change="saveRoampoolNums">缺人立刻回收</el-checkbox>
       <el-button type="primary" size="small" :disabled="!rpReady" @click="saveRoampoolNums">保存游荡池参数</el-button>
       <span v-if="!rpReady" class="muted">中控还没装配游荡池 keeper（需重启中控）</span>
     </div>
@@ -905,7 +920,9 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <span class="headline">{{ headline }}</span>
       <span class="spacer" />
       <el-button type="primary" size="small" @click="togglePicker">
-        <el-icon><Plus /></el-icon>选号上线
+        <el-icon>
+          <Plus />
+        </el-icon>选号上线
       </el-button>
       <span class="k">启动链路</span>
       <el-tooltip placement="top" content="只作用于「全部启动」（整批走这一条链）；行内「启动」按该号意图自动分配，不看这里">
@@ -913,16 +930,16 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
           <el-option value="auto" label="自动分配（按意图：等级&lt;31 新手链 / 其余抓鬼）" />
           <el-option value="" label="（只下发默认链 id）" />
           <el-option v-for="c in chains.list.filter((x) => !x.nav_only && !isDailyDecl(x))" :key="c.id" :value="c.id"
-                     :label="`${c.name || c.chain_id || c.id}（${c.task_count} 节点）`" />
+            :label="`${c.name || c.chain_id || c.id}（${c.task_count} 节点）`" />
           <el-option value="__nav_head__" disabled label="—— 以下不是可执行链 ——"
-                     v-if="chains.list.some((x) => x.nav_only || isDailyDecl(x))" />
-          <el-option v-for="c in chains.list.filter((x) => x.nav_only || isDailyDecl(x))" :key="c.id" :value="c.id" disabled
-                     :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据' : '日常声明'}，不可直接启动）`" />
+            v-if="chains.list.some((x) => x.nav_only || isDailyDecl(x))" />
+          <el-option v-for="c in chains.list.filter((x) => x.nav_only || isDailyDecl(x))" :key="c.id" :value="c.id"
+            disabled :label="`${c.name || c.chain_id || c.id}（${c.nav_only ? '导航数据' : '日常声明'}，不可直接启动）`" />
         </el-select>
       </el-tooltip>
       <el-tag size="small" effect="plain" disable-transitions
-              :type="autoMode ? 'success' : (curChain ? (curChain.error ? 'warning' : 'success') : 'warning')"
-              :title="autoMode ? '按每个账号的意图分配：新手链 → start_chain(newbie_full)；抓鬼 → ghost_start；没意图的用默认链' : ''">
+        :type="autoMode ? 'success' : (curChain ? (curChain.error ? 'warning' : 'success') : 'warning')"
+        :title="autoMode ? '按每个账号的意图分配：新手链 → start_chain(newbie_full)；抓鬼 → ghost_start；没意图的用默认链' : ''">
         {{ autoMode ? '自动分配：按意图' : (curChain ? (curChain.error ? '链文件有问题' : '链文件已就绪') : '无链文件') }}
       </el-tag>
       <el-button size="small" @click="toggleIntents">
@@ -1002,9 +1019,11 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     </el-radio-group>
     <template v-if="picker.mode === 'pick'">
       <div class="toolbar" style="margin-bottom:8px">
-        <el-input v-model="picker.keyword" size="small" placeholder="搜账号 / 角色名" clearable
-                  class="grow-sm" @keyup.enter="loadPicker(true)">
-          <template #prefix><el-icon><Search /></el-icon></template>
+        <el-input v-model="picker.keyword" size="small" placeholder="搜账号 / 角色名" clearable class="grow-sm"
+          @keyup.enter="loadPicker(true)">
+          <template #prefix><el-icon>
+              <Search />
+            </el-icon></template>
         </el-input>
         <el-checkbox v-model="picker.usable" size="small" @change="loadPicker(true)">只看可用</el-checkbox>
         <el-button size="small" @click="loadPicker(true)">查询</el-button>
@@ -1029,9 +1048,8 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         </el-table-column>
         <el-table-column label="该区可用" width="100">
           <template #default="{ row: a }">
-            <el-tag size="small" disable-transitions
-                    :type="a.usable ? 'success' : (a.verified ? 'danger' : 'info')"
-                    :effect="a.usable || a.verified ? 'light' : 'plain'">
+            <el-tag size="small" disable-transitions :type="a.usable ? 'success' : (a.verified ? 'danger' : 'info')"
+              :effect="a.usable || a.verified ? 'light' : 'plain'">
               {{ a.usable ? '可用' : (a.verified ? '不可用' : '未验证') }}
             </el-tag>
           </template>
@@ -1039,7 +1057,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         <el-table-column label="在线" width="90">
           <template #default="{ row: a }">
             <el-tag size="small" disable-transitions :type="a.online ? 'success' : 'info'"
-                    :effect="a.online ? 'light' : 'plain'">{{ a.online ? '在线' : '离线' }}</el-tag>
+              :effect="a.online ? 'light' : 'plain'">{{ a.online ? '在线' : '离线' }}</el-tag>
           </template>
         </el-table-column>
         <template #empty>
@@ -1063,8 +1081,8 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <div class="toolbar">
         <span class="spacer" />
         <el-button size="small" @click="picker.open = false">关闭</el-button>
-        <el-button v-if="picker.mode === 'pick'" type="primary" size="small"
-                   :disabled="!picker.sel.size" :loading="picker.busy" @click="onlinePicked">
+        <el-button v-if="picker.mode === 'pick'" type="primary" size="small" :disabled="!picker.sel.size"
+          :loading="picker.busy" @click="onlinePicked">
           上线选中的 {{ picker.sel.size }} 个
         </el-button>
         <el-button v-else type="primary" size="small" :loading="picker.busy" @click="autoOnline">
@@ -1078,26 +1096,28 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     <div class="toolbar" style="margin-bottom:10px">
       <el-radio-group v-model="filter" size="small" class="filter-group">
         <el-tooltip v-for="f in filters" :key="f.key" placement="top" :content="f.title || f.label"
-                    :disabled="!f.title">
+          :disabled="!f.title">
           <el-radio-button :value="f.key">{{ f.label }} {{ countsByFilter[f.key] }}</el-radio-button>
         </el-tooltip>
       </el-radio-group>
       <span class="spacer" />
       <el-button size="small" type="danger" plain :disabled="!offlineAccounts.length" @click="removeOffline"
-                 :title="offlineAccounts.length ? '一键移除所有掉线的号（离线号免确认）' : '当前没有掉线的号'">
-        <el-icon><Delete /></el-icon>移除掉线({{ offlineAccounts.length }})
+        :title="offlineAccounts.length ? '一键移除所有掉线的号（离线号免确认）' : '当前没有掉线的号'">
+        <el-icon>
+          <Delete />
+        </el-icon>移除掉线({{ offlineAccounts.length }})
       </el-button>
       <span class="muted">当前区 {{ curZone.key || '--' }} · 每 3 秒对齐一次</span>
     </div>
 
     <!-- 核心表：el-table + 固定高度内部滚动 + 分页（几百个号也只渲染当前页，页面不再整表重排） -->
-    <el-table :data="shownRows" class="dash-table" size="small" stripe :height="560"
-              row-key="account" :row-class-name="dashRowClass">
+    <el-table :data="shownRows" class="dash-table" size="small" stripe :height="560" row-key="account"
+      :row-class-name="dashRowClass">
       <el-table-column label="账号" width="200">
         <template #default="{ row: r }">
           <div class="who">
             <span class="avatar" :class="{ pulse: isActive(r) && !dense, ring: isActive(r) && dense }"
-                  :style="avatarStyle(r)">
+              :style="avatarStyle(r)">
               {{ avatarChar(r) }}
             </span>
             <div class="who-text">
@@ -1109,33 +1129,34 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       </el-table-column>
       <el-table-column label="区" width="132">
         <template #default="{ row: r }">
-          <el-tag size="small" type="info" effect="plain" disable-transitions :title="r.zone">{{ zoneFullLabel(r.zone) }}</el-tag>
+          <el-tag size="small" type="info" effect="plain" disable-transitions :title="r.zone">{{ zoneFullLabel(r.zone)
+            }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="在忙什么" width="180">
         <template #default="{ row: r }">
           <div class="state-cell" :title="statePhrase(r.state)">
             <el-tag size="small" disable-transitions :type="tagType(stateTagClass(r.state))"
-                    :effect="tagEffect(stateTagClass(r.state))">{{ stateLabel(r.state) }}</el-tag>
+              :effect="tagEffect(stateTagClass(r.state))">{{ stateLabel(r.state) }}</el-tag>
             <!-- 2026-09-22：今日抓鬼已满/不可用（服务端 task_limited 判满）→ 已转野外游荡，
                  次日次数重置后由中控重新派抓鬼。标记来自 status.ghost_done_today（跨日自动消失）。 -->
             <el-tag v-if="r.ghost_done_today" size="small" type="warning" effect="dark" disable-transitions
-                    title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
+              title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
               🈵 已抓满
             </el-tag>
             <!-- 2026-09-24：分享日常在跑标记（神捕/烽火）——大屏直接可见"在跑哪个日常、第几轮" -->
-            <el-tag v-if="dailyKindOf(r)" size="small" :type="dailyKindOf(r) === 'shenbu' ? 'warning' : 'info'"
+            <!--   <el-tag v-if="dailyKindOf(r)" size="small" :type="dailyKindOf(r) === 'shenbu' ? 'warning' : 'info'"
                     effect="dark" disable-transitions :title="dailyTitle(r)">
               {{ dailyKindOf(r) === 'shenbu' ? '🕵️神捕' : '🔥烽火' }} {{ Number(r.daily.done) || 0 }}/{{ Number(r.daily.limit) || 0 }}
-            </el-tag>
+            </el-tag>-->
             <!-- ERROR 态但没带 err_code 的号也会走这里（判据只看 state，见 isStuck），文案要有兜底 -->
             <el-tag v-if="isStuck(r)" size="small" type="danger" effect="dark" disable-transitions
-                    :title="r.err_msg || '机器人上报 ERROR（卡住/停链等待处理）——请重置或人工处理'">
+              :title="r.err_msg || '机器人上报 ERROR（卡住/停链等待处理）——请重置或人工处理'">
               {{ r.err_code || 'ERROR' }}<template v-if="r.err_repeat > 1">×{{ r.err_repeat }}</template>
             </el-tag>
             <!-- 非 ERROR 态的历史错误：弱化展示，不冒充"卡住"（见 isStuck/recentErrTitle） -->
             <el-tag v-else-if="r.err_code" size="small" type="info" effect="plain" disable-transitions
-                    :title="recentErrTitle(r)">曾出错</el-tag>
+              :title="recentErrTitle(r)">曾出错</el-tag>
           </div>
           <div class="phrase muted small">{{ dailyKindOf(r) ? dailyPhrase(r) : statePhrase(r.state) }}</div>
         </template>
@@ -1145,14 +1166,15 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
           <div class="task-cell" :title="taskCells[r.account]?.hint || ''">
             <!-- 主行：链路 + 进度（👻 抓鬼 x/50、🆕 新手链 x/52、🆕✅ 新手链完成 …） -->
             <div class="task-row">
-              <span class="tag" :class="[taskCells[r.account]?.tag, { 'num-up': r._flash }]">{{ taskCells[r.account]?.text }}</span>
+              <span class="tag" :class="[taskCells[r.account]?.tag, { 'num-up': r._flash }]">{{
+                taskCells[r.account]?.text }}</span>
               <!-- 新手链完成的号同时在抓鬼时，两个身份都要看得见 -->
               <span v-if="r.chain_done && taskCells[r.account]?.tag !== 'ok'" class="tag ok dim"
-                    title="新手链已完成（chain_done=true），这个号现在是抓鬼号">🆕✅</span>
+                title="新手链已完成（chain_done=true），这个号现在是抓鬼号">🆕✅</span>
             </div>
             <!-- 进度条：离"当天抓满 / 整条链跑完"还有多远 -->
-            <div v-if="taskCells[r.account]?.pct !== null && taskCells[r.account]?.pct !== undefined"
-                 class="task-bar" :class="taskCells[r.account]?.bar">
+            <div v-if="taskCells[r.account]?.pct !== null && taskCells[r.account]?.pct !== undefined" class="task-bar"
+              :class="taskCells[r.account]?.bar">
               <i :style="{ width: (taskCells[r.account]?.pct || 0) + '%' }" />
             </div>
             <!-- 次行：此刻在做什么（任务真名），或终态说明 -->
@@ -1184,7 +1206,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <el-table-column label="握手" width="92">
         <template #default="{ row: r }">
           <el-tag size="small" disable-transitions :type="r.hs ? 'success' : 'info'"
-                  :effect="r.hs ? 'light' : 'plain'">{{ r.hs ? '已握手' : '未握手' }}</el-tag>
+            :effect="r.hs ? 'light' : 'plain'">{{ r.hs ? '已握手' : '未握手' }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="心跳" width="96">
@@ -1196,9 +1218,8 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <el-table-column label="操作" width="188" fixed="right">
         <template #default="{ row: r }">
           <div class="row-actions">
-            <el-button link type="primary" size="small"
-                       title="按该号意图自动分配（&lt;31 级 → 新手链 / 其余 → 抓鬼），不跟随顶部「启动链路」选择器"
-                       @click="startRow(r.account)">启动</el-button>
+            <el-button link type="primary" size="small" title="按该号意图自动分配（&lt;31 级 → 新手链 / 其余 → 抓鬼），不跟随顶部「启动链路」选择器"
+              @click="startRow(r.account)">启动</el-button>
             <el-button link size="small" @click="stopRow(r.account)">停止</el-button>
             <el-button link size="small" @click="resetRow(r.account)">重置</el-button>
             <el-button link type="danger" size="small" @click="removeRow(r.account)">移除</el-button>
@@ -1218,8 +1239,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
     <div class="pager">
       <!-- 分页：默认 50/页，可切 20/50/100（页码越界由原来的 watch 收敛） -->
       <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="PAGE_SIZES"
-                     :total="filtered.length" size="small" background
-                     layout="total, sizes, prev, pager, next, jumper" />
+        :total="filtered.length" size="small" background layout="total, sizes, prev, pager, next, jumper" />
     </div>
   </el-card>
 
@@ -1250,54 +1270,169 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
    ============================================================ */
 
 /* 统计卡：网格内并排，必须抵消全局的 `.el-card + .el-card { margin-top:16px }`（那是给上下叠放用的） */
-.stat-grid { margin-bottom: 16px; }
-.stat-grid > .el-card + .el-card { margin-top: 0; }
-.stat-card { height: 100%; }
-.stat-card :deep(.el-card__body) { padding: 12px 14px; }
-.stat-card .label { display: flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 12px; }
-.stat-card .value {
-  display: flex; align-items: baseline; gap: 6px;
-  font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums;
+.stat-grid {
+  margin-bottom: 16px;
 }
-.stat-card .value .unit { font-size: 13px; font-weight: 400; color: var(--text-dim); }
-.stat-card .sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+.stat-grid>.el-card+.el-card {
+  margin-top: 0;
+}
+
+.stat-card {
+  height: 100%;
+}
+
+.stat-card :deep(.el-card__body) {
+  padding: 12px 14px;
+}
+
+.stat-card .label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.stat-card .value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 26px;
+  font-weight: 700;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-card .value .unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.stat-card .sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
 
 /* 面板卡 */
-.panel-card { margin-bottom: 16px; }
-.panel-card :deep(.el-card__header) { padding: 10px 14px; }
-.panel-card :deep(.el-card__body) { padding: 12px 14px; }
-.card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.card-title { font-size: 14px; font-weight: 600; color: var(--text-dim); }
+.panel-card {
+  margin-bottom: 16px;
+}
+
+.panel-card :deep(.el-card__header) {
+  padding: 10px 14px;
+}
+
+.panel-card :deep(.el-card__body) {
+  padding: 12px 14px;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
 
 /* 工具条 / 指标块：保持原来那种"一行塞满、窄屏自动换行"的密度 */
-.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* el-button 相邻时自带 12px 左间距，和 flex gap 叠加会变宽，这里抹平 */
-.toolbar :deep(.el-button + .el-button) { margin-left: 0; }
-.metrics { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline; }
-.metric { display: flex; align-items: baseline; gap: 5px; }
-.k { color: var(--text-dim); font-size: 12px; }
-.metric .v { font-variant-numeric: tabular-nums; }
-.metric .v.big { font-size: 20px; }
-.param-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-.num { width: 92px; }
-.num-sm { width: 78px; }
-.sub { color: var(--text-dim); font-size: 12px; margin-top: 6px; }
+.toolbar :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  align-items: baseline;
+}
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.k {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.metric .v {
+  font-variant-numeric: tabular-nums;
+}
+
+.metric .v.big {
+  font-size: 20px;
+}
+
+.param-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.num {
+  width: 92px;
+}
+
+.num-sm {
+  width: 78px;
+}
+
+.sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 6px;
+}
 
 /* 意图子面板（原来是内嵌的 .picker 块） */
 .sub-panel {
-  margin-top: 10px; padding: 10px 12px;
-  border: 1px solid var(--border); border-radius: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   background: rgba(255, 255, 255, .02);
 }
 
 /* 9 个筛选项要能换行（el-radio-group 默认一行排开） */
-.filter-group { flex-wrap: wrap; }
-.seg-row { margin-bottom: 10px; }
-.pager { display: flex; align-items: center; justify-content: flex-end; margin-top: 10px; }
+.filter-group {
+  flex-wrap: wrap;
+}
+
+.seg-row {
+  margin-bottom: 10px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
 
 /* el-table 的斑马纹/悬停底色画在 td 上，所以"进度推进闪一下"的动画也要落到 td，
    否则会被斑马纹盖住（裸 table 时代动画挂在 tr 上就够） */
-:deep(.row-flash td.el-table__cell) { animation: rowFlash .8s ease-out; }
+:deep(.row-flash td.el-table__cell) {
+  animation: rowFlash .8s ease-out;
+}
 
 /* 固定列（操作）用的是 position:sticky + background:inherit，而全局把 --el-table-tr-bg-color
    设成了 transparent → 横向滚动时右侧的列会从固定列底下透出来。
@@ -1310,6 +1445,9 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
      但固定列是 sticky，半透明底会让下面的列从它底下透出来 */
   --el-table-row-hover-bg-color: #1c2a46;
 }
+
 /* 表头行本身没有底色，固定表头要单独给（选择器要比 Element 的固定列规则更具体） */
-:deep(.el-table__header-wrapper tr th.el-table-fixed-column--right) { background-color: var(--el-table-header-bg-color); }
+:deep(.el-table__header-wrapper tr th.el-table-fixed-column--right) {
+  background-color: var(--el-table-header-bg-color);
+}
 </style>
