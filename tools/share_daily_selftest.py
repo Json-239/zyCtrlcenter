@@ -619,6 +619,56 @@ getattr(S, "__on_accept")(r, g, r.m_quest, time.time() * 1000)
 check("S8 ④走不到 NPC 20s → ACCEPT_UNREACHABLE",
       g.state == "STOPPED" and g.stop_code == "ACCEPT_UNREACHABLE",
       "%s/%s" % (g.state, g.stop_code))
+# 2026-09-24 现场回归（robot0005207 跨图途中被误判 ACCEPT_UNREACHABLE）：照抄客户端语义 ——
+# 寻路进行中不判超时；NPC 异图 → 重新寻路且清零计时；仅"同图走不到"才计 20s。
+def _accept_nav_case(robot_map, npc_map, nav_busy, arrive_age_s):
+    _r = fresh_robot()
+    _g = new_state()
+    _g.state = "ACCEPT"
+    _r.m_share_daily = _g
+    _r.m_mapid = robot_map
+    _r.m_pose = (100, 100)
+    _r.m_quest.chain = {"task_order": [{"task_index": 2028301, "thrower_npc": 13297}],
+                        "npcs": {"13297": [npc_map, 2265, 1846]}}
+    if nav_busy:
+        _r.m_quest.dijkstra_route = [[npc_map, 2265, 1846]]
+    if arrive_age_s:
+        _g.accept_arrive_ms = (time.time() - arrive_age_s) * 1000
+    _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+    getattr(S, "__on_accept")(_r, _g, _r.m_quest, time.time() * 1000)
+    return _r, _g
+
+
+r, g = _accept_nav_case(37, 12, nav_busy=True, arrive_age_s=25.0)
+check("S8 ⑤跨图寻路中(已 25s) → 不判 ACCEPT_UNREACHABLE（不打断寻路）",
+      g.state != "STOPPED", "%s/%s" % (g.state, g.stop_code))
+r, g = _accept_nav_case(37, 12, nav_busy=False, arrive_age_s=25.0)
+check("S8 ⑥NPC 异图且未在寻路 → 重新寻路 + 计时清零，不判超时",
+      g.state != "STOPPED" and g.accept_arrive_ms == 0
+      and bool(_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]),
+      "%s/%s clicks=%s" % (g.state, g.stop_code, _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"][:1]))
+r, g = _accept_nav_case(12, 12, nav_busy=False, arrive_age_s=25.0)
+check("S8 ⑦同图但走不到 25s → 仍判 ACCEPT_UNREACHABLE（保留原语义）",
+      g.state == "STOPPED" and g.stop_code == "ACCEPT_UNREACHABLE",
+      "%s/%s" % (g.state, g.stop_code))
+# 2026-09-24 现场回归（robot0005275 接取对话被误判"无关对话"）：g.accept_npc 此前从未赋值，
+# __on_show_dialog 的"本 run 对话"判定恒 False → 接取对话全被退出 → 接取失败。
+r = fresh_robot()
+g = new_state()
+g.state = "ACCEPT"
+r.m_share_daily = g
+r.m_quest.chain = {"task_order": [{"task_index": 2028301, "thrower_npc": 13297}]}
+getattr(S, "__on_accept")(r, g, r.m_quest, time.time() * 1000)
+check("S8 ⑧ __on_accept 写回 accept_npc（供对话归属判定）",
+      g.accept_npc == 13297, str(g.accept_npc))
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlg = [0, 0, 13297, "我奉命来调查朝廷重臣的行踪，请把你知道的事情告诉我吧。", 0,
+        [("#i901#大唐神捕", 0), ("离开", 1)]]
+getattr(S, "__on_show_dialog")(r, g, _dlg)
+_sched = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("S8 ⑨ 接取对话（#i901#大唐神捕）→ 选接取项而非退出项",
+      bool(_sched) and _sched[-1].get("data", {}).get("option_index") == 0,
+      str(_sched[-1:]))
 
 # ================================================================
 # 10) S9 · 交付（不覆盖 catcher / 先等一拍 / 12 次上限）
