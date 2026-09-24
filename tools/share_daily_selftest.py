@@ -97,6 +97,7 @@ class FakeQuest(object):
         self.npc_cand_idx = 0
         self.bag = {}
         self.chain = None
+        self.shop_ctx = None
         self.chain_id = ""
         self.chain_task_set = None
         self.chain_done = False
@@ -360,8 +361,9 @@ def counter(ctype, obj=0, cur=0, req=1):
 # 2) S1 · 配置层
 # ================================================================
 check("S1 配置加载成功", CFG.loaded, CFG.load_error)
-check("S1 加载行数 = CSV 数据行数(2)",
-      sorted(CFG.keys_order) == sorted(["share_daily_捉鬼", "share_daily_大唐神捕"]),
+check("S1 加载行数 = CSV 数据行数(3: 捉鬼/神捕/宫廷10)",
+      sorted(CFG.keys_order) == sorted(["share_daily_捉鬼", "share_daily_大唐神捕",
+                                        "share_daily_宫廷10"]),
       str(CFG.keys_order))
 kw = CFG.get_keywords("share_daily_大唐神捕")
 check("S1 keywords 拆分为 [大唐神捕, 回复张忍慎]",
@@ -466,14 +468,20 @@ check("S5 同源校验: 同一 store 两实现结果一致(捉鬼段)",
 check("S5 神捕段纯函数取最大(2028301/2028302 同 key 共享)",
       S.scan_task_limited_max(_store, [2028301, 2028302, 2028311, 2028399]) == 4)
 check("S5 空 store → None", S.scan_task_limited_max({}, [2028301]) is None)
-# 计数口径（关键）：只扫主 share_daily 的 episode_root = task_order 首任务号；
-# reply 条目（2028311/2028399 各自为根、daily_limit=-1）每轮 +2，全链取最大会虚高一倍
+# 计数口径（关键）：扫 task_order 前两条（A/B 主任务）——容器 root = 首个被接的主任务
+# （A 先接→2028301；B 先接→2028302；2026-09-24 修正：只扫首条会漏 B 先接的号）；
+# reply 条目（2028311/2028399 各自为根、daily_limit=-1）每轮 +2，全链取最大会虚高一倍。
+# 2026-09-24 P1-g：__main_count_roots 增加 share_key（按配置 chain 列判断 reply 链 → 只取主任务；
+#   烽火无 reply 链 → 排除 chain_task 收尾后全扫），下面同时覆盖神捕（回归）与烽火（新增）。
 _sb_chain = new_state().chain
-_main_roots = getattr(S, "__main_count_roots")(_sb_chain)
-check("S5 主键计数只扫 task_order 首任务号", _main_roots == [2028301], str(_main_roots))
+_main_roots = getattr(S, "__main_count_roots")(_sb_chain, "share_daily_大唐神捕")
+check("S5 主键计数扫 task_order 前两条（A/B 主任务）", _main_roots == [2028301, 2028302], str(_main_roots))
 _store2 = {"2028301": 3, "2028311": 6, "2028399": 6}
 check("S5 reply 条目(6)不污染主键计数(3)",
       S.scan_task_limited_max(_store2, _main_roots) == 3)
+_store2b = {"2028302": 2, "2028311": 4, "2028399": 4}  # B 先接：容器在 2028302
+check("S5 B 先接的号也能扫到（2028302 容器=2）",
+      S.scan_task_limited_max(_store2b, _main_roots) == 2)
 r = fresh_robot()
 g = new_state()
 r.m_share_daily = g
@@ -482,6 +490,61 @@ g.settle_at_ms = time.time() * 1000 - 1
 g.settle_summary = True
 getattr(S, "__check_settle")(r, g, time.time() * 1000)
 check("S5 轮次结算按主键校准(3, 非 6)", g.done_count == 3, str(g.done_count))
+# 2026-09-24：今日完成数持久化（服务端无记录 + 机器人重启不丢；现场 5275 跑过 1 轮重启回 0）
+import json as _json
+import tempfile as _tempfile
+_tmpdir = _tempfile.mkdtemp(prefix="sd_ct_")
+os.environ["ZCC_SHARE_DAILY_STATE_DIR"] = _tmpdir
+r = fresh_robot()
+g = new_state()
+g.done_count = 1
+check("S5b 计数落盘 ok", getattr(S, "__save_local_count")(r, g) is True)
+check("S5b 计数读回 = 1", getattr(S, "__load_local_count")(r) == 1)
+_p = getattr(S, "__ct_state_path")(r)
+with open(_p, "w", encoding="utf-8") as _f:
+    _json.dump({"date": "19700101", "done": 9}, _f)
+check("S5b 旧日期记录不认", getattr(S, "__load_local_count")(r) == 0)
+with open(_p, "w", encoding="utf-8") as _f:
+    _f.write("{broken")
+check("S5b 损坏文件按无记录", getattr(S, "__load_local_count")(r) == 0)
+# 启动时本地计数恢复（无服务端记录场景）：预写今日 1 → start 后 done=1
+with open(_p, "w", encoding="utf-8") as _f:
+    _json.dump({"date": time.strftime("%Y%m%d"), "done": 1}, _f)
+r = fresh_robot()
+g = S.ShareDailyState()
+r.m_share_daily = g
+_rep = S.dispatch_cmd(r, {"cmd": "share_daily_start", "share_key": "share_daily_大唐神捕",
+                          "daily_limit": 10,
+                          "chain": {"task_order": [{"task_index": 2028301}, {"task_index": 2028302}]}})
+check("S5b 启动时恢复本地计数（重启不丢：1 保持为 1）",
+      g.done_count == 1, "done=%s rep=%s" % (g.done_count, str(_rep)[:60]))
+# 2026-09-24 回归：下一轮"秒接"不再吞计数 —— 结算等待只认"本轮收尾（链尾）在身"；
+# 在身=下一轮主任务 → 本轮照常结算（现场 5275 第 2 轮被吞）。
+os.environ["ZCC_SHARE_DAILY_STATE_DIR"] = _tmpdir
+r = fresh_robot()
+g = new_state()
+r.m_share_daily = g
+getattr(S, "__save_local_count")(r, g)  # 清基线
+q = r.m_quest
+q.tasks[2028301] = mk_task(2028301)          # 在身=下一轮主任务（秒接场景）
+g.settle_at_ms = time.time() * 1000 - 1
+g.settle_summary = True
+g.settle_last_ms = 0
+_d0 = g.done_count
+getattr(S, "__check_settle")(r, g, time.time() * 1000)
+check("S5c 在身=下一轮主任务 → 照常结算(+1)", g.done_count == _d0 + 1, str(g.done_count))
+r = fresh_robot()
+g = new_state()
+r.m_share_daily = g
+q = r.m_quest
+q.tasks[2028399] = mk_task(2028399)          # 在身=本轮收尾（链尾）→ 继续等
+g.settle_at_ms = time.time() * 1000 - 1
+g.settle_summary = True
+g.settle_last_ms = 0
+_d1 = g.done_count
+getattr(S, "__check_settle")(r, g, time.time() * 1000)
+check("S5c 在身=本轮收尾 → 仍等待（不结算）", g.done_count == _d1, str(g.done_count))
+os.environ.pop("ZCC_SHARE_DAILY_STATE_DIR", None)
 
 # ================================================================
 # 7) S6 · tick 未启用 / 命令回包 / 挂载点
@@ -701,6 +764,25 @@ _sched2 = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
 check("S8 ⑩ 击杀实例的'开战'对话 → 选【大唐神捕】而非退出",
       bool(_sched2) and _sched2[-1].get("data", {}).get("option_index") == 0,
       str(_sched2[-1:]))
+# 2026-09-24 现场回归（三号卡死 25→12 循环）：跳转NPC传送对话不放行关闭（交 quest_engine），
+# 只有挑战/战斗类无关对话仍关闭 —— 照抄 daily_ghost 生产口径。
+r = fresh_robot()
+g = new_state()
+g.state = "ACCEPT"
+r.m_share_daily = g
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlgj = [0, 0, 10147, "生老病死，六道轮回，谁都不能幸免。", 0,
+         [("送我去东海村（免费）", 0), ("送我去长安城中观星台（2银）", 0), ("离开", 1)]]
+_retj = getattr(S, "__on_show_dialog")(r, g, _dlgj)
+check("S8 ⑪ 跳转NPC目的地菜单 → 不关闭、放行 quest_engine",
+      _retj is False and not _QUEST_ENGINE_STUB.CALL_LOG["schedule"],
+      "ret=%s sched=%s" % (_retj, _QUEST_ENGINE_STUB.CALL_LOG["schedule"]))
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlgb = [0, 0, 999999, "来战吧！", 0, [("进行挑战", 0), ("离开", 1)]]
+_retb = getattr(S, "__on_show_dialog")(r, g, _dlgb)
+check("S8 ⑫ 挑战类无关对话 → 仍点关闭（不放行）",
+      _retb is True and bool(_QUEST_ENGINE_STUB.CALL_LOG["schedule"]),
+      "ret=%s sched=%s" % (_retb, _QUEST_ENGINE_STUB.CALL_LOG["schedule"][-1:]))
 
 # ================================================================
 # 10) S9 · 交付（不覆盖 catcher / 先等一拍 / 12 次上限）
@@ -1093,7 +1175,762 @@ check("S0 tick 集成: 有可点怪 → 点击开战 + 普攻闸 fight_ctx",
       and isinstance(q.fight_ctx, dict), "%s / %s" % (_err, str(_clicks[:2])))
 
 # ================================================================
-# 22) 汇总
+# 22) P1 烽火大唐（share_daily_宫廷10）—— 规划-20260924-烽火大唐P1 §3 P1-a~h
+#     对照客户端 script/auto_task/*.py 与 分析-20260923-烽火大唐.md
+# ================================================================
+# ---- 测试用桩：发协议记录 + shop_errand 锁/结果 ----
+_ROBOT_SENT = []
+
+
+def _fake_send_message(self, msg_id, data):
+    _ROBOT_SENT.append((msg_id, data))
+    return True
+
+
+FakeRobot.send_message = _fake_send_message
+try:
+    sys.modules["protocol3"].C2S_ITEM_RECYCLE = 80117
+except Exception:
+    pass
+_se = types.ModuleType("shop_errand")
+_se.LOCK = {"holder": "", "result": None, "reason": "", "skipped": False, "owner": ""}
+
+
+def _se_acquire(ro, owner, item=None, count=None):
+    if _se.LOCK["holder"] and _se.LOCK["holder"] != owner:
+        return False, _se.LOCK["holder"]
+    _se.LOCK["holder"] = owner
+    _se.LOCK["owner"] = owner
+    _se.LOCK["result"] = None
+    _se.LOCK["reason"] = ""
+    _se.LOCK["skipped"] = False
+    return True, owner
+
+
+def _se_release(ro, owner=None):
+    if owner is not None and _se.LOCK["holder"] != owner:
+        return
+    _se.LOCK["holder"] = ""
+
+
+def _se_status(ro):
+    return {"active": _se.LOCK["result"] is None, "result": _se.LOCK["result"],
+            "reason": _se.LOCK["reason"], "skipped": _se.LOCK["skipped"],
+            "owner": _se.LOCK["owner"], "item": None, "count": None, "npc": None}
+
+
+_se.acquire = _se_acquire
+_se.release = _se_release
+_se.status = _se_status
+_se.holder = lambda ro: _se.LOCK["holder"]
+sys.modules["shop_errand"] = _se
+
+
+def new_state_fh(limit=20):
+    """烽火大唐运行态（6 环链数据：5 子任务 + 收尾 2002107）。"""
+    g = S.ShareDailyState()
+    g.enabled = True
+    g.share_key = "share_daily_宫廷10"
+    g.daily_limit = limit
+    g.chain = {"task_order": [
+        {"task_index": 2002101, "thrower_npc": 10149, "catcher_npc": 30029},
+        {"task_index": 2002102, "thrower_npc": 10149, "catcher_npc": 10149},
+        {"task_index": 2002103, "thrower_npc": 10149, "catcher_npc": 10149},
+        {"task_index": 2002104, "thrower_npc": 10149, "catcher_npc": 30030},
+        {"task_index": 2002105, "thrower_npc": 10149, "catcher_npc": 10149},
+        {"task_index": 2002107, "thrower_npc": 0, "catcher_npc": 10149},
+    ]}
+    return g
+
+
+def mk_task_fh(ti, npc_index=10149, npc_id=10149, can_finish=0, counters=None, attrs=None):
+    blob = marshal.dumps(attrs) if attrs else None
+    return [ti, npc_index, npc_id, can_finish, 1, counters or [], blob]
+
+
+# ---- F1 · 配置行（P1-h / S13） ----
+_fh = "share_daily_宫廷10"
+check("F1 配置含宫廷10 行", CFG.has_key(_fh))
+check("F1 keywords = [烽火大唐, 回复秦琼]",
+      CFG.get_keywords(_fh) == ["烽火大唐", "回复秦琼"], str(CFG.get_keywords(_fh)))
+check("F1 chain_task = [2002107]（无 share_key 的收尾点名）",
+      CFG.get_chain_task_list(_fh) == [2002107], str(CFG.get_chain_task_list(_fh)))
+check("F1 chain 列为空（无 reply 链）", CFG.get_chain_keys(_fh) == [])
+check("F1 shop 四家店前缀解析",
+      CFG.shops.get(_fh) == [(13021, ["101", "108"]), (13007, ["210"]),
+                             (13006, ["220"]), (13011, ["102"])],
+      str(CFG.shops.get(_fh)))
+check("F1 shop @keyword 兜底（仅 13021 配 @金币）",
+      CFG.get_shop_keyword(_fh, 13021) == "金币" and CFG.get_shop_keyword(_fh, 13011) == "",
+      "%s/%s" % (CFG.get_shop_keyword(_fh, 13021), CFG.get_shop_keyword(_fh, 13011)))
+check("F1 patrol_map 四图（12/5/9/11）",
+      CFG.get_patrol_maps(_fh) == [(12, 2464, 3019), (5, 1810, 922),
+                                   (9, 899, 813), (11, 1100, 1100)],
+      str(CFG.get_patrol_maps(_fh)))
+check("F1 前缀路由: 101008/108086→13021",
+      CFG.find_shop_npc(_fh, 101008) == 13021 and CFG.find_shop_npc(_fh, 108086) == 13021)
+check("F1 前缀路由: 210102→13007(武器)/220102→13006(服装)/102031→13011(药品)",
+      CFG.find_shop_npc(_fh, 210102) == 13007 and CFG.find_shop_npc(_fh, 220102) == 13006
+      and CFG.find_shop_npc(_fh, 102031) == 13011)
+check("F1 最长前缀：13020 覆盖不了 101xxx（101008 仍归 13021）",
+      CFG.find_shop_npc(_fh, 101008) == 13021)
+check("F1 accept_ticket 未配（12 列行，票靠链数据 thrower）",
+      CFG.get_accept_ticket(_fh) == 0)
+check("F1 is_auto_executable(宫廷10)", CFG.is_auto_executable(_fh))
+
+# ---- F2 · 归属与次数（P1-g） ----
+check("F2 归属: 2002107 经 chain_task 属本 run",
+      S.belongs_to_run(CFG, _fh, 2002107, "", ""))
+check("F2 归属: 2002105 经链任务号集合命中",
+      S.belongs_to_run(CFG, _fh, 2002105, "", "", chain_tasks={2002101, 2002105}))
+check("F2 归属: 无关日常(捉鬼) → False",
+      not S.belongs_to_run(CFG, _fh, 2019501, "", "share_daily_捉鬼"))
+_fh_chain = new_state_fh().chain
+_fh_roots = getattr(S, "__main_count_roots")(_fh_chain, _fh)
+check("F2 主键计数扫 5 个主 root（不含收尾 2002107）",
+      _fh_roots == [2002101, 2002102, 2002103, 2002104, 2002105], str(_fh_roots))
+check("F2 收尾 2002107 不入扫描集", 2002107 not in _fh_roots)
+_fh_store = {"2002101": 7, "2002103": 7, "2002107": 99}
+check("F2 五子任务共用容器：取最大 = 今日轮数(7)；2002107 不污染",
+      S.scan_task_limited_max(_fh_store, _fh_roots) == 7)
+check("F2 B 型漂移：容器在 2002105 → 仍取到 4",
+      S.scan_task_limited_max({"2002105": 4}, _fh_roots) == 4)
+_sb_roots2 = getattr(S, "__main_count_roots")(new_state().chain, "share_daily_大唐神捕")
+check("F2 神捕回归：仍只扫主任务前两条（reply 每轮 +2 不入集）",
+      _sb_roots2 == [2028301, 2028302], str(_sb_roots2))
+
+# ---- F3 · 需求分型（P1-b） ----
+_cfg = CFG
+
+
+def plan_of(ti, counters, attrs=None, npc_index=10149, bag=0):
+    task = mk_task_fh(ti, npc_index=npc_index, counters=counters, attrs=attrs)
+    dem = None
+    ds = S.parse_demand_counters(task)
+    if ds:
+        dem = ds[0]
+    return S.classify_demand(task, dem, _cfg, _fh, bag_count=bag)
+
+
+_p, _i = plan_of(2002101, [], attrs={12054: ((12, 100, 100),)})
+check("F3 2002101 押送（无 demand）→ PLAN_FINISH", _p == "finish", _p)
+_p, _i = plan_of(2002102, [counter(11883, 30860, 0, 1)], attrs={12053: (12, 2464, 3019)})
+check("F3 2002102 暗雷（KILLING + 12053）→ PLAN_PATROL", _p == "patrol", _p)
+check("F3 2002102 巡逻点解析 = 12053", tuple(_i.get("patrol_spot")) == (12, 2464, 3019),
+      str(_i.get("patrol_spot")))
+_p, _i = plan_of(2002103, [counter(11886, 101008, 0, 1)], attrs={12055: [101008]})
+check("F3 2002103 军需品（COLLECTION 无坐标无库存）→ PLAN_BUY", _p == "buy", _p)
+check("F3 2002103 item 取自 demand.object_index", _i.get("item") == 101008)
+_p, _i = plan_of(2002103, [counter(11886, 101008, 1, 1)], attrs={12055: [101008]}, bag=1)
+check("F3 2002103 背包已有 → PLAN_STOCK", _p == "stock", _p)
+_p, _i = plan_of(2002104, [counter(11883, 30861, 0, 1)],
+                 attrs={12054: ((5, 1882, 1306),)}, npc_index=30030)
+check("F3 2002104 刺将军（KILLING + 12054）→ PLAN_KILL_CLICK", _p == "kill_click", _p)
+_p, _i = plan_of(2002105, [counter(11886, 110185, 0, 3)], attrs={12053: (11, 1100, 1100)})
+check("F3 2002105 军机情报（COLLECTION + 12053）→ PLAN_PATROL", _p == "patrol", _p)
+check("F3 2002105 need = 3 - 0 = 3", _i.get("need") == 3, str(_i.get("need")))
+_p, _i = plan_of(2002103, [counter(11886, 0, 0, 1)], attrs={12055: [102031]})
+check("F3 12055 兜底：demand.object_index=0 时取 12055[0]", _i.get("item") == 102031,
+      str(_i.get("item")))
+# F3b 自备宽限（P1-c 配套）：背包已够但服务端未标可交 → 先等服务端推送，超 3s 去 catcher 催一次
+_r = fresh_robot()
+_g = new_state_fh()
+_g.task_index = 2002103
+_g.state = "READY"
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.bag = {101008: [1, 1]}
+_q.tasks[2002103] = mk_task_fh(2002103, counters=[counter(11886, 101008, 0, 1)],
+                               attrs={12055: [101008]})
+_t0 = time.time() * 1000
+getattr(S, "__on_ready")(_r, _g, _q, _t0)
+check("F3b 自备(未标可交) → 先等服务端（不空跑 NPC、不进 SHOP）",
+      _g.state == "READY" and _g.stock_wait_ms > 0, "%s/%s" % (_g.state, _g.stock_wait_ms))
+_g.stock_wait_ms = _t0 - (S.STOCK_WAIT_BEFORE_SUBMIT_MS + 1000)
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__on_ready")(_r, _g, _q, _t0)
+check("F3b 自备超 3s → 去 catcher 催一次（SUBMIT）",
+      _g.state == "SUBMIT" and bool(_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]),
+      "%s/%s" % (_g.state, _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"][:1]))
+
+# ---- F4 · 接取严格选择（P1-a，报告 R7） ----
+_opt2 = [("接受烽火大唐任务", 0), ("还是算了吧", 0)]
+_pk, _kind = S.pick_accept_dialog_option(_opt2, ["烽火大唐", "回复秦琼"], False)
+check("F4 两段票第二段 → 点'接受烽火大唐任务'(kind=accept)",
+      _pk == 0 and _kind == "accept", "%s/%s" % (_pk, _kind))
+_opt1 = [("#iBM#烽火大唐", 0), ("离开", 1)]
+_pk, _kind = S.pick_accept_dialog_option(_opt1, ["烽火大唐", "回复秦琼"], False)
+check("F4 第一段票列表 → 点票项(kind=ticket)", _pk == 0 and _kind == "ticket", "%s/%s" % (_pk, _kind))
+_optmix = [("#iBM#烽火大唐", 0), ("#i901#回复秦琼", 0), ("还是算了吧", 0)]
+_pk, _kind = S.pick_accept_dialog_option(_optmix, ["烽火大唐", "回复秦琼"], False)
+check("F4 票/交付混排 + 手上无任务 → 点票项", _pk == 0 and _kind == "ticket", "%s/%s" % (_pk, _kind))
+_pk, _kind = S.pick_accept_dialog_option(_optmix, ["烽火大唐", "回复秦琼"], True)
+check("F4 票/交付混排 + 手上有任务 → 点交付项(不点票)",
+      _pk == 1 and _kind == "deliver", "%s/%s" % (_pk, _kind))
+check("F4 绝不点'还是算了吧'",
+      S.pick_accept_dialog_option([("还是算了吧", 0)], ["烽火大唐"], False)[0] is None)
+_pk, _kind = S.pick_accept_dialog_option([("还没有找出奸细么？", 0), ("知道了", 0)],
+                                         ["烽火大唐", "回复秦琼"], True)
+check("F4 催促对话无关键词命中 → 不点(None)", _pk is None, "%s/%s" % (_pk, _kind))
+# 集成：STATE_ACCEPT 秦琼两段票走 __on_show_dialog
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "ACCEPT"
+_g.accept_npc = 10149
+_r.m_share_daily = _g
+_r.m_quest.chain = _g.chain
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlg1 = [0, 0, 10149, "我大唐建国不久……", 0, [("#iBM#烽火大唐", 0), ("离开", 1)]]
+_ret1 = S.on_task_event(_r, "show_dialog", _dlg1)
+_s1 = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("F4 集成: 第一段票 → 点票项 #0",
+      _ret1 is True and _s1 and _s1[-1]["data"]["option_index"] == 0, str(_s1[-1:]))
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_dlg2 = [0, 0, 10149, "此任务为单人任务……", 0, [("接受烽火大唐任务", 0), ("还是算了吧", 0)]]
+S.on_task_event(_r, "show_dialog", _dlg2)
+_s2 = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("F4 集成: 第二段 → 点'接受烽火大唐任务' #0",
+      _s2 and _s2[-1]["data"]["option_index"] == 0, str(_s2[-1:]))
+# 回归：神捕接取对话（"好的（接受大唐神捕任务）"）仍点对
+_r2 = fresh_robot()
+_g2 = new_state()
+_g2.state = "ACCEPT"
+_g2.accept_npc = 13297
+_r2.m_share_daily = _g2
+_r2.m_quest.chain = _g2.chain
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+S.on_task_event(_r2, "show_dialog",
+                [0, 0, 13297, "最近长安周边匪患严重……", 0,
+                 [("好的（接受大唐神捕任务）", 0), ("还是算了吧。", 0)]])
+_s3 = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("F4 回归: 神捕接取对话仍点'好的（接受…）' #0",
+      _s3 and _s3[-1]["data"]["option_index"] == 0, str(_s3[-1:]))
+# 接取 NPC 判定（P1-a）：真实链数据各环只有 catcher_npc，首环 2002101 的 catcher 是
+# 动态军需官 30029 —— 不得把它当 broker（否则点它开交付对话、接不到票）
+_rn = fresh_robot()
+_gn = new_state_fh()
+check("F4 接取NPC: 链数据带 thrower_npc → 用首环 thrower(10149)",
+      getattr(S, "__accept_npc_index")(_rn, _gn) == 10149,
+      str(getattr(S, "__accept_npc_index")(_rn, _gn)))
+_gn.chain = {"task_order": [
+    {"task_index": 2002101, "catcher_npc": 30029},
+    {"task_index": 2002102, "catcher_npc": 10149},
+    {"task_index": 2002103, "catcher_npc": 10149},
+    {"task_index": 2002104, "catcher_npc": 30030},
+    {"task_index": 2002105, "catcher_npc": 10149},
+    {"task_index": 2002107, "catcher_npc": 10149},
+]}
+_npc_mv = getattr(S, "__accept_npc_index")(_rn, _gn)
+check("F4 接取NPC: 无 thrower_npc → 多数表决 10149（首环 30029 不误用）",
+      _npc_mv == 10149, str(_npc_mv))
+check("F4 接取NPC: 神捕回归 = 13297（13297×2 > 13597×1）",
+      getattr(S, "__accept_npc_index")(fresh_robot(), new_state()) == 13297)
+_nav_fh = os.path.normpath(os.path.join(HERE, "..", "data", "chains", "fenghuo_nav.json"))
+if os.path.exists(_nav_fh):
+    import json as _json_fh
+    _navfh = _json_fh.load(open(_nav_fh, encoding="utf-8"))
+    _g3 = new_state_fh()
+    _g3.chain = _navfh
+    _npc3 = getattr(S, "__accept_npc_index")(fresh_robot(), _g3)
+    check("F4 链声明文件 fenghuo_nav.json → 接取NPC=10149 秦琼", _npc3 == 10149, str(_npc3))
+    _tis_fh = set()
+    for _e in (_navfh.get("task_order") or []):
+        try:
+            _tis_fh.add(int(_e.get("task_index") or 0))
+        except Exception:
+            pass
+    check("F4 链声明文件 fenghuo_nav.json task_order 列全 6 个任务号",
+          {2002101, 2002102, 2002103, 2002104, 2002105, 2002107} <= _tis_fh,
+          str(sorted(_tis_fh)))
+    check("F4 链声明 chain_id 与中控下发一致（fenghuo_nav 白名单放行）",
+          _navfh.get("chain_id") == "fenghuo_nav", str(_navfh.get("chain_id")))
+else:
+    check("F4 链声明文件 fenghuo_nav.json 存在", False, _nav_fh)
+
+# ---- F5 · 商店对话货币选择（P1-c / S14） ----
+_shop_opts = [("#iBM#储备金购买杂货", 0), ("#iG#金币购买杂货", 0), ("我什么都不想做", 1)]
+check("F5 is_shop_dialog 命中", S.is_shop_dialog(_shop_opts))
+check("F5 is_shop_dialog 不误判任务对话",
+      not S.is_shop_dialog([("#i901#大唐神捕", 0), ("离开", 1)]))
+_pk = S.pick_shop_dialog_option(_shop_opts, "金币", 0)
+check("F5 phase0 → 储备金购买 #0", _pk == 0, str(_pk))
+_pk = S.pick_shop_dialog_option(_shop_opts, "金币", 1)
+check("F5 phase1 + @金币 → 金币购买 #1", _pk == 1, str(_pk))
+_wq = [("#iBM#储备金购买武器", 0), ("#iG#金币购买武器", 0), ("学习采矿", 0)]
+check("F5 13007 武器店 phase0 → 储备金 #0", S.pick_shop_dialog_option(_wq, "", 0) == 0)
+_dr = [("#iBM#储备金购买药品", 0), ("#iG#金币购买药品", 0), ("学习炼丹", 0)]
+check("F5 13011 药店 phase0 → 储备金 #0", S.pick_shop_dialog_option(_dr, "", 0) == 0)
+check("F5 商店对话只有关闭项 → None（绝不点第一项）",
+      S.pick_shop_dialog_option([("我什么都不想做", 1)], "金币", 0) is None)
+# 集成：STATE_SHOP 的商店对话被本模块消化并选储备金
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_npc = 13021
+_g.shop_phase = 0
+_r.m_share_daily = _g
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_ret = S.on_task_event(_r, "show_dialog",
+                       [0, 0, 13021, "客官要点什么？", 0, [("#iBM#储备金购买杂货", 0),
+                                                           ("#iG#金币购买杂货", 0)]])
+_s = _QUEST_ENGINE_STUB.CALL_LOG["schedule"]
+check("F5 集成: STATE_SHOP 商店对话 → 储备金项 #0",
+      _ret is True and _s and _s[-1]["data"]["option_index"] == 0, str(_s[-1:]))
+# 非 SHOP 状态不误吞（放行 quest_engine / 按任务对话处理）
+_g.state = "READY"
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+S.on_task_event(_r, "show_dialog", [0, 0, 999999, "x", 0, [("#iBM#储备金购买杂货", 0)]])
+check("F5 非 SHOP 状态商店对话不误吞", not _QUEST_ENGINE_STUB.CALL_LOG["schedule"])
+
+# ---- F6 · 商店采购状态机（P1-c） ----
+# (a) 未配置商店（神捕）→ BUY_FAILED（P0 行为保持）
+_r = fresh_robot()
+_g = new_state()
+_r.m_share_daily = _g
+_r.m_quest.chain = _g.chain
+getattr(S, "__start_shop_path")(_r, _g, _r.m_quest, mk_task(2028301),
+                                {"counter_type": 11887, "object_index": 102031,
+                                 "current_count": 0, "required_count": 1}, time.time() * 1000)
+check("F6 神捕无 shop 配置 → BUY_FAILED 停止（回归）",
+      _g.state == "STOPPED" and _g.stop_code == "BUY_FAILED", "%s/%s" % (_g.state, _g.stop_code))
+# (b) 无 item（demand/12055 均空）→ SHOP_FAILED
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_r.m_quest.chain = _g.chain
+getattr(S, "__start_shop_path")(_r, _g, _r.m_quest, mk_task_fh(2002103, counters=[]),
+                                {"counter_type": 11886, "object_index": 0,
+                                 "current_count": 0, "required_count": 1}, time.time() * 1000)
+check("F6 拿不到 item_index → SHOP_FAILED 停止",
+      _g.state == "STOPPED" and _g.stop_code == "SHOP_FAILED", "%s/%s" % (_g.state, _g.stop_code))
+# (c) 背包已足 → 不采购
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_r.m_quest.chain = _g.chain
+_r.m_quest.bag = {102031: [1, 1]}
+getattr(S, "__start_shop_path")(_r, _g, _r.m_quest, mk_task_fh(2002103),
+                                {"counter_type": 11886, "object_index": 102031,
+                                 "current_count": 0, "required_count": 1}, time.time() * 1000)
+check("F6 背包已有 → 直接回 READY（不再买）", _g.state == "READY", _g.state)
+# (d) 本轮已下过单 → 不重购（防二次扣款）
+_r = fresh_robot()
+_g = new_state_fh()
+_g.task_index = 2002103
+_g.shop_bought = {2002103: 102031}
+_r.m_share_daily = _g
+_r.m_quest.chain = _g.chain
+getattr(S, "__start_shop_path")(_r, _g, _r.m_quest, mk_task_fh(2002103),
+                                {"counter_type": 11886, "object_index": 102031,
+                                 "current_count": 0, "required_count": 1}, time.time() * 1000)
+check("F6 已下过单未入包 → SHOP_FAILED（不重购，客户端 has_bought_item 同口径）",
+      _g.state == "STOPPED" and "不重购" in _g.stop_reason, "%s/%s" % (_g.state, _g.stop_reason))
+# (e) 正常启动：锁占用 + 目标图导航
+_se.LOCK.update({"holder": "", "result": None, "reason": "", "skipped": False, "owner": ""})
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002103] = mk_task_fh(2002103, counters=[counter(11886, 102031, 0, 1)],
+                               attrs={12055: [102031]})
+_r.m_mapid = 12
+_r.m_pose = (2265, 1846)
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+getattr(S, "__start_shop_path")(_r, _g, _q, mk_task_fh(2002103),
+                                {"counter_type": 11886, "object_index": 102031,
+                                 "current_count": 0, "required_count": 1}, time.time() * 1000)
+check("F6 采购启动: state=SHOP + 路由到 13011（102xxx 药品）",
+      _g.state == "SHOP" and _g.shop_npc == 13011, "%s/%s" % (_g.state, _g.shop_npc))
+check("F6 采购启动: 已占商店会话锁(owner=share_daily)", _se.LOCK["holder"] == "share_daily",
+      _se.LOCK["holder"])
+check("F6 采购启动: 跨图导航已发起(未到店不点击)",
+      bool(_q.dijkstra_route) and not _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"],
+      "%s/%s" % (len(_q.dijkstra_route), _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"][:1]))
+# 到店 → 点击 + 建立 shop_ctx（先建后点）
+_r.m_mapid = 616
+_r.m_pose = (848, 740)
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+_g.click_gap_ms = 0
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+_ctx = _q.shop_ctx or {}
+check("F6 到店: 点击 NPC + shop_ctx(item=102031 count=1 errand/share_daily)",
+      bool(_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]) and
+      _ctx.get("item_index") == 102031 and _ctx.get("count") == 1
+      and _ctx.get("errand") and _ctx.get("share_daily"),
+      "%s / %s" % (_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"][:1], _ctx))
+check("F6 shop_ctx.npc_id = 商店 NPC(13011)", _ctx.get("npc_id") == 13011, str(_ctx.get("npc_id")))
+# 商店页未到 → 重开会话（不卡死）
+_g.shop_opened_ms = time.time() * 1000 - (S.SHOP_OPEN_WAIT + 2) * 1000
+_g.shop_wait_until = 0
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 商店页超时 → 清会话重开（shop_ctx 清空 + 点击次数复位）",
+      _q.shop_ctx is None and _g.shop_click_tries == 0,
+      "%s/%s" % (_q.shop_ctx, _g.shop_click_tries))
+# 购买被拒（buy_fail + 退避）→ SHOP_FAILED（13011 无 @keyword）
+_q.shop_ctx = {"npc_id": 13011, "item_index": 102031, "count": 1, "errand": True,
+               "share_daily": True, "buy_fail": "货币(储备金/银票)不够",
+               "buy_wait_until": 0}
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 购买被拒 → SHOP_FAILED + 停止（13011 无兜底）",
+      _g.state == "STOPPED" and _g.stop_code == "SHOP_FAILED" and _q.shop_ctx is None,
+      "%s/%s/%s" % (_g.state, _g.stop_code, _q.shop_ctx))
+check("F6 失败后释放商店会话锁", _se.LOCK["holder"] == "", _se.LOCK["holder"])
+# 13021 有 @keyword 但金币路径默认关闭 → 原因要说清（P2）
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_npc = 13021
+_g.shop_item = 101008
+_g.shop_need = 1
+_r.m_share_daily = _g
+getattr(S, "__shop_fail")(_r, _g, _r.m_quest, "余额不足")
+check("F6 有 @keyword 且 P1 金币关闭 → 停止原因含'金币路径默认关闭'",
+      _g.state == "STOPPED" and "金币路径默认关闭" in _g.stop_reason, _g.stop_reason)
+check("F6 P1 开关 SHOP_GOLD_FALLBACK=False", S.SHOP_GOLD_FALLBACK is False)
+# 购买成功（回执 done）→ 回 READY + 释放锁
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_item = 102031
+_g.shop_need = 1
+_g.shop_lock_held = True
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002103] = mk_task_fh(2002103)
+_q.shop_ctx = {"npc_id": 13011, "item_index": 102031, "count": 1, "errand": True, "share_daily": True}
+_se.LOCK.update({"holder": "share_daily", "owner": "share_daily", "result": "done",
+                 "reason": "买到(数量回执90327)", "skipped": False})
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 购买成功(回执) → 回 READY + 清 shop_ctx + 放锁",
+      _g.state == "READY" and _q.shop_ctx is None and _se.LOCK["holder"] == "",
+      "%s/%s/%s" % (_g.state, _q.shop_ctx, _se.LOCK["holder"]))
+# 回执'已满足但未购买' + 背包不足 → 失败（防死循环）
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_item = 102031
+_g.shop_need = 1
+_g.shop_lock_held = True
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002103] = mk_task_fh(2002103)
+_q.shop_ctx = {"npc_id": 13011, "item_index": 102031, "count": 1, "errand": True, "share_daily": True}
+_se.LOCK.update({"holder": "share_daily", "owner": "share_daily", "result": "done",
+                 "reason": "已满足, 未购买", "skipped": True})
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 回执 skipped 但背包不足 → SHOP_FAILED（不空转）",
+      _g.state == "STOPPED" and _g.stop_code == "SHOP_FAILED", "%s/%s" % (_g.state, _g.stop_code))
+# 锁被他人占用 → 不点 NPC；超时 → SHOP_BUSY
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_npc = 13011
+_g.shop_item = 102031
+_g.shop_need = 1
+_g.shop_started_ms = time.time() * 1000
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002103] = mk_task_fh(2002103)
+_r.m_mapid = 616
+_r.m_pose = (848, 740)
+_se.LOCK.update({"holder": "errand", "owner": "errand", "result": None,
+                 "reason": "", "skipped": False})
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 锁被占用 → 不点 NPC、不建 shop_ctx（让路不硬闯）",
+      _g.state == "SHOP" and not _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]
+      and _q.shop_ctx is None, "%s/%s" % (_g.state, _q.shop_ctx))
+_g.shop_started_ms = time.time() * 1000 - (S.SHOP_LOCK_WAIT_MAX + 10) * 1000
+getattr(S, "__on_shop")(_r, _g, _q, time.time() * 1000)
+check("F6 等锁超时 → SHOP_BUSY 停止（记录原因）",
+      _g.state == "STOPPED" and _g.stop_code == "SHOP_BUSY", "%s/%s" % (_g.state, _g.stop_code))
+_se.LOCK.update({"holder": "", "owner": "", "result": None, "reason": "", "skipped": False})
+
+# ---- F7 · 巡逻打计数（P1-e） ----
+check("F7 12053 在 patrol_map 内 → 原样采用",
+      getattr(S, "__validated_patrol_spot")(fresh_robot(), new_state_fh(), (5, 1810, 922))
+      == (5, 1810, 922))
+_r = fresh_robot()
+_g = new_state_fh()
+check("F7 12053 不在 patrol_map → 回退列表首图（12 长安城中）",
+      getattr(S, "__validated_patrol_spot")(_r, _g, (26, 100, 100)) == (12, 2464, 3019),
+      str(getattr(S, "__validated_patrol_spot")(_r, _g, (26, 100, 100))))
+_r = fresh_robot()
+_g = new_state()          # 神捕：无 patrol_map
+check("F7 神捕（无 patrol_map）→ 原样返回（不回归）",
+      getattr(S, "__validated_patrol_spot")(_r, _g, (12, 3392, 1184)) == (12, 3392, 1184))
+# 暗雷任务：12053 → PATROL（集成）
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+q2002102 = mk_task_fh(2002102, counters=[counter(11883, 30860, 0, 1)],
+                      attrs={12053: (9, 899, 813)})
+_q.tasks[2002102] = q2002102
+getattr(S, "__on_ready")(_r, _g, _q, time.time() * 1000)
+check("F7 2002102 暗雷 → 进 PATROL + 巡逻中心 = 服务端指定图(9)",
+      _g.state == "PATROL" and _g.patrol_center == (9, 899, 813),
+      "%s/%s" % (_g.state, _g.patrol_center))
+# 军机情报（COLLECTION×3）：计数未满 → PATROL；达 3 → 回 READY 等交付
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002105] = mk_task_fh(2002105, counters=[counter(11886, 110185, 2, 3)],
+                              attrs={12053: (11, 1100, 1100)})
+getattr(S, "__on_ready")(_r, _g, _q, time.time() * 1000)
+check("F7 2002105 军机情报(2/3) → PATROL 继续打", _g.state == "PATROL", _g.state)
+_q.tasks[2002105] = mk_task_fh(2002105, counters=[counter(11886, 110185, 3, 3)],
+                              attrs={12053: (11, 1100, 1100)})
+_g.task_index = 2002105
+_g.state = "PATROL"
+_r.m_mapid = 11
+_r.m_pose = (1100, 1100)
+getattr(S, "__on_patrol")(_r, _g, _q, time.time() * 1000)
+check("F7 2002105 计数达标(3/3) → 停巡逻等交付（不再游走）",
+      _g.state in ("WAIT", "READY"), _g.state)
+
+# ---- F8 · 押送/动态 NPC（P1-f） ----
+# 同图实例在点击范围内 → 交回调用方点击
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SUBMIT"
+_g.task_index = 2002101
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002101] = mk_task_fh(2002101, npc_index=30029, npc_id=30029,
+                              attrs={12054: ((12, 100, 100),)})
+_q.dyn_npc_meta = {9001: 30029}
+_q.dynamic_npcs = {9001: [12, 200, 200]}
+_r.m_mapid = 12
+_r.m_pose = (300, 200)
+_ok = getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+check("F8 同图实例在范围内 → 交回点击路径(False) + 记录 target_npc_id",
+      _ok is False and _g.target_npc_id == 9001, "%s/%s" % (_ok, _g.target_npc_id))
+# 同图实例远 → 走过去（walk）
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_q.dynamic_npcs = {9001: [12, 1900, 1900]}
+_ok = getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+check("F8 同图实例较远 → 实时坐标走过去（walk 到 dyn_npc 坐标）",
+      _ok is True and _QUEST_ENGINE_STUB.CALL_LOG["schedule"] and
+      _QUEST_ENGINE_STUB.CALL_LOG["schedule"][-1]["type"] == "walk",
+      str(_QUEST_ENGINE_STUB.CALL_LOG["schedule"][-1:]))
+# 无实例 + 12054 异图 → 跨图导航
+_q.dyn_npc_meta = {}
+_q.dynamic_npcs = {}
+_q.tried_locations = set()
+_q.tasks[2002101] = mk_task_fh(2002101, npc_index=30029, npc_id=30029,
+                              attrs={12054: ((5, 100, 100),)})
+_r.m_mapid = 12
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+_ok = getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+check("F8 无实例 + 12054 异图 → 发起跨图导航", _ok is True and bool(_q.dijkstra_route),
+      "%s/%s" % (_ok, len(_q.dijkstra_route)))
+# 到点无实例 → 换点计数 / 超限退避
+_q.dijkstra_route = []
+_q.tasks[2002101] = mk_task_fh(2002101, npc_index=30029, npc_id=30029,
+                              attrs={12054: ((12, 2265, 1846),)})
+_r.m_mapid = 12
+_r.m_pose = (2265, 1846)
+_g.tried_locations = set()
+_g.kill_tries = 0
+_ok = getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+check("F8 到点无实例 → 标记该点已去过并计数",
+      _ok is True and (12, 2265, 1846) in _g.tried_locations and _g.kill_tries == 1,
+      "%s/%s" % (_g.tried_locations, _g.kill_tries))
+_g.kill_tries = 99
+_g.respawn_until_ms = 0
+getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+check("F8 到点多次无实例 → 退避等 AOI 推送（不缓存旧坐标）",
+      _g.respawn_until_ms > 0, str(_g.respawn_until_ms))
+# 交付点击：用实例 npc_id（服务端按实例归属校验）
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SUBMIT"
+_g.task_index = 2002101
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002101] = mk_task_fh(2002101, npc_index=30029, npc_id=30029,
+                              attrs={12054: ((12, 200, 200),)})
+_q.dyn_npc_meta = {9001: 30029}
+_q.dynamic_npcs = {9001: [12, 200, 200]}
+_r.m_mapid = 12
+_r.m_pose = (250, 200)
+_g.click_gap_ms = 0
+_g.finish_try = 0
+_QUEST_ENGINE_STUB.CALL_LOG["teleport_click"] = []
+getattr(S, "__on_submit")(_r, _g, _q, time.time() * 1000)
+_cl = _QUEST_ENGINE_STUB.CALL_LOG["teleport_click"]
+check("F8 押送交付: 用动态实例 npc_id 点击（非 npc_index 盲点）",
+      bool(_cl) and _cl[0][0] == 9001 and _cl[0][1] == 30029, str(_cl[:2]))
+check("F8 押送交付: 实例对话归属 target_npc_id=9001", _g.target_npc_id == 9001,
+      str(_g.target_npc_id))
+# __on_kill 每 tick 刷新 12054（动态 NPC 会走动）
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "KILL"
+_g.task_index = 2002104
+_g.target_locs = [(12, 1, 1)]
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002104] = mk_task_fh(2002104, npc_index=30030, npc_id=30030,
+                              counters=[counter(11883, 30861, 0, 1)],
+                              attrs={12054: ((5, 1882, 1306),)})
+_r.m_mapid = 12
+_r.m_pose = (100, 100)
+_QUEST_ENGINE_STUB.CALL_LOG["schedule"] = []
+getattr(S, "__on_kill")(_r, _g, _q, time.time() * 1000)
+check("F8 __on_kill 每 tick 重读 12054（旧点被新点替换，目标会走动）",
+      _g.target_locs == [(5, 1882, 1306)], str(_g.target_locs))
+# F8b 目标图不可达（报告 R：动态目标可能刷在 26/27 等图）：记录 + 换点；连续 3 次停链
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SUBMIT"
+_g.task_index = 2002101
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002101] = mk_task_fh(2002101, npc_index=30029, npc_id=30029,
+                              attrs={12054: ((26, 100, 100),)})
+_r.m_mapid = 12
+_orig_route = _QUEST_ENGINE_STUB.__find_dijkstra_route
+_QUEST_ENGINE_STUB.__find_dijkstra_route = lambda q, fm, tm, **kw: None
+for _i in range(3):
+    _g.tried_locations = set()
+    _q.dijkstra_route = []
+    getattr(S, "__goto_dynamic_catcher")(_r, _g, _q, 30029, time.time() * 1000)
+    if _g.state == "STOPPED":
+        break
+_QUEST_ENGINE_STUB.__find_dijkstra_route = _orig_route
+check("F8b 目标图连续 3 次无合法路径 → TARGET_UNREACHABLE 停链（不无限换路）",
+      _g.state == "STOPPED" and _g.stop_code == "TARGET_UNREACHABLE",
+      "%s/%s/%s" % (_g.state, _g.stop_code, _g.unreach_maps))
+check("F8b 不可达图计数已记录(26→3)", int(_g.unreach_maps.get(26, 0)) >= 1,
+      str(_g.unreach_maps))
+
+# ---- F9 · 回收窗口（押送银两 / 军需品） ----
+def recycle_case(ti=2002101, bag=None, server_list=None, want=101306, submits=0, wait_ms=0):
+    _r = fresh_robot()
+    _g = new_state_fh()
+    _r.m_share_daily = _g
+    _q = _r.m_quest
+    _q.chain = _g.chain
+    _q.tasks[ti] = mk_task_fh(ti, npc_index=30029, npc_id=30029,
+                              counters=[counter(11886, want, 0, 1)],
+                              attrs={12055: [want]})
+    _q.bag = dict(bag or {})
+    _g.recycle_submits = submits
+    _g.recycle_submit_ms = wait_ms
+    _g.recycle_task = ti
+    _ROBOT_SENT[:] = []
+    _ret = S.on_task_event(_r, "item_recycle",
+                           [30029, "给予", "给我押送的银两", marshal.dumps(server_list or [])])
+    return _r, _g, _q, _ret
+
+
+_r, _g, _q, _ret = recycle_case(bag={101306: [555, 1]}, server_list=[101306])
+check("F9 回收窗口: 发出 C2S_ITEM_RECYCLE(item_id=555) + 消化事件(True)",
+      _ret is True and _ROBOT_SENT and _ROBOT_SENT[-1][1] == [555], str(_ROBOT_SENT[-1:]))
+# want 优先：服务端列表顺序不同
+_r, _g, _q, _ret = recycle_case(bag={101306: [555, 1], 999999: [666, 1]},
+                                server_list=[999999, 101306])
+check("F9 优先交'当前步骤需要'的物品（12055/需求优先于服务端列表顺序）",
+      _ROBOT_SENT and _ROBOT_SENT[-1][1] == [555], str(_ROBOT_SENT[-1:]))
+# 背包没有 → 不提交、记冷却、不删任务（绝不 @deltask）
+_r, _g, _q, _ret = recycle_case(bag={}, server_list=[101306])
+check("F9 背包无可交道具 → 不提交、不删任务、记冷却等待",
+      _ret is True and not _ROBOT_SENT and _g.recycle_submit_ms > 0 and 2002101 in _q.tasks,
+      "%s/%s" % (_ROBOT_SENT, _g.recycle_submit_ms))
+# 提交上限熔断
+_r, _g, _q, _ret = recycle_case(bag={101306: [555, 1]}, server_list=[101306], submits=3)
+check("F9 回收提交 > 3 次未确认 → RECYCLE_STUCK 停止（S23⑥）",
+      _g.state == "STOPPED" and _g.stop_code == "RECYCLE_STUCK", "%s/%s" % (_g.state, _g.stop_code))
+# 冷却期内不重复提交
+_r, _g, _q, _ret = recycle_case(bag={101306: [555, 1]}, server_list=[101306],
+                                wait_ms=time.time() * 1000)
+check("F9 提交后 5s 冷却内不重复提交", not _ROBOT_SENT, str(_ROBOT_SENT))
+# 无本 run 在身任务 → 不消化（放行 quest_engine）
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+_RET = S.on_task_event(_r, "item_recycle", [30029, "给予", "x", marshal.dumps([101306])])
+check("F9 无本 run 任务 → 回收事件放行（不抢别的链）", _RET is False, str(_RET))
+# 任务实例切换 → 计数复位
+_g2 = new_state_fh()
+_g2.recycle_task = 2002105
+_g2.recycle_submits = 2
+_r2 = fresh_robot()
+_r2.m_share_daily = _g2
+S.on_task_event(_r2, "add_task", [[2002103, 10149, 10149, 0, 1, [], None]])
+check("F9 新任务实例到达 → 回收计数/下痕迹复位",
+      _g2.recycle_submits == 0 and _g2.recycle_task == 0,
+      "%s/%s" % (_g2.recycle_submits, _g2.recycle_task))
+# 停止/人工停止都必须归还商店会话锁（否则 TTL 10min 挡住日常采购）
+_se.LOCK.update({"holder": "share_daily", "owner": "share_daily", "result": None,
+                 "reason": "", "skipped": False})
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+getattr(S, "__request_stop")(_r, _g, "DAILY_LIMIT", "x")
+check("F9 任何停止 → 释放商店会话锁", _se.LOCK["holder"] == "", _se.LOCK["holder"])
+_se.LOCK.update({"holder": "share_daily", "owner": "share_daily", "result": None,
+                 "reason": "", "skipped": False})
+_r = fresh_robot()
+_g = new_state_fh()
+_r.m_share_daily = _g
+S.dispatch_cmd(_r, {"cmd": "share_daily_stop"})
+check("F9 人工停止 → 释放商店会话锁", _se.LOCK["holder"] == "", _se.LOCK["holder"])
+
+# ---- F10 · 集成与常量 ----
+_r = fresh_robot()
+_g = new_state_fh()
+_g.state = "SHOP"
+_g.shop_item = 102031
+_g.shop_need = 1
+_g.shop_lock_held = True
+_r.m_share_daily = _g
+_q = _r.m_quest
+_q.chain = _g.chain
+_q.tasks[2002103] = mk_task_fh(2002103)
+_q.shop_ctx = {"npc_id": 13011, "item_index": 102031, "count": 1, "errand": True, "share_daily": True}
+_se.LOCK.update({"holder": "share_daily", "owner": "share_daily", "result": None,
+                 "reason": "", "skipped": False})
+_err = None
+try:
+    S.tick(_r, time.time() * 1000)
+except Exception as e:
+    _err = "%s: %s" % (type(e).__name__, e)
+check("F10 tick 集成: STATE_SHOP 不抛异常", _err is None, _err or "")
+check("F10 STATE_SHOP 常量与 tick 分派存在", S.STATE_SHOP == "SHOP")
+_src_p1 = open(os.path.join(SCRIPT_DIR, "share_daily.py"), encoding="utf-8").read()
+check("F10 tick 分派含 STATE_SHOP", "elif g.state == STATE_SHOP:" in _src_p1)
+check("F10 商店会话锁复用 shop_errand.acquire/release",
+      "shop_errand.acquire(robot_object, SHOP_LOCK_OWNER" in _src_p1
+      and "shop_errand.release(robot_object, SHOP_LOCK_OWNER)" in _src_p1)
+check("F10 零运行期协议注册（本模块不碰 cnet.set_format_dict）",
+      "set_format_dict" not in _src_p1)
+check("F10 回收窗口自实现（不转发 quest_engine.__on_item_recycle / 无 @deltask 兜底调用）",
+      "def __on_item_recycle" in _src_p1
+      and "quest_engine.__on_item_recycle" not in _src_p1
+      and "@deltask %s" not in _src_p1)
+check("F10 12055 已在树内消费（P1-d）", "parse_task_item_list" in _src_p1)
+check("F10 动态 NPC 坐标表含 13007/13006/13021/13011",
+      set(S.SHOP_NPC_POSITIONS.keys()) >= {13006, 13007, 13011, 13021},
+      str(sorted(S.SHOP_NPC_POSITIONS.keys())))
+
+# ================================================================
+# 22.5) 汇总
 # ================================================================
 print("\n自检目标: %s" % SCRIPT_DIR)
 print("结果：%d 项，失败 %d 项" % (total, fails))
