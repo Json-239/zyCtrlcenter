@@ -134,6 +134,10 @@ def main():
             h.get("destination_index"), h.get("_from_map"))),
         "__replan_after_bad_hop": lambda ro, q, dest, note2: events.append(
             "REPLAN:%s:%s" % (dest, note2)),
+        # 2026-09-24 新增(新手链 CLICK 死循环修复): __rollback_optimistic_and_replan
+        #   现在会恢复"跳转前位置快照"(修 NO_LEGAL_ROUTE 起点残留)。隔离提取测试
+        #   里给替身——返回 False(未恢复) 与改动前行为等价, C1-C5 断言不受影响。
+        "__restore_optimistic_snapshot": lambda ro, srv: False,
     }
     frag_rb = _extract_func(qe, "__rollback_optimistic_and_replan")
     check("C0: 提取 __rollback_optimistic_and_replan", frag_rb is not None)

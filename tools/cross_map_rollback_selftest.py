@@ -104,7 +104,11 @@ code = "def _rb(robot_object, hop, __emit):\n" + body
 _bl_calls = []
 ns2 = {"data": (83,), "quest": None,
        "__hop_blacklist": lambda ro, q, h: _bl_calls.append(("BL", h.get("destination_index"))),
-       "__replan_after_bad_hop": lambda ro, q, dest, note: _bl_calls.append(("REPLAN", dest, note))}
+       "__replan_after_bad_hop": lambda ro, q, dest, note: _bl_calls.append(("REPLAN", dest, note)),
+       # 2026-09-24 新增(新手链 CLICK 死循环修复): 回滚块现含"位置快照恢复"调用
+       #   (修 NO_LEGAL_ROUTE 起点残留); 隔离提取里给替身, 返回 False(未恢复) 与
+       #   改动前行为等价, D2/D2d 断言不受影响。
+       "__restore_optimistic_snapshot": lambda ro, srv: False}
 exec(compile(code, "<rollback>", "exec"), ns2)
 RB = ns2["_rb"]
 
