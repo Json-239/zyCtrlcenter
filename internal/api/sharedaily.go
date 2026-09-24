@@ -194,6 +194,28 @@ func (a *API) shareDailyFullToday(acc string, r state.Robot) bool {
 	return r.DailyFull(key)
 }
 
+// shareDailyInFlightToday 该号"当天已派/在跑该玩法且未满"——供**跨玩法让路**用：
+//   - 心跳 daily 条目命中（机器人只在 enabled=true 时上报），或
+//   - 中控持久台账命中（机器人进程重启后心跳丢失，见 state.MarkShareDailyAssigned），
+//     任一即可；满额（done≥limit / 独立满额表）= 自由号 → 一律 false（不拦抓鬼）。
+//
+// 2026-09-24 现场（robot0005274）：12:13:06 神捕策略下发 share_daily_start ok，12 秒后
+// 抓鬼策略又下发 ghost_start ok —— 机器人端 ghost_start 与神捕会话互斥，**把当天神捕顶掉**；
+// 抓鬼池在补位窗口（在跑<目标）会持续派发 → 反复杀掉当天的神捕号。抓鬼候选/恢复引擎
+// 补发据此跳过"当天神捕未满"的号（满额号仍归抓鬼）。
+//
+// 只读 St/r（可在 Runner 持锁回调里用）。
+func (a *API) shareDailyInFlightToday(acc string, r state.Robot) bool {
+	key := a.shareDailyKey()
+	busy := false
+	if _, has := r.DailyOf(key); has {
+		busy = true
+	} else if a.St != nil && a.St.ShareDailyAssignedToday(acc, key) {
+		busy = true
+	}
+	return busy && !a.shareDailyFullToday(acc, r)
+}
+
 // shareDailyStateEnum 队列状态语义（契约枚举，2026-09-23 lead 裁决 A）：
 //
 //	done    满额（limit>0 且 done≥limit，或相位 DONE——满额收工的两种表达）

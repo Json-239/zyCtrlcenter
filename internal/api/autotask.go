@@ -187,6 +187,16 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
 		}
+		// 2026-09-24：当天已派/在跑神捕且未满的号，恢复引擎**不补发 ghost_start** ——
+		// 重启后按意图补发走的正是这条闸（restorer.TickForce：Skip 在生成 Action 之前，
+		// restorer.go:251），此前会把当天的神捕号抢回抓鬼（现场 robot0005274：神捕被
+		// ghost_start 顶掉）。满额号是自由号，照补；台账兜底见 shareDailyInFlightToday。
+		if a.St != nil {
+			rb, _ := a.St.Get(account)
+			if a.shareDailyInFlightToday(account, rb) {
+				return true, "今日神捕未满（已派/在跑），不补抓鬼"
+			}
+		}
 		// 2026-09-22 P1（三池交互分析）：池状态闸 —— restorer 原来不看池的 enabled/保持数，
 		//   池禁用或已超编时仍补发（实测 newbie target=0 却有 16 号在跑、ghost 102>100）。
 		if ok, why := a.poolAllowsDispatch(kind); !ok {
@@ -642,6 +652,14 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			out = append(out, autotask.Candidate{Account: acc, Online: hasLive && r.Online, Level: level,
 				Reason: fmt.Sprintf("新手链（%d 级，未毕业）", level)})
 		case autotask.KindGhost:
+			// 2026-09-24 现场：ghost_start 12 秒后顶掉当天神捕号（robot0005274：12:13:06
+			// share_daily_start ok → 12:13:18 ghost_start ok；机器人端 ghost_start 与神捕
+			// 会话互斥）→ 当天已派/在跑神捕且未满的号，不让抓鬼派发/补位（心跳或持久台账
+			// 命中即可，判据见 shareDailyInFlightToday）。满额（done≥limit）= 自由号，
+			// 不拦，正常归抓鬼。
+			if a.shareDailyInFlightToday(acc, r) {
+				continue
+			}
 			// 2026-09-22 今日抓鬼已满（服务端 50 次上限，钟馗只回闲聊菜单）→ 当天不再派，
 			//   跨日自动恢复；否则会"满额→下线→又被拉起→钟馗空转"循环堆积。
 			if a.St != nil && a.St.GhostDoneToday(acc) {
