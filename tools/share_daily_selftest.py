@@ -367,6 +367,17 @@ check("S1 kill_npc=[18140,18141,18142]",
 check("S1 is_auto_executable 命中/未命中",
       CFG.is_auto_executable("share_daily_大唐神捕")
       and not CFG.is_auto_executable("share_daily_不存在"))
+# 2026-09-24 事故回归（robot0005274 unknown_share_key）：配置表读取必须显式 encoding ——
+# 中文 Windows 的内嵌 Python 缺省按 cp936 打开 UTF-8 表 → UnicodeDecodeError → 表为空 →
+# 所有 share_key 被拒。开发机缺省 UTF-8 不复现，故用"源码必须写 encoding="兜底。
+_src = open(os.path.join(SCRIPT_DIR, "share_daily.py"), "r", encoding="utf-8").read()
+_all_opens = re.findall(r"open\([^)\n]*\)", _src)
+check("S1 所有 open() 显式指定 encoding（防 cp936 环境解码失败）",
+      bool(_all_opens) and all("encoding=" in _o for _o in _all_opens),
+      str(_all_opens))
+with open(os.path.join(SCRIPT_DIR, "share_daily_cfg.csv"), "r", encoding="utf-8-sig") as _f:
+    _hdr = _f.readline().strip().split(",")[0]
+check("S1 表头无 BOM 残留（utf-8-sig 读取）", _hdr == "share_daily_key", repr(_hdr))
 # 空列不报错：构造仅 key 的行
 c2 = S.ShareDailyConfig()
 ok = True
