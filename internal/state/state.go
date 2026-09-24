@@ -57,12 +57,14 @@ type Robot struct {
 	Pos           []int `json:"pos,omitempty"`      // 服务端像素坐标（机器人上报原值）
 	PosGrid       []int `json:"pos_grid,omitempty"` // 客户端显示的格子坐标 = 像素 / GridCell(16)
 	Fpp           int   `json:"fpp,omitempty"`
-	// Money / Deposit / Reserve 货币详情（机器人经 90353 全量 / 90073 增量解析后心跳上报）：
-	// Money=银两(服务端 keys.MONEY=9560) / Deposit=钱庄存款(9561) / Reserve=储备金(9617)。
+	// Money / Deposit / Reserve / Kaiyuan 货币详情（机器人经 90353 全量 / 90073 增量解析后心跳上报）：
+	// Money=银两(服务端 keys.MONEY=9560) / Deposit=钱庄存款(9561) / Reserve=储备金(9617)
+	// / Kaiyuan=开元通宝(服务端 9727 COOKIE_KAIYUAN_MONEY，2026-09-24 接入)。
 	// MapView「选择机器人」列表显示用；0 值不序列化（前端显示"-"）。
 	Money   int64 `json:"money,omitempty"`
 	Deposit int64 `json:"deposit,omitempty"`
 	Reserve int64 `json:"reserve,omitempty"`
+	Kaiyuan int64 `json:"kaiyuan,omitempty"`
 	// DoubleClaimDate 今日已成功领取双倍经验的日期（机器人端 pre_daily 上报，YYYYMMDD；
 	// 未领=空）。双倍**有时长**（1/2/4 小时）且每周总量受限 —— 2026-09-23 用户口径
 	// "有领双的必须优先抓鬼"：调度侧据此把该号抓鬼候选置顶、超编回收/派游荡时避开。

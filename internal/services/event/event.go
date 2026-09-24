@@ -538,6 +538,11 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			if v, ok := st["reserve"]; ok {
 				r.Reserve = int64(toInt(v))
 			}
+			// 开元通宝（2026-09-24 接入；机器人端 9727 COOKIE_KAIYUAN_MONEY → 心跳 kaiyuan）：
+			// 与银两/存款/储备金同款透传，MapView 开元列显示用（缺失=0 → 前端显示"-"）。
+			if v, ok := st["kaiyuan"]; ok {
+				r.Kaiyuan = int64(toInt(v))
+			}
 			// 今日已领双倍经验日期（机器人 pre_daily 上报，YYYYMMDD；未领=空串）：
 			// 心跳**全量覆盖** —— 机器人端以落盘状态为准，跨日会自然变空/换新日期。
 			// 调度侧用 r.DoubleClaimedToday() 做"领双号优先抓鬼"（见 state.Robot 注释）。
