@@ -55,6 +55,12 @@ func (a *API) roamReclaimEligible(r state.Robot) bool {
 	if a.St != nil && a.St.GhostDoneToday(r.Account) {
 		return false
 	}
+	// 2026-09-24 补（现场 robot0005261 实证）：当日卡死熔断（capped）的号不回收 ——
+	// 它被任务链反复派发→抓鬼钟馗对话卡死→熔断，回收只会再来一轮空转（实测同一批号
+	// 每分钟被回收 10 个、任务池缺口 2 小时不缩，游荡被抽到 48/110）。
+	if a.St != nil && a.St.IsRestoreCapped(r.Account) {
+		return false
+	}
 	lvl, req := a.accountLevel(r.Account)
 	if ok, _ := a.ghostGate(lvl, req); !ok {
 		return false
