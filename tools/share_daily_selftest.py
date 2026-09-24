@@ -513,6 +513,16 @@ rep = S.dispatch_cmd(r, {"cmd": "share_daily_start", "share_key": "share_daily_�
 check("S6 重复 start 幂等（不打断状态机）",
       rep.get("result") == "already_running" and g.state == "KILL" and g.kill_mode == "click",
       "%s/%s" % (rep.get("result"), g.state))
+# 2026-09-24：商店采购进行中 → 拒绝启动（零副作用）——镜像 random_walk 的 shop_busy 拒绝，
+# 下面会清 quest 导航态，采购编排层(shop_errand)会静默卡死。
+r = fresh_robot()
+g = S.ShareDailyState()  # 默认未启用
+r.m_share_daily = g
+r.m_quest.shop_ctx = {"lock": 1}
+rep = S.dispatch_cmd(r, {"cmd": "share_daily_start", "share_key": "share_daily_大唐神捕",
+                         "daily_limit": 10})
+check("S6c 采购中拒绝启动（zero side-effect）",
+      rep.get("result") == "shop_busy" and not g.enabled, str(rep))
 # 接取 NPC 定位：链数据首环只有 catcher_npc（中控 shenbu_nav.json 现状）时可用
 r = fresh_robot()
 g = new_state()
