@@ -69,7 +69,9 @@ const filters = [
   // 2026-09-23 分享日常（方案 §4.4）；2026-09-24 补充：**正在跑的号也要能筛出来**
   // （只看意图会漏——号可能意图仍是抓鬼、但已被派了大唐神捕，见 dailyKindOf）
   { key: 'shenbu', label: '🕵️神捕', title: '意图=shenbu（等级 ≥40 且大唐神捕今日未满）或 正在跑大唐神捕（心跳 daily=share_daily_大唐神捕）' },
-  { key: 'fenghuo', label: '🔥烽火', title: '意图=fenghuo 或 正在跑烽火大唐（心跳 daily=share_daily_宫廷10）（P1 接入）' },
+  // 2026-09-24（用户口径）：**移除此 tab** —— 本 tab 口径（意图=fenghuo 或心跳在跑）与
+  // 「任务页」的烽火池口径（target/running，手动/RESTORE 派的号不占池 running）不一致，
+  // 两个数字并列易误读；号在跑烽火仍能在任务列的行内标记（🔥 烽火大唐 x/y）与详情里看到。
   // 2026-09-22 游荡：机器人上报的 walk.enabled === true，或孵化会话进行中（与 MapView 绿环、Go r.Walking() 同一口径）
   { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true，或孵化会话进行中）' },
   { key: 'idle', label: '发呆', title: '在线、没在干活、也不是异常（ERROR），且未收工（DONE）—— 与地图页「空闲」桶、Go 侧 roampool.Idle 同源（DONE 是本页额外的排除口径）' },
