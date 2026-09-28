@@ -64,7 +64,9 @@ CORE = ["config", "protocol3", "robot_mgr", "quest_state", "quest_engine",
         "share_daily",
         # 2026-09-24 摆摊（新模块）：main_tester 一并纳入 —— booth 模块级依赖
         # main_tester._BOOTH_MISSING 复位，且 main_tester 是主循环核心模块。
-        "main_tester", "booth"]
+        "main_tester", "booth",
+        # 2026-09-28 每日/登陆/在线/等级奖励补领（新模块；protocol3 顶层 import 它）
+        "encourage_claim"]
 
 sys.path.insert(0, script_dir)
 sys.modules["cnetwork"] = MagicMock(name="cnetwork")
