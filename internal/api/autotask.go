@@ -167,6 +167,34 @@ func (a *API) ghostGate(level, required int) (bool, string) {
 	return true, ""
 }
 
+// ghostReserveFloor 穷号储备金阈值（默认 500 = 2 个金创药，与机器人端
+// daily_ghost.GHOST_RESERVE_FLOOR 同口径）。0/负 = 关闭该闸（灰度/回退）。
+func (a *API) ghostReserveFloor() int {
+	if a.Cfg != nil && a.Cfg.GhostReserveFloor > 0 {
+		return a.Cfg.GhostReserveFloor
+	}
+	return 500
+}
+
+// reserveTooLowForGhost 储备金低到"大概率买不起药"（2026-09-28 穷号闸，见
+// docs/04-测试/分析-20260928-商店买药卡住排查.md）：
+//
+//	Reserve <= 0 → 不拦（数据缺席 = 未同步；真 0 号由机器人端 P0-1/P0-2/P0-3 + R1 兜底）；
+//	Reserve <  floor → 拦，防"接单→低血→买药 552/超时→冷却→再买"空转。
+//
+// 号有钱后（≥ 阈值）下一轮自动放行 —— 无粘滞，人工补钱即可回归抓鬼。
+// 复用点：G1 抓鬼候选（autotaskCandidatesCfg）/ G2 恢复引擎闸（GhostSkipFunc）/
+// G3 游荡池回收资格（roamReclaimEligible）。
+func (a *API) reserveTooLowForGhost(r state.Robot) (bool, string) {
+	if r.Reserve <= 0 {
+		return false, ""
+	}
+	if floor := a.ghostReserveFloor(); r.Reserve < int64(floor) {
+		return true, fmt.Sprintf("储备金不足（%d < %d，防买药空转）", r.Reserve, floor)
+	}
+	return false, ""
+}
+
 // GhostSkipFunc 供恢复引擎（restorer）用的"派发前最后一道闸"：人工暂停 / 抓鬼等级门槛 / 池闸。
 // 导出给 main 装配（restorer 在 api 之前构造，用闭包晚绑定）。
 //
@@ -234,6 +262,18 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		//   （实测 21:42:33 刚回收、21:42:40 就补发，机器人同秒回"启动时计数已满 50/50"）。
 		if a.St != nil && a.St.GhostDoneToday(account) {
 			return true, "今日抓鬼已满/不可用（等跨日或清空移除名单）"
+		}
+		// 2026-09-28 穷号闸（G2）：储备金低到"大概率买不起药"的号不补发 ghost_start ——
+		//   旧行为：穷号被恢复引擎反复拉起 → 低血买药 552/90s 超时死循环（见
+		//   docs/04-测试/分析-20260928-商店买药卡住排查.md）。与 G1 双保：意图=ghost 的
+		//   穷号不会被"重启/重登补发"反复拉起。reserve 缺席(=0)不拦（机器人端兜底）；
+		//   号有钱后自动放行（无粘滞）。
+		if a.St != nil {
+			if rb, ok := a.St.Get(account); ok {
+				if bad, why := a.reserveTooLowForGhost(rb); bad {
+					return true, why
+				}
+			}
 		}
 		if ok, why := a.ghostGateFor(account); !ok {
 			return true, why
@@ -707,6 +747,14 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			// 已毕业但等级未知的仍允许：服务端 gate / 学到的 required_level 兜底，别误伤重连中的号。
 			if !chainDone && level < a.newbieMaxLevel() {
 				continue // 没毕业 / 等级未知且未毕业 → 不派抓鬼
+			}
+			// 2026-09-28 穷号闸（G1）：储备金 < 阈值（默认 500）的号不进抓鬼候选 ——
+			//   穷号接单后低血买药会进 552/90s 超时循环（见
+			//   docs/04-测试/分析-20260928-商店买药卡住排查.md）。只影响候选生成
+			//   （自动任务/池统计/批量上线共用）；reserve 缺席(=0)不拦；号有钱后
+			//   下一轮自动回到候选（无粘滞）。
+			if bad, _ := a.reserveTooLowForGhost(r); bad {
+				continue
 			}
 			if kinds[acc] != "" && kinds[acc] != intent.KindGhost {
 				continue

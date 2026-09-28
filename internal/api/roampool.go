@@ -62,6 +62,12 @@ func (a *API) roamReclaimEligible(r state.Robot) bool {
 	if a.St != nil && a.St.IsRestoreCapped(r.Account) {
 		return false
 	}
+	// 2026-09-28 穷号闸（G3）：储备金 < 阈值的号不回收 —— 回收去抓鬼也只会"低血买药
+	// 552/超时"空转（见 docs/04-测试/分析-20260928-商店买药卡住排查.md），留在游荡
+	// 继续有产出；reserve 缺席(=0)不拦（G1/G2 同口径，机器人端兜底）。
+	if bad, _ := a.reserveTooLowForGhost(r); bad {
+		return false
+	}
 	lvl, req := a.accountLevel(r.Account)
 	if ok, _ := a.ghostGate(lvl, req); !ok {
 		return false
