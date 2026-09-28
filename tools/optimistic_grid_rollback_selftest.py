@@ -8,13 +8,23 @@
   经过此形态 → 报错/停链后重登又乐观跳图 → 闭环。
 修复: `__optimistic_grid_mismatch_note`(四条件判定: 乐观标记挂着+本地==乐观图+
   服务端图!=本地+本地图网格存在+pos 越出网格覆盖) + `__grid_rollback_optimistic`
-  (回滚服务端图/恢复改图前位置快照/清跨图残留下/免费优先; 不做 hop 拉黑),
+  (回滚服务端图/恢复改图前位置快照/清跨图残留下/免费优先; 单次回滚不做 hop 拉黑),
   在 __do_walk 失败路径(所有连通性兜底之后、报错之前)接管。
+
+2026-09-28 R-1 追加(robot0005286 越网格回滚死循环, 当日 1172 次回滚):
+  ① `__opt_rollback_guard`: 同一跳转点时间窗内重复越网格回滚 >= 2 次 → 拉黑
+     (hop_black + hop_black_hard 硬黑名单) + __replan_after_bad_hop 换路重规划;
+  ② `__find_dijkstra_route`: 硬黑名单在有效期内禁止"忽略黑名单再找一次"回退
+     (普通黑名单保留旧回退行为不变);
+  ③ `__teleport_click`: 硬黑名单活跃且仍无替代路线 → 报 OPTIMISTIC_LOOP_STOP
+     停链 + 60s 规划节流(防上层每帧重试)。
+  反例(必须不触发): 单次回滚 / 不同跳转点各 1 次 / 超窗计数重开 / 无归因 hop=None。
 
 用法: python tools/optimistic_grid_rollback_selftest.py [script_dir]
 """
 import os
 import sys
+import time
 import types
 
 try:
@@ -82,9 +92,14 @@ def main():
     check("A5: 接管调用 __cancel_walk + 回滚(不报错/不停链)",
           "__cancel_walk(quest)" in qe
           and "__grid_rollback_optimistic(robot_object, quest, _go_note)" in qe)
+    check("A6b: 定义 __opt_rollback_guard(重复回滚保护)",
+          "def __opt_rollback_guard(robot_object, quest, hop, note):" in qe)
     _frag_rb = _extract_func(qe, "__grid_rollback_optimistic") or ""
-    check("A6: 网格回滚不做 hop 拉黑(纯走路无 hop 可归因, 防误伤)",
-          "__hop_blacklist" not in _frag_rb)
+    check("A6: 单次回滚不拉黑; 重复回滚交 guard(归因在清乐观标记之前取)",
+          "__hop_blacklist" not in _frag_rb
+          and "__opt_rollback_guard(robot_object, quest, _rb_hop, note)" in _frag_rb
+          and 0 <= _frag_rb.find("_opt_before = int(getattr(robot_object, \"m_mapid_optimistic\", 0) or 0)")
+          < _frag_rb.find("robot_object.m_mapid_optimistic = 0"))
     check("A7: 独立日志锚点(位置越出本地图网格...)",
           "位置越出本地图网格且乐观过图未被服务端接受" in qe)
     check("A8: 既有 A 型/CLICK 回滚保留(不冲突)",
@@ -143,11 +158,40 @@ def main():
         check("B7(反例): m_srv_mapid=0 → None", r is None, r)
 
     # ============================================================ C. 接管动作语义
+    # C0 前置: 真提取 __opt_rollback_guard(R-1), 注入 mock 依赖 —— C/D 两区共用
+    def _mock_hop_key(fm, e):
+        return (int(fm or 0), e.get("destination_index"))
+
+    guard_events = []
+    guard_replans = []
+    guard_blacklisted = []
+    ns_guard = {
+        "time": time,
+        "__hop_key": _mock_hop_key,
+        "__hop_blacklist": lambda ro, q, h: (guard_blacklisted.append(
+            _mock_hop_key(h.get("_from_map", getattr(ro, "m_mapid", 0)), h)), 1)[1],
+        "__replan_after_bad_hop": lambda ro, q, dest, note: guard_replans.append((dest, note)),
+        "__emit": lambda ro, ev: guard_events.append(ev.get("msg") or ""),
+        "HOP_BLACKLIST_MS": 600000,
+        "OPT_ROLLBACK_LIMIT": 2,
+        "OPT_ROLLBACK_WINDOW_MS": 5 * 60 * 1000,
+    }
+    frag_guard = _extract_func(qe, "__opt_rollback_guard")
+    check("C0a: 提取 __opt_rollback_guard", frag_guard is not None)
+    guard = None
+    if frag_guard:
+        try:
+            exec(frag_guard, ns_guard)
+            guard = ns_guard.get("__opt_rollback_guard")
+        except Exception as e:  # noqa
+            check("C0a: exec __opt_rollback_guard", False, str(e))
+
     events = []
     calls = []
     ns_rb = {
         "__emit": lambda ro, ev: events.append(ev.get("msg") or ""),
         "__restore_optimistic_snapshot": lambda ro, srv: (calls.append(srv), True)[1],
+        "__opt_rollback_guard": guard,    # C/D 共用同一真实现
     }
     frag_rb = _extract_func(qe, "__grid_rollback_optimistic")
     rb = None
@@ -177,6 +221,153 @@ def main():
               and q.path_points == [], (q.prefer_free, q.dijkstra_route))
         check("C4: 日志锚点'位置越出本地图网格...'",
               any("位置越出本地图网格" in m for m in events), events)
+        # C5(反例): 归因成立(last_hop_done.target_map==乐观图)但仅单次回滚
+        #   → guard 只记账(n=1), 不拉黑不换路 —— 既有单次回滚行为不变
+        ro2 = _RO()
+        q2 = types.SimpleNamespace(
+            prefer_free=False, dijkstra_route=[], dijkstra_waiting=False,
+            dijkstra_jumper=None, dijkstra_final=None, walk_target=None,
+            path_points=[], last_hop_done={"_from_map": 12, "destination_index": 201,
+                "target_map": 24, "npc_index": 13255, "npc_name": "替加"})
+        guard_blacklisted[:] = []
+        guard_replans[:] = []
+        rb(ro2, q2, "note-c5")
+        check("C5(反例): 归因成立但仅 1 次回滚 → 不拉黑不换路",
+              not guard_blacklisted and not guard_replans
+              and q2.opt_rb.get("n") == 1 and not getattr(q2, "hop_black_hard", None),
+              (guard_blacklisted, guard_replans, getattr(q2, "opt_rb", None)))
+
+    # ============================================================ D. R-1 重复回滚保护(真执行)
+    if guard is not None:
+        class _ROD(object):
+            def __init__(self):
+                self.m_mapid = 12
+        hop201 = {"_from_map": 12, "destination_index": 201, "target_map": 24,
+                  "npc_index": 13255, "npc_name": "替加"}
+        roD = _ROD()
+        # D1 第一次回滚: 只记账 → 不动作
+        qD = types.SimpleNamespace()
+        guard_blacklisted[:] = []
+        guard_replans[:] = []
+        guard_events[:] = []
+        okD1 = guard(roD, qD, hop201, "note")
+        check("D1(反例): 同点第 1 次回滚 → 不拉黑不换路, 仅记账 n=1",
+              okD1 is False and not guard_blacklisted and not guard_replans
+              and isinstance(qD.opt_rb, dict) and qD.opt_rb.get("n") == 1
+              and qD.opt_rb.get("key") == (12, 201),
+              (okD1, qD.opt_rb))
+        # D2 同点第二次回滚(窗口内) → 拉黑(普通+硬) + 换路(真执行)
+        guard_blacklisted[:] = []
+        guard_replans[:] = []
+        guard_events[:] = []
+        okD2 = guard(roD, qD, hop201, "note2")
+        check("D2: 同点第 2 次回滚 → 拉黑+硬黑名单+换路重规划",
+              okD2 is True and guard_blacklisted == [(12, 201)]
+              and isinstance(getattr(qD, "hop_black_hard", None), dict)
+              and (12, 201) in qD.hop_black_hard
+              and len(guard_replans) == 1 and guard_replans[0][0] == 201
+              and qD.opt_rb is None,
+              (okD2, guard_blacklisted, getattr(qD, "hop_black_hard", None), guard_replans))
+        check("D2b: 拉黑日志含跳转点/次数锚点",
+              any("越网格回滚循环" in m and "201" in m and "13255" in m for m in guard_events),
+              guard_events)
+        # D3(反例) 不同跳转点各 1 次(+交叉回到旧点) → 均不触发
+        qD3 = types.SimpleNamespace()
+        okD3a = guard(roD, qD3, {"_from_map": 12, "destination_index": 14,
+                                 "target_map": 11}, "n")
+        okD3b = guard(roD, qD3, {"_from_map": 11, "destination_index": 211,
+                                 "target_map": 609}, "n")
+        okD3c = guard(roD, qD3, {"_from_map": 12, "destination_index": 14,
+                                 "target_map": 11}, "n")
+        check("D3(反例): 不同跳转点各 1 次/交叉 → 均不触发(切换即重开)",
+              okD3a is False and okD3b is False and okD3c is False
+              and not getattr(qD3, "hop_black_hard", None),
+              (okD3a, okD3b, okD3c, getattr(qD3, "opt_rb", None)))
+        # D4(反例) 超窗(>5min) → 计数重开为 1, 不触发
+        qD4 = types.SimpleNamespace(opt_rb={"key": (12, 201), "n": 1,
+            "ts": int(time.time() * 1000) - (5 * 60 * 1000) - 5000})
+        okD4 = guard(roD, qD4, hop201, "n")
+        check("D4(反例): 超窗 >5min → 计数重开(1), 不触发",
+              okD4 is False and qD4.opt_rb.get("n") == 1
+              and not getattr(qD4, "hop_black_hard", None),
+              (okD4, qD4.opt_rb))
+        # D5(反例) 无归因(hop=None) → 不触发不记账
+        qD5 = types.SimpleNamespace()
+        okD5 = guard(roD, qD5, None, "n")
+        check("D5(反例): hop=None(无归因) → 不触发不记账",
+              okD5 is False and not getattr(qD5, "opt_rb", None))
+
+    # ============================================================ E. 硬黑名单严格模式(__find_dijkstra_route)
+    ns_find = {
+        "time": time,
+        "g_chain_dijkstra_cache": {},
+        "BAD_JUMPERS": (10147, 13255),
+        "__hop_key": _mock_hop_key,
+    }
+    frag_find = _extract_func(qe, "__find_dijkstra_route")
+    check("E0: 提取 __find_dijkstra_route", frag_find is not None)
+    find = None
+    if frag_find:
+        try:
+            exec(frag_find, ns_find)
+            find = ns_find.get("__find_dijkstra_route")
+        except Exception as e:  # noqa
+            check("E0: exec __find_dijkstra_route", False, str(e))
+    if find is not None:
+        _nowE = int(time.time() * 1000)
+        _e201 = {"destination_index": 201, "target_map": 24, "kind": "npc_jumper",
+                 "npc_index": 13255, "match_name": "幽冥界", "cost_money": 500}
+
+        def _mkq(hard=None, extra12=None):
+            tab = {"12": [_e201] + list(extra12 or []), "24": [],
+                   "11": [{"destination_index": 211, "target_map": 24, "kind": "map_skip"}]}
+            return types.SimpleNamespace(
+                chain={"dijkstra": tab},
+                hop_black={(12, 201): _nowE + 600000},
+                hop_black_hard=dict(hard or {}),
+                prefer_free=False, chain_id="")
+
+        # E1 既有行为: 普通黑名单堵死 → 仍"忽略黑名单再找一次"(返回该死 hop)
+        rE1 = find(_mkq(), 12, 24)
+        check("E1(既有行为): 普通黑名单堵死 → 回退忽略黑名单(返回 dest201)",
+              isinstance(rE1, list) and rE1 and rE1[0]["destination_index"] == 201,
+              rE1)
+        # E2 R-1: 硬黑名单堵死 → 不回退, 直接 None
+        rE2 = find(_mkq(hard={(12, 201): _nowE + 600000}), 12, 24)
+        check("E2(R-1): 硬黑名单堵死 → 不回退直接 None",
+              rE2 is None, rE2)
+        # E3 硬黑名单过期 → 普通回退行为恢复
+        rE3 = find(_mkq(hard={(12, 201): _nowE - 1000}), 12, 24)
+        check("E3: 硬黑名单过期 → 回退行为恢复",
+              isinstance(rE3, list) and rE3 and rE3[0]["destination_index"] == 201,
+              rE3)
+        # E4 硬黑名单 + 有替代路线 → 正常走替代(不受影响)
+        rE4 = find(_mkq(hard={(12, 201): _nowE + 600000},
+                        extra12=[{"destination_index": 14, "target_map": 11,
+                                  "kind": "map_skip"}]), 12, 24)
+        check("E4: 硬黑名单 + 替代路线存在 → 走替代(dest14→dest211)",
+              isinstance(rE4, list) and len(rE4) == 2
+              and rE4[0]["destination_index"] == 14 and rE4[1]["destination_index"] == 211,
+              rE4)
+        # E5 prefer_free 递归分支不绕过硬黑名单
+        qE5 = _mkq(hard={(12, 201): _nowE + 600000})
+        qE5.prefer_free = True
+        rE5 = find(qE5, 12, 24)
+        check("E5: prefer_free + 硬黑名单(无免费替代) → None", rE5 is None, rE5)
+
+    # ============================================================ F. 源码形状(__teleport_click 停链/节流)
+    check("F1: __teleport_click 停链节流(opt_loop_protect_ms, 函数开头)",
+          "_opt_stop = int(getattr(quest, \"opt_loop_protect_ms\", 0) or 0)" in qe)
+    _i_opt = qe.find('"OPTIMISTIC_LOOP_STOP"')
+    _i_nlr = qe.find("无合法跨图路径 %d→%d(NPC %s), 停链等待处理")
+    check("F2: OPTIMISTIC_LOOP_STOP 报错在'无路'分支且先于一般 NO_LEGAL_ROUTE",
+          0 < _i_opt < _i_nlr and "OPT_LOOP_STOP_RETRY_MS" in qe)
+    check("F3: __find_dijkstra_route 硬黑名单不回退(_hard_skipped 判定)",
+          "_hard_skipped" in qe and "and not _hard_skipped:" in qe
+          and "_hard_bl.get(_hk, 0) > _now_bl" in qe)
+    check("F4: A5 既有接管顺序未回退(__do_walk 里回滚在报错之前)",
+          0 < qe.find("_go_note = __optimistic_grid_mismatch_note(robot_object, quest, grid_data)")
+          < qe.find("if now_ms >= getattr(quest, \"walk_fail_report_ms\", 0):"))
 
     # ============================================================ 汇总
     nfail = 0
