@@ -307,6 +307,34 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(rpTimer))
 
+// ---------------- 摆摊配置（2026-09-28：离线摆摊 · 单次挂多久）----------------
+// 口径：只影响**下一次**挂摊 —— 机器人端开摊时才读计划文件；已挂的摊需收摊重挂才能改。
+// 数据走 GET/POST /api/booth/config（中控落盘 data/booth_config.json + 同步机器人端计划文件）。
+// 上限 480 分钟 = 服务端 VIP0 单次上限 8h（超了会被服务端拒绝）。
+const bc = ref({})
+const bcPlans = computed(() => (bc.value && bc.value.plan_files) || [])
+const bcForm = reactive({ offline_minutes: 480 })
+const bcRange = reactive({ min: 1, max: 480 })
+const bcSaving = ref(false)
+watch(bc, (v) => {
+  if (!v || v.ok !== true) return
+  bcForm.offline_minutes = Number(v.offline_minutes ?? 480)
+  bcRange.min = Number(v.min ?? 1)
+  bcRange.max = Number(v.max ?? 480)
+}, { immediate: true })
+async function loadBooth() {
+  try { bc.value = await apiGet('/api/booth/config') } catch (e) { bc.value = {} }
+}
+async function saveBooth() {
+  bcSaving.value = true
+  try {
+    const res = await post('/api/booth/config', { offline_minutes: Number(bcForm.offline_minutes) })
+    if (res && res.ok) await loadBooth() // 重读：同步了几份计划文件由后端回执
+    return res
+  } finally { bcSaving.value = false }
+}
+onMounted(loadBooth)
+
 // ---------------- 启动哪条链（下拉选，不再"点了也不知道启什么"）----------------
 // id === 'auto' = 不手选链，按账号意图自动分配（新手链/抓鬼），默认就是它
 const chains = reactive({ list: [], dir: '', err: '', id: localStorage.getItem('zy_chain_id') || 'auto' })
@@ -912,6 +940,33 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       口径：在线总数 = 抓鬼池 + 新手池 + 游荡池（余量）。调整规则：每 {{ rp.interval_sec || 60 }} 秒一轮，
       任务池缺人时**立刻回收**游荡号（优先挑所在图人最多的，顺带纠偏），否则把空闲号**按图均匀**派出去；
       单轮最多调 {{ rp.max_step || 5 }} 个。机器人端「空闲 90s 自动游荡」仍是兜底（本池只管名额与分布）。
+    </div>
+  </el-card>
+
+  <!-- 摆摊配置（2026-09-28）：离线摆摊单次时长；保存 → 中控落盘 + 同步机器人端计划文件 -->
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">摆摊配置</span>
+        <span class="spacer" />
+        <span class="muted">离线摆摊 · 单次挂多久</span>
+      </div>
+    </template>
+    <div class="param-row">
+      <span class="k">单次时长</span>
+      <el-input-number v-model="bcForm.offline_minutes" size="small" :min="bcRange.min" :max="bcRange.max"
+        :step="30" :precision="0" class="num" />
+      <span class="k">分钟（{{ bcRange.min }}~{{ bcRange.max }}；480 = 服务端 VIP0 单次上限 8h）</span>
+      <el-button type="primary" size="small" :loading="bcSaving" @click="saveBooth">保存</el-button>
+    </div>
+    <div class="sub">
+      只影响下一次挂摊：机器人端开摊时才读计划文件；当前已挂的摊需收摊重挂才能改。
+      <template v-if="bcPlans.length">
+        · 已发现 <span :title="bcPlans.join('\n')">{{ bcPlans.length }} 份计划文件副本</span>（保存时同步）
+      </template>
+      <template v-else>
+        · <span class="warnText">未发现机器人端计划文件（保存只改中控配置，挂摊仍用旧时长）</span>
+      </template>
     </div>
   </el-card>
 

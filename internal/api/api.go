@@ -47,6 +47,8 @@
 //	POST /api/reghost/resume  解除"当日卡死熔断"（单个/全部；让 capped 号提前回到自动通道，可选鉴权）
 //	GET  /api/waterline       在线水位保持器状态（当前/目标/差值/来源/待下线；面板少一次请求）
 //	POST /api/waterline       设置水位参数（enabled/target/dead_zone/max_step/interval_sec 等，可选鉴权）
+//	GET  /api/booth/config    摆摊配置（离线摆摊单次时长 + 已发现的机器人端计划文件；只读）
+//	POST /api/booth/config    设置摆摊单次时长（1..480 分钟；落盘 + 同步机器人端计划文件，可选鉴权）
 //	GET  /ws                  实时事件推送（WebSocket）
 package api
 
@@ -219,6 +221,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	// 2026-09-23 技能策略配置（模块地图·战斗卡）：前端可配，保存即下发
 	mux.HandleFunc("GET /api/skill_config", a.handleSkillConfigGet)
 	mux.HandleFunc("POST /api/skill_config", a.requireToken(a.handleSkillConfigPost))
+	// 2026-09-28 摆摊配置（离线摆摊·单次时长）：前端可配，保存即落盘 + 同步机器人端计划文件
+	mux.HandleFunc("GET /api/booth/config", a.handleBoothConfigGet)
+	mux.HandleFunc("POST /api/booth/config", a.requireToken(a.handleBoothConfigPost))
 	mux.HandleFunc("/ws", a.handleWS)
 }
 
