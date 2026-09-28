@@ -9,15 +9,15 @@
            R1 闸在 ghost_start 分支最前; 实际下单量日志）。
   B 动态: shop_errand.start 真模块行为 —— 按 m_reserve 降量、可买数 0 返回 no_money
           且**不占锁/不调执行器**、reserve=0(未同步)放行。
-          注意: spec 伪代码 `reserve // price - 1`(留 1 个余量) → 31167/211 得 146;
-          spec §3.2 用例点写的 147 是"未留余量"的上限(147*211=31017), 本实现按
-          伪代码(-1)。此处断言 146 并显式覆盖 margin 语义。
+          口径(2026-09-28 决策 B): 可买数=reserve//price; **≥2 才减 1 余量**
+          (≥2 → 31167/211 = 146; =1 不减 → reserve 211~421 的准穷号可买 1 个自愈;
+          =0 → no_money)。spec §3.2 用例点写的 147 是"未留余量"上限(147*211=31017)。
   C 动态: quest_engine.on_shop_notice_args(552) → notify_rejected + notify_failed
           (result=failed, reason 含 552 与 货币); 编排层 1 秒内可见。
   D 动态: daily_ghost.__heal_buy_tick 连败冷却 60/120/240/480/960/1800 封顶;
           买到药归零; GhostState.reset() 不清 buy_fail_streak。
   E 动态: daily_ghost.dispatch_cmd ghost_start 的 R1 兜底闸(源码截段真执行):
-          穷(0<reserve<500)且无药 → no_money; 有药/未同步(0)/富 → 放行。
+          穷(0<reserve<211=1 个药价)且无药 → no_money; 有药/未同步(0)/≥211 → 放行。
 
 用法: python tools/shop_afford_selftest.py [script_dir]
 """
@@ -95,8 +95,9 @@ def main():
     # ================================================================ A. 静态形状
     check("A1: shop_errand 可买数0 返回 no_money(不占锁)",
           '"result": "no_money"' in se_src and '"count": 0}' in se_src)
-    check("A2: shop_errand 降量公式含 1 个余量(reserve // price - 1)",
-          "_cap = max(0, _reserve // _price - 1)" in se_src)
+    check("A2: shop_errand 降量公式=可买数≥2 才减 1 余量(B 案)",
+          "_raw = _reserve // _price" in se_src
+          and "_cap = _raw - 1 if _raw >= 2 else _raw" in se_src)
     check("A3: 降量短路在 acquire 之前(不占锁)",
           0 < se_src.find('"result": "no_money"') < se_src.find("ok, held = acquire("))
     check("A4: reserve=0 视为未同步不拦(_reserve > 0 才降量)",
@@ -104,8 +105,8 @@ def main():
     check("A5: quest_engine 552 拒绝回传(notify_rejected + notify_failed)",
           "_se.notify_rejected(robot_object, _nid, _why)" in qe_src
           and '_se.notify_failed(robot_object, "服务端拒绝:%s(码 %d)" % (_why, _nid))' in qe_src)
-    check("A6: daily_ghost 常量 GHOST_RESERVE_FLOOR = 500",
-          "GHOST_RESERVE_FLOOR = 500" in dg_src)
+    check("A6: daily_ghost 常量 GHOST_RESERVE_FLOOR = 211(方案甲自愈线)",
+          "GHOST_RESERVE_FLOOR = 211" in dg_src)
     check("A7: GhostState 新增 buy_fail_streak 字段",
           "self.buy_fail_streak = 0" in dg_src)
     _frag_reset = _extract_func(dg_src, "reset") or ""
@@ -172,18 +173,32 @@ def main():
           res3.get("ok") and res3.get("count") == 200, res3)
     se.consume(ro3, "errand")
 
-    # B4 边界: 467 → 467//211-1 = 1(准穷号可买 1 个)
+    # B4 边界: 467 → 467//211=2 ≥2 → 1(准穷号可买 1 个)
     ro4 = _Rob(467, "afford_b4@x")
     res4 = se.start(ro4, 102007, count=200, owner="errand")
     check("B4: reserve=467(<500) 降为 1 个(仍能发起, 不短路)",
           res4.get("ok") and res4.get("count") == 1, res4)
     se.consume(ro4, "errand")
 
-    # B5 边界: 421 → 421//211-1 = 0 → no_money(与 spec §1.3 "≥211 可买 1 个"的差异见报告)
+    # B5 边界(决策 B): 421 → 421//211=1(=1 不减) → 买 1 个(旧 A 案此处置 no_money)
     ro5 = _Rob(421, "afford_b5@x")
     res5 = se.start(ro5, 102007, count=200, owner="errand")
-    check("B5(边界): reserve=421 → 0 个 → no_money(留 1 余量所致)",
-          (not res5.get("ok")) and res5.get("result") == "no_money", res5)
+    check("B5(B 案): reserve=421(可买数=1) → 不减余量, 买 1 个",
+          res5.get("ok") and res5.get("count") == 1, res5)
+    se.consume(ro5, "errand")
+
+    # B6 边界(决策 B): 211(恰好 1 个价) → 买 1 个(准穷号自愈路径)
+    ro6 = _Rob(211, "afford_b6@x")
+    res6 = se.start(ro6, 102007, count=200, owner="errand")
+    check("B6(B 案): reserve=211(恰好 1 个) → 买 1 个",
+          res6.get("ok") and res6.get("count") == 1, res6)
+    se.consume(ro6, "errand")
+
+    # B7 边界: 210(<1 个价) → no_money(真买不起)
+    ro7 = _Rob(210, "afford_b7@x")
+    res7 = se.start(ro7, 102007, count=200, owner="errand")
+    check("B7(边界): reserve=210(可买数=0) → no_money",
+          (not res7.get("ok")) and res7.get("result") == "no_money", res7)
 
     if _prev_qe is not None:
         sys.modules["quest_engine"] = _prev_qe
@@ -368,21 +383,24 @@ def main():
             r.m_bag_cache = dict(bag)
             return r
 
-        r = r1("ghost_start", _mk_rob(300, {}), 500, 102007,
+        r = r1("ghost_start", _mk_rob(200, {}), 211, 102007,
                lambda ro, ev: emits.append(ev))
-        check("E1: 穷(300<500)且无药 → 拒绝(result=no_money)",
+        check("E1: 穷(200<211)且无药 → 拒绝(result=no_money)",
               isinstance(r, dict) and r.get("result") == "no_money", r)
         check("E1b: 拒绝时发 warn 日志(锚点'拒绝启动抓鬼')",
               any("拒绝启动抓鬼" in (e.get("msg") or "") for e in emits), emits)
-        r = r1("ghost_start", _mk_rob(300, {102007: [111, 5]}), 500, 102007,
+        r = r1("ghost_start", _mk_rob(200, {102007: [111, 5]}), 211, 102007,
                lambda ro, ev: emits.append(ev))
         check("E2(反例): 穷但背包有金创药 → 放行", r is None, r)
-        r = r1("ghost_start", _mk_rob(0, {}), 500, 102007,
+        r = r1("ghost_start", _mk_rob(0, {}), 211, 102007,
                lambda ro, ev: emits.append(ev))
         check("E3(反例): reserve=0(未同步) → 放行", r is None, r)
-        r = r1("ghost_start", _mk_rob(600, {}), 500, 102007,
+        r = r1("ghost_start", _mk_rob(211, {}), 211, 102007,
                lambda ro, ev: emits.append(ev))
-        check("E4(反例): reserve=600(≥阈值) → 放行", r is None, r)
+        check("E4(边界): reserve=211(=阈值) → 放行(可买 1 个自愈)", r is None, r)
+        r = r1("ghost_start", _mk_rob(600, {}), 211, 102007,
+               lambda ro, ev: emits.append(ev))
+        check("E5(反例): reserve=600(≥阈值) → 放行", r is None, r)
 
     # ================================================================ 汇总
     nfail = 0

@@ -167,13 +167,14 @@ func (a *API) ghostGate(level, required int) (bool, string) {
 	return true, ""
 }
 
-// ghostReserveFloor 穷号储备金阈值（默认 500 = 2 个金创药，与机器人端
-// daily_ghost.GHOST_RESERVE_FLOOR 同口径）。0/负 = 关闭该闸（灰度/回退）。
+// ghostReserveFloor 穷号储备金阈值（默认 211 = 1 个金创药单价，与机器人端
+// daily_ghost.GHOST_RESERVE_FLOOR 同口径；2026-09-28 方案甲由 500 下调 = 配套
+// P0-1 降量 B 案的"可买 1 个药"自愈线）。0/负 = 关闭该闸（灰度/回退）。
 func (a *API) ghostReserveFloor() int {
 	if a.Cfg != nil && a.Cfg.GhostReserveFloor > 0 {
 		return a.Cfg.GhostReserveFloor
 	}
-	return 500
+	return 211
 }
 
 // reserveTooLowForGhost 储备金低到"大概率买不起药"（2026-09-28 穷号闸，见

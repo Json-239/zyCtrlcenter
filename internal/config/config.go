@@ -137,8 +137,10 @@ type Config struct {
 	NewbieMaxLevel int
 	// GhostReserveFloor 穷号储备金阈值（2026-09-28）：储备金低于此值的号不派/不补/不回收
 	// 抓鬼（防"低血买药 552→超时"空转，见 docs/04-测试/分析-20260928-商店买药卡住排查.md）。
-	// 默认 500（=2 个金创药）；0/负 = 关闭该闸（灰度/回退）。机器人端同口径常量
-	// daily_ghost.GHOST_RESERVE_FLOOR。可用环境变量 CTRL_GHOST_RESERVE_FLOOR 覆盖。
+	// 默认 211（=1 个金创药单价，配套 P0-1 降量 B 案的"可买 1 个"自愈线；2026-09-28 方案甲
+	// 由 500 下调）—— ≥211 放行按余额买 1 个药；<211 真穷（买不起任何药）才硬拦。
+	// 0/负 = 关闭该闸（灰度/回退）。机器人端同口径常量 daily_ghost.GHOST_RESERVE_FLOOR。
+	// 可用环境变量 CTRL_GHOST_RESERVE_FLOOR 覆盖。
 	GhostReserveFloor int
 	// AutoRestore 恢复引擎总开关：中控重启/机器人重连后按意图自动补发 start_chain/ghost_start。
 	// **默认关**（会真给机器人发命令）；环境变量 CTRL_AUTO_RESTORE=1 打开。
@@ -326,7 +328,7 @@ func build(base string, opts *cliOpts) *Config {
 		GameVersion:          env("CTRL_GAME_VERSION", "58740022"),
 		AutoRemoveOnDone:     true,
 		NewbieMaxLevel:       envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
-		GhostReserveFloor:    envInt("CTRL_GHOST_RESERVE_FLOOR", 500),
+		GhostReserveFloor:    envInt("CTRL_GHOST_RESERVE_FLOOR", 211),
 		AutoRestore:          envBool("CTRL_AUTO_RESTORE", false),
 		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
 		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),

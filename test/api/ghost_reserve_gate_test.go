@@ -4,7 +4,8 @@
 //	在药铺"552(货币不够)→90 秒超时→60 秒冷却→再买"死循环里空转(5xxx 号买 200 个金创药,
 //	单价 211 买不起)；穷号被派/补/回收去抓鬼 = 继续空转，无产出。
 //
-// 本组用例钉住三处（判据 = Reserve>0 且 < 阈值(GhostReserveFloor，默认 500)）：
+// 本组用例钉住三处（判据 = Reserve>0 且 < 阈值(GhostReserveFloor，默认 211 = 1 个药价；
+// 2026-09-28 方案甲由 500 下调 = 配套 P0-1 降量 B 案的"可买 1 个"自愈线)）：
 //
 //	① G1 抓鬼候选（autotaskCandidatesCfg）：穷号不进 ghosts 候选；reserve=0（未同步）/
 //	   reserve≥阈值（含等于）→ 照常进；补钱后下一轮回到候选（无粘滞）。
@@ -33,12 +34,12 @@ func TestGhostReserveFloorCandidate(t *testing.T) {
 		env.pool.SetZoneState(a, testZoneAddr, accounts.ZoneState{Verified: true, Usable: true, Level: 45})
 	}
 	feedRobot(t, env, rich, map[string]any{"reserve": 1000})    // 富 → 进候选
-	feedRobot(t, env, poor, map[string]any{"reserve": 100})     // 穷(<500) → 不进
+	feedRobot(t, env, poor, map[string]any{"reserve": 210})     // 穷(<211=1 个药价) → 不进
 	feedRobot(t, env, unsynced, nil)                            // reserve 缺席(=0) → 不拦
-	feedRobot(t, env, boundary, map[string]any{"reserve": 500}) // = 阈值 → 不拦(判据是 <)
+	feedRobot(t, env, boundary, map[string]any{"reserve": 211}) // = 阈值 → 不拦(判据是 <)
 
 	if n := ghostCandCount(t, env); n != 3 {
-		t.Fatalf("穷号(reserve=100)应被过滤，其余 3 个(含未同步/等于阈值)应在候选，实得 %v", n)
+		t.Fatalf("穷号(reserve=210)应被过滤，其余 3 个(含未同步/等于阈值)应在候选，实得 %v", n)
 	}
 	// 人工补钱/接任务赚钱后 → 下一轮自动回到候选（无粘滞）
 	feedRobot(t, env, poor, map[string]any{"reserve": 1000})
@@ -58,10 +59,12 @@ func TestGhostSkipFuncReserve(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("启动抓鬼池失败: %v", err)
 	}
-	poor, rich, zero := "gres_skip_poor@xy3.com", "gres_skip_rich@xy3.com", "gres_skip_zero@xy3.com"
-	feedRobot(t, env, poor, map[string]any{"reserve": 120})
+	poor, rich, zero, boundary := "gres_skip_poor@xy3.com", "gres_skip_rich@xy3.com",
+		"gres_skip_zero@xy3.com", "gres_skip_211@xy3.com"
+	feedRobot(t, env, poor, map[string]any{"reserve": 210})
 	feedRobot(t, env, rich, map[string]any{"reserve": 900})
 	feedRobot(t, env, zero, nil)
+	feedRobot(t, env, boundary, map[string]any{"reserve": 211})
 
 	skip := env.api.GhostSkipFunc()
 	if blocked, why := skip("ghost", poor); !blocked || !strings.Contains(why, "储备金不足") {
@@ -72,6 +75,9 @@ func TestGhostSkipFuncReserve(t *testing.T) {
 	}
 	if blocked, why := skip("ghost", zero); blocked {
 		t.Fatalf("reserve 缺席(=0，未同步)不该被拦补发，实被拦: %s", why)
+	}
+	if blocked, why := skip("ghost", boundary); blocked {
+		t.Fatalf("reserve=211(=1 个药价自愈线)不该被拦补发，实被拦: %s", why)
 	}
 	// 号有钱后自动放行（人工补钱即可回归抓鬼）
 	feedRobot(t, env, poor, map[string]any{"reserve": 5000})
@@ -91,12 +97,16 @@ func TestRoamReclaimEligibleReserve(t *testing.T) {
 	if deps.ReclaimEligible == nil {
 		t.Fatal("RoampoolDeps().ReclaimEligible 未装配")
 	}
-	poor := state.Robot{Account: "gres_rp_poor@xy3.com", Reserve: 150}
+	poor := state.Robot{Account: "gres_rp_poor@xy3.com", Reserve: 210}
+	boundary := state.Robot{Account: "gres_rp_211@xy3.com", Reserve: 211}
 	rich := state.Robot{Account: "gres_rp_rich@xy3.com", Reserve: 900}
 	zero := state.Robot{Account: "gres_rp_zero@xy3.com"}
 
 	if deps.ReclaimEligible(poor) {
 		t.Fatal("穷号不该被回收（回收去抓鬼只会继续买药空转）")
+	}
+	if !deps.ReclaimEligible(boundary) {
+		t.Fatal("reserve=211(=1 个药价自愈线) 应可回收（正常补任务池）")
 	}
 	if !deps.ReclaimEligible(rich) {
 		t.Fatal("富号应可回收（正常补任务池）")
