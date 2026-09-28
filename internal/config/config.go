@@ -337,10 +337,12 @@ func build(base string, opts *cliOpts) *Config {
 		LiveCountIntervalSec: envInt("CTRL_LIVECOUNT_INTERVAL_SEC", 60),
 		LiveCountTimeoutSec:  envInt("CTRL_LIVECOUNT_TIMEOUT_SEC", 3),
 		LiveCountToken:       env("CTRL_LIVECOUNT_TOKEN", ""),
-		RoamWorldMaps:        envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
+		// 2026-09-28 世界图白名单剔除轮回司 25（与 RoamExcludeMaps 同口径：白名单不应含排除图）
+		RoamWorldMaps: envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 609}),
 		// 2026-09-22 用户口径：幽冥界 24 是抓鬼专属，游荡排除（显式选图拒绝 + 白名单剔除）
 		// 2026-09-23 追加牢房 653/654/655（654/655 有网格会被随机抽中，进去出不来）
-		RoamExcludeMaps: envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 653, 654, 655}),
+		// 2026-09-28 追加轮回司 25（用户口径；白名单同步剔除）
+		RoamExcludeMaps: envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 25, 653, 654, 655}),
 		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
 		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
 		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),

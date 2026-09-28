@@ -98,7 +98,7 @@ func TestRandomWalkFailsLoudlyWhenChainUnusable(t *testing.T) {
 		wantMsgPart string
 	}{
 		{"链数据文件不存在", false, 6, "链数据文件不存在"},
-		{"目标图没有网格", true, 25, "map_grids"}, // 2026-09-22：24 已成游荡排除图，换个非排除图测"没有网格"
+		{"目标图没有网格", true, 26, "map_grids"}, // 2026-09-22：24 已成游荡排除图，换非排除图；2026-09-28：25 亦排除（轮回司），改 26
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

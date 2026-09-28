@@ -226,3 +226,39 @@ func TestLiveCountDefaultsAndEnv(t *testing.T) {
                         got.LiveCountIntervalSec, got.LiveCountTimeoutSec, got.LiveCountToken)
         }
 }
+
+// 游荡排除图（2026-09-28 追加轮回司 25）：默认排除表含 25；世界图白名单不含 25（同口径剔除）。
+func TestRoamExcludeMapsIncludesMap25(t *testing.T) {
+	def := config.Default()
+	if !intListHas(def.RoamExcludeMaps, 25) {
+		t.Fatalf("默认游荡排除表应含轮回司 25，实际 %v", def.RoamExcludeMaps)
+	}
+	if intListHas(def.RoamWorldMaps, 25) {
+		t.Fatalf("世界图白名单不应含已排除的 25，实际 %v", def.RoamWorldMaps)
+	}
+	// 既有排除图不被破坏；白名单其余世界图保留（如长安 11 / 609）
+	for _, m := range []int{24, 653, 654, 655} {
+		if !intListHas(def.RoamExcludeMaps, m) {
+			t.Fatalf("既有排除图 %d 丢失: %v", m, def.RoamExcludeMaps)
+		}
+	}
+	if !intListHas(def.RoamWorldMaps, 11) || !intListHas(def.RoamWorldMaps, 609) {
+		t.Fatalf("世界图白名单被误删（长安 11 / 609 应保留）: %v", def.RoamWorldMaps)
+	}
+	// 环境变量覆盖仍生效（只给 24,25 → 就这两张）
+	t.Setenv("CTRL_ROAM_EXCLUDE_MAPS", "24,25")
+	got := config.Load([]string{})
+	if len(got.RoamExcludeMaps) != 2 || got.RoamExcludeMaps[0] != 24 || got.RoamExcludeMaps[1] != 25 {
+		t.Fatalf("CTRL_ROAM_EXCLUDE_MAPS 覆盖失败: %v", got.RoamExcludeMaps)
+	}
+}
+
+// intListHas 整数切片是否包含 n（测试小工具）。
+func intListHas(list []int, n int) bool {
+	for _, v := range list {
+		if v == n {
+			return true
+		}
+	}
+	return false
+}
