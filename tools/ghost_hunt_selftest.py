@@ -179,8 +179,10 @@ def part_a(dh, cfg):
           re.search(r'if state == "NAV":\s*\n\t\t\tg\.nav_rounds = 0', dh) is not None)
     check("A31 清鬼后本状态计数归零",
           "g.nav_rounds = 0\t# 2026-09-24 找鬼追踪: 本轮追鬼结束" in dh)
-    check("A32 共享 rounds 其他语义原样(__stuck/累加/非 NAV 日志)",
-          "if g.rounds > 4:" in dh
+    check("A32 共享 rounds 其他语义原样(累加/非 NAV 日志; NAV stuck 判据已按 09-28 P1 改用本状态计数)",
+          '_over_r = _nav_r if g.state == "NAV" else g.rounds' in dh
+          and "if _over_r > 4:" in dh
+          and "if g.rounds > 4:" not in dh
           and '__stuck(robot_object, g, "状态 %s 重试 %d 次仍无进展"' in dh
           and '"抓鬼状态 %s 超时, 第 %d 次重试" % (g.state, g.rounds)' in dh)
     check("A33 nav_rounds 字段在 __init__ 与 reset 都初始化",

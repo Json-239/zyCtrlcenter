@@ -11,15 +11,18 @@
 
 覆盖两段:
   A 静态: 结构钉（无条件刷新时间戳 / 追鬼重试段 NAV 可达 / 坏结构不存在 / 判据与
-           日志原文保留 / 非 NAV 等价路径）。
+           日志原文保留 / 非 NAV 等价路径 / P1 判据 _over_r 与注释锚点）。
   B 行为: 截取真实代码段（`g.rounds += 1` … `return 0`）真执行:
            单次 NAV 超时（时间戳刷新 + 追鬼重试可达 + 不误触 __stuck）；
            连续 tick 不虚冲（模拟 12s 看门狗门限, rounds 只 +1）；
            追鬼判据失效 → 清鬼回 WAIT_GHOST；非 NAV 等价（清理 + READY, 不误清鬼）；
-           rounds>4 → __stuck（判据保留）。
+           非 NAV rounds>4 → stuck（原判据逐字保留,B5）；
+           NAV 共享债务(rounds=4)不误伤首超时(追鬼重试可达,B6)；
+           NAV 本状态真实计数到 5 → stuck（>4 防线保留,兜异常路径,B7）。
   S 灵敏度: 对同名备份 .bak_20260928_navfix（修复前坏版）跑同一"连续 tick"循环 →
            必须复现回归（rounds 虚冲/__stuck 触发），证明本用例测的是真差异；
-           S4 直接以 B1b 同一断言跑坏版 → "追鬼重试"不可达（死代码 FAIL 留档）。
+           S4 直接以 B1b 同一断言跑坏版 → "追鬼重试"不可达（死代码 FAIL 留档）；
+           S5/S6 变异判别：把 P1 判据回退为共享 rounds → B6 同场景必须复现误伤。
 
 用法: python tools/ghost_nav_timeout_selftest.py [script_dir]
 """
@@ -175,6 +178,12 @@ def main():
     check("A9: 修复注释锚点(指向深挖文档 §7)",
           "2026-09-28 修复(NAV 超时分支回归" in dh
           and "分析-20260928-抓鬼停摆深挖.md" in dh)
+    check("A10: P1 判据存在(NAV 用本状态真实计数, 其余状态用共享 rounds)",
+          '_over_r = _nav_r if g.state == "NAV" else g.rounds' in dh)
+    check("A11: 旧共享判据不再分流 stuck(if g.rounds > 4: 不存在)",
+          "\t\tif g.rounds > 4:" not in dh)
+    check("A12: P1 注释锚点(共享计数残留误伤)",
+          "2026-09-28 P1 修复(共享计数残留误伤" in dh)
 
     # ============================================================ B. 行为(截段真执行)
     region = _load_region(dh_path)
@@ -227,11 +236,28 @@ def main():
         check("B4b: 非 NAV 不误清鬼(ghost_npc_id 保留)",
               int(g.ghost_npc_id) == 777, g.ghost_npc_id)
 
-        # B5 rounds>4 → __stuck(判据保留, 不因本次修复松动)
-        g, q, caps = _mk_g(rounds=4), _mk_quest(), _caps()
+        # B5 非 NAV rounds>4 → __stuck（原判据对非 NAV 逐字保留, 不因本次修复松动）
+        g, q, caps = _mk_g(state="READY", rounds=4), _mk_quest(), _caps()
         ret = _call(body, caps, ro, g, q, 13000)
-        check("B5: rounds>4 → __stuck(熔断判据保留)",
-              len(caps["stuck"]) == 1 and "重试 5 次仍无进展" in caps["stuck"][0]
+        check("B5: 非 NAV rounds>4 → __stuck(判据保留)",
+              len(caps["stuck"]) == 1 and "状态 READY 重试 5 次仍无进展" in caps["stuck"][0]
+              and ret == 0, caps["stuck"])
+
+        # B6 NAV 共享债务免疫(P1): 共享 rounds=4(旧版会误伤) + 本状态真实首超时 →
+        #    不 stuck、追鬼重试仍可达(样本 robot0001000/5050 的误伤场景)
+        g, q, caps = _mk_g(rounds=4, nav_rounds=0), _mk_quest(), _caps()
+        ret = _call(body, caps, ro, g, q, 13000)
+        check("B6: NAV 共享债务(rounds=4)不再误伤首超时(不 stuck)",
+              caps["stuck"] == [] and ret == 0, (caps["stuck"], ret))
+        check("B6b: 追鬼重试可达(第 1/3 次) + teleport",
+              any("重新导航追" in m and "(第 1/3 次)" in m for m in caps["log"])
+              and caps["teleport"] == [(777, 1)], (caps["log"][-1:], caps["teleport"]))
+
+        # B7 NAV >4 防线保留: 本状态真实计数 _nav_r 构造到 5 → stuck（兜 NAV+无鬼等异常路径）
+        g, q, caps = _mk_g(nav_rounds=4), _mk_quest(), _caps()
+        ret = _call(body, caps, ro, g, q, 13000)
+        check("B7: NAV 本状态真实 5 次 → stuck(防线保留)",
+              len(caps["stuck"]) == 1 and "状态 NAV 重试 5 次仍无进展" in caps["stuck"][0]
               and ret == 0, caps["stuck"])
 
     # ============================================================ S. 灵敏度(修复前坏版必复现)
@@ -265,6 +291,25 @@ def main():
                 check("S1: 坏版复现执行", False, str(e))
     else:
         check("S0: 修复前备份存在(灵敏度对照)", False, bak_path)
+
+    # ============================================================ S2. 变异判别(P1 判据回退)
+    # 把 P1 判据行回退为共享 rounds（等价于修复前语义）→ B6 同场景必须复现误伤,
+    # 证明 B6 用例对"判据回退"有判别力（不只是形状断言）。
+    if region and body is not None:
+        mut = [ln.replace('_over_r = _nav_r if g.state == "NAV" else g.rounds',
+                          "_over_r = g.rounds") for ln in region]
+        check("S5: 变异源生成(P1 判据回退为共享 rounds)",
+              any("_over_r = g.rounds" in x for x in mut))
+        try:
+            body_mut = _make_body(mut)
+            g, q, caps = _mk_g(rounds=4, nav_rounds=0), _mk_quest(), _caps()
+            _call(body_mut, caps, ro, g, q, 13000)
+            check("S6: 判据回退 → B6 同场景复现误伤 stuck(自检判别力)",
+                  len(caps["stuck"]) >= 1, caps["stuck"])
+        except Exception as e:  # noqa
+            check("S6: 变异执行", False, str(e))
+    else:
+        check("S5: 变异源生成(P1 判据回退为共享 rounds)", False, "region/body 为空")
 
     nfail = 0
     for name, ok, detail in results:
