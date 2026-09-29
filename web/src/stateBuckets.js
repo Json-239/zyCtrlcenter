@@ -29,6 +29,12 @@ export function isHatching(r) { return !!(r.hatch && r.hatch.active === true && 
 // 游荡中（含孵化）：与地图页绿环、Go r.Walking() 同一判据
 export function isWalking(r) { return !!(r.walk && r.walk.enabled === true) || isHatching(r) }
 
+// 组队待命（2026-09-29 阶段 2）：机器人端 `state=MEMBER` = 队员在队待命
+// （不接任务/不找鬼/不发移动，只参战）。在队期间**不该被派活**（派了也会被机器人端
+// 忽略；Go 侧已把队内号从任务/游荡派发里剔除）——归属独立的「待命」桶，
+// 既不算空闲（否则会被面板/批量操作误选去游荡），也不算发呆/未知。
+export function isTeamStandby(r) { return String(r.state || '').toUpperCase() === 'MEMBER' }
+
 // 忙碌 = 战斗 / 抓鬼 / 游荡(含孵化) / 推进中的任务态 / WAIT_TASK 且有点名中的任务。
 // 注意：ERROR 不在这里（由 isErr 单列「异常」）——比 Go 的 waterline.Busy 少一个 ERROR 项，
 // 只是因为前端展示把 ERROR 单列成「异常」桶；判断"忙不忙"的调用方要连同 isErr 一起看
@@ -43,20 +49,22 @@ export function isBusy(r) {
   return false
 }
 
-// 空闲（在线 且 非忙 且 非异常）：与 Go roampool.Idle 结论一致（Go 把 ERROR 并入 Busy）。
+// 空闲（在线 且 非忙 且 非异常 且 非组队待命）：与 Go roampool.Idle 结论一致（Go 把 ERROR 并入 Busy）。
 // WAIT_GHOST（钟馗等刷鬼的"等待段"）不在黑名单里 → 无活跃抓鬼会话时算空闲（与 Go 侧注释一致；
 // 有活跃抓鬼会话时 isGhosting 已把它判成忙，两处不打架）。
-export function isIdle(r) { return !!r.online && !isBusy(r) && !isErr(r) }
+// MEMBER（组队待命，2026-09-29）单独排除：它不是"余量号"，不该出现在空闲候选/批量派活里。
+export function isIdle(r) { return !!r.online && !isBusy(r) && !isErr(r) && !isTeamStandby(r) }
 
 // 互斥归类（按"最该先看到"的优先级取一个）——地图页筛选按钮与排序共用；
-// BUCKET_ORDER 是排序权重（空闲最前，异常最后）
-export const BUCKET_ORDER = { idle: 0, full: 1, task: 2, ghost: 3, walk: 4, err: 5 }
+// BUCKET_ORDER 是排序权重（空闲最前，异常最后；待命排在异常前）
+export const BUCKET_ORDER = { idle: 0, full: 1, task: 2, ghost: 3, walk: 4, team: 5, err: 6 }
 export function bucketOf(r) {
   // ERROR（机器人上报的卡住/停链）**最优先**：Go 的 waterline.Busy() 黑名单也含它，
   // 若按"非忙碌=空闲"会把它归进「空闲」——派活只会让卡住号更难处理。这里单列一类。
   if (isErr(r)) return 'err'
   if (isWalking(r)) return 'walk'
   if (isGhosting(r)) return 'ghost'
+  if (isTeamStandby(r)) return 'team' // 组队待命：独立一类（不算空闲/不发呆）
   if (isBusy(r)) return 'task'
   if (r.ghost_done_today) return 'full'
   return 'idle'

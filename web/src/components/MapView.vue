@@ -200,6 +200,7 @@ const CAND_BUCKETS = [
   { key: 'task', label: '任务中', title: '任务链推进中（导航/对话/战斗/交任务等）' },
   { key: 'ghost', label: '抓鬼中', title: '有活跃抓鬼会话（ghost.enabled=true）' },
   { key: 'walk', label: '游荡中', title: '已在游荡/孵化（walk.enabled 或孵化会话进行中）' },
+  { key: 'team', label: '待命', title: '组队待命中的号（机器人上报 state=MEMBER）：在队期间不被派活/不派游荡（防拆队），由队伍编排统一调度' },
   { key: 'err', label: '异常', title: '机器人上报 ERROR（卡住/停链等待处理，如换图推送未到）：先人工处理，别派活' },
 ]
 // 标记列里"有内容吗"（没有就显示 —）
@@ -228,7 +229,7 @@ const candScoped = computed(() => {
 })
 // 各归类计数（给筛选按钮上的数字；不受状态勾选影响，只受"图"筛选影响）
 const candCounts = computed(() => {
-  const c = { idle: 0, full: 0, task: 0, ghost: 0, walk: 0, err: 0 }
+  const c = { idle: 0, full: 0, task: 0, ghost: 0, walk: 0, team: 0, err: 0 }
   for (const r of candScoped.value) c[bucketOf(r)]++
   return c
 })
@@ -929,7 +930,7 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
           <div class="muted small cand-tip">
             状态不勾=不筛；多选=并集。「空闲」= 在线且没在干活（与中控调度同一判据）、「已抓满」= 今天抓鬼已满/不可用 ——
             这两类最适合派游荡。「异常」= 机器人上报 ERROR（卡住/停链），先人工处理，别派活。
-            排序：空闲 → 已抓满 → 任务中 → 抓鬼中 → 游荡中 → 异常，同档按图/账号。
+            排序：空闲 → 已抓满 → 任务中 → 抓鬼中 → 游荡中 → 待命 → 异常，同档按图/账号。
           </div>
           <el-table :data="pagedCands" size="small" height="320" class="cand-table">
             <el-table-column width="42">

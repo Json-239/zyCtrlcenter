@@ -343,6 +343,8 @@ export const STATE_LABELS = {
   SHOP: '商店', ALLOC: '加点', WAIT_NEXT: '等下一任务', ACCEPT: '接任务中', SUBMIT: '交任务中',
   WAIT_GHOST: '等刷鬼', HEAL: '疗伤中', DONE: '完成', ERROR: '出错', READY: '就绪',
   IDLE: '空闲', ONLINE: '在线', OFFLINE: '离线',
+  // 2026-09-29 组队（阶段 2）：队员在队待命（不接任务/不找鬼/不发移动，只参战）
+  MEMBER: '待命',
 }
 
 // 状态短语：像人说话（悬停气泡/详情用）
@@ -365,6 +367,7 @@ export const STATE_PHRASES = {
   IDLE: '发着呆，等指令',
   ONLINE: '刚上线',
   OFFLINE: '掉线了',
+  MEMBER: '在队伍中待命（队员不单独行动，等队长开抓）',
 }
 
 export function stateLabel(s) { return STATE_LABELS[s] || s || '--' }

@@ -10,7 +10,7 @@ import {
 } from '../store'
 // 忙/空闲/异常归类判据（与地图页 MapView、Go 侧 waterline.Busy / roampool.Idle 同源，
 // 口径说明见该模块注释）——2026-09-23 统一：大屏不再自己维护状态集合
-import { isBusy, isErr, isGhosting, isWalking, isIdle } from '../stateBuckets'
+import { isBusy, isErr, isGhosting, isWalking, isIdle, isTeamStandby } from '../stateBuckets'
 
 const DENSE_ROWS = 80 // 单页超过这个行数就不跑"呼吸"动画（几百个常驻动画会明显吃帧）
 const PAGE_SIZES = [20, 50, 100]
@@ -72,6 +72,9 @@ const filters = [
   { key: 'fenghuo', label: '🔥烽火', title: '意图=fenghuo 或 正在跑烽火大唐（心跳 daily=share_daily_宫廷10）（P1 接入）' },
   // 2026-09-22 游荡：机器人上报的 walk.enabled === true，或孵化会话进行中（与 MapView 绿环、Go r.Walking() 同一口径）
   { key: 'walk', label: '🚶游荡', title: '游荡中的号（机器人上报 walk.enabled === true，或孵化会话进行中）' },
+  // 2026-09-29 组队（阶段 2）：队员待命期机器人上报 state=MEMBER —— 单列「待命」，
+  // 不算发呆（否则会被误当空闲派活/派游荡；Go 侧派发避让已同源拦截）
+  { key: 'team', label: '⌛待命', title: '组队待命中的号（机器人上报 state=MEMBER；队员在队等待，不派活/不派游荡）——与 Go 侧派发避让同源' },
   { key: 'idle', label: '发呆', title: '在线、没在干活、也不是异常（ERROR），且未收工（DONE）—— 与地图页「空闲」桶、Go 侧 roampool.Idle 同源（DONE 是本页额外的排除口径）' },
   { key: 'error', label: '卡住', title: '只算机器人停在 ERROR 态的号（需要处理）—— 与地图页「异常」同口径。仅带历史 err_code 但已恢复的号不计入，行内以弱化"曾出错"标注' },
   { key: 'offline', label: '掉线' },
@@ -132,7 +135,7 @@ function dailyPhrase(r) {
 
 // 一次遍历算完所有筛选计数（原来每个筛选各扫一遍全表）
 const countsByFilter = computed(() => {
-  const c = { all: 0, online: 0, task: 0, ghost: 0, newbie: 0, shenbu: 0, fenghuo: 0, walk: 0, idle: 0, error: 0, offline: 0 }
+  const c = { all: 0, online: 0, task: 0, ghost: 0, newbie: 0, shenbu: 0, fenghuo: 0, walk: 0, team: 0, idle: 0, error: 0, offline: 0 }
   const kinds = intentKind.value
   for (const r of robots.value) {
     c.all++
@@ -145,6 +148,7 @@ const countsByFilter = computed(() => {
     if (kinds[r.account] === 'shenbu' || dk === 'shenbu') c.shenbu++
     if (kinds[r.account] === 'fenghuo' || dk === 'fenghuo') c.fenghuo++
     if (isWalkingOn(r)) c.walk++
+    if (r.online && isTeamStandby(r)) c.team++ // 组队待命（MEMBER）：既不算忙/发呆，单列一桶
     if (isIdleRow(r)) c.idle++  // 非忙 + 非异常 + 未收工：SUBMIT/ERROR 都不会再掉进「发呆」（见 isIdleRow）
     if (isStuck(r)) c.error++   // 卡住 = ERROR 态（不是 err_code 非空，见 isStuck 注释）
   }
@@ -159,6 +163,7 @@ const filtered = computed(() => robots.value.filter((r) => {
     case 'task': return isBusyOn(r)
     case 'ghost': return isGhosting(r)
     case 'walk': return isWalkingOn(r)
+    case 'team': return r.online && isTeamStandby(r)
     case 'newbie': return intentKind.value[r.account] === 'newbie'
     case 'shenbu': return intentKind.value[r.account] === 'shenbu' || dailyKindOf(r) === 'shenbu'
     case 'fenghuo': return intentKind.value[r.account] === 'fenghuo' || dailyKindOf(r) === 'fenghuo'
