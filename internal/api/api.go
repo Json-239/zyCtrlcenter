@@ -150,6 +150,10 @@ type API struct {
 	// 见 handlers.go OnRobotRestartHello：10 分钟冷却，防重启风暴重复补）。
 	restartAddMu sync.Mutex
 	restartAddAt time.Time
+	// poolSyncMu / poolSyncTimer 心跳等级回写账号池的落盘节流（2026-09-29 神捕闸门修复②：
+	// 见 handlers_accounts.go SyncPoolLevel——变更合并进池内存，poolLevelSaveDelay 后整池落盘一次）。
+	poolSyncMu    sync.Mutex
+	poolSyncTimer *time.Timer
 }
 
 // New 创建 API。

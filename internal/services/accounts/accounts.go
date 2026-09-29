@@ -713,6 +713,43 @@ func (p *Pool) SetZoneStateNoSave(name, zone string, st ZoneState) {
 	p.setZoneStateLocked(name, zone, st)
 }
 
+// MergeZoneLevel 把"心跳实测等级"合并进某账号某区的状态（2026-09-29 神捕闸门修复②）：
+// 池内 zone-level 原先只在建号/验证时写入 → 长期陈旧（现场当前区 ≥40 仅 4/4897），
+// 离线号候选等级回落该陈旧值（<40）被等级闸淘汰、掉线后无法自动回到神捕池。
+//
+// 读改写在同一把锁内（避免与批量验证并发时把别的字段冲掉）：**只改 Level**
+// （level>0 且与现值不同才写），其余字段（Verified/Password/ChainDone/…）原样保留；
+// 该区没有记录时**新建一条**（Level 起写；usable 保持 false，不虚构验证结论）。
+// 不落盘（与 SetZoneStateNoSave 同口径；调用方按需节流 Save）。
+// 返回是否发生变更（false = 未变化/不在池/参数无效）。
+func (p *Pool) MergeZoneLevel(name, zone string, level int) bool {
+	if name == "" || zone == "" || level <= 0 {
+		return false
+	}
+	p.refresh()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a, ok := p.accounts[name]
+	if !ok {
+		return false // 不在池：不新造账号（心跳回写只修已有记录）
+	}
+	if a.Zones == nil {
+		a.Zones = map[string]*ZoneState{}
+	}
+	z, ok := a.Zones[zone]
+	if !ok || z == nil {
+		a.Zones[zone] = &ZoneState{Level: level} // 该区无记录：新建（不虚标 verified/usable）
+		p.dirty = true
+		return true
+	}
+	if z.Level == level {
+		return false
+	}
+	z.Level = level
+	p.dirty = true
+	return true
+}
+
 func (p *Pool) setZoneStateLocked(name, zone string, st ZoneState) {
 	p.refresh()
 	p.mu.Lock()

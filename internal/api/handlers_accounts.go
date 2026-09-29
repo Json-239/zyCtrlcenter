@@ -556,6 +556,43 @@ func (a *API) poolOf(acc string) string {
 	}
 	return "newbie"
 }
+// poolLevelSaveDelay 心跳等级回写池内存后的合并落盘延迟（2026-09-29 修复②）：
+// 变更先只写池内存，隔一段窗口整池 Save 一次——部署/重启后全体号"首心跳同步"的突发
+// （可达数百条变更）被合并成少量落盘，避免每号一次整池重写。
+const poolLevelSaveDelay = 10 * time.Second
+
+// SyncPoolLevel 心跳有效等级回写账号池（2026-09-29 神捕闸门修复②；main 注入
+// event.SetLevelSync → 心跳每次带有效等级时调用）。
+//
+// 背景：池内 zone-level 只在建号/验证时写入，长期陈旧 —— 离线号候选等级回落该值
+// （现场当前区 <40 有 4893、≥40 仅 4）→ 掉线后进不了神捕候选、重启后无法自动补拉。
+// 口径：只写有效值（>0）且**发生变化**才触发落盘；zone 入参是 ctrl 区键或已展开地址，
+// 统一经 gameAddrOf 归一；落盘失败仅日志（下次心跳再同步）。
+func (a *API) SyncPoolLevel(account, zone string, level int) {
+	if a.Accounts == nil || account == "" || level <= 0 {
+		return
+	}
+	addr := a.gameAddrOf(zone)
+	if addr == "" {
+		return
+	}
+	if !a.Accounts.MergeZoneLevel(account, addr, level) {
+		return // 未变化/不在池：不落盘
+	}
+	a.poolSyncMu.Lock()
+	if a.poolSyncTimer == nil {
+		a.poolSyncTimer = time.AfterFunc(poolLevelSaveDelay, func() {
+			a.poolSyncMu.Lock()
+			a.poolSyncTimer = nil
+			a.poolSyncMu.Unlock()
+			if err := a.Accounts.Save(); err != nil {
+				a.Log.Printf("[ACCOUNTS] 心跳等级回写落盘失败（下次心跳再同步）: %v", err)
+			}
+		})
+	}
+	a.poolSyncMu.Unlock()
+}
+
 func (a *API) gameAddrOf(zoneKey string) string {
 	if strings.Contains(zoneKey, ":") {
 		return zoneKey

@@ -416,6 +416,8 @@ func dailyBagTooFull(r state.Robot) bool {
 //
 // 判据（2026-09-23 shenbu 口径，2026-09-24 参数化复用给 fenghuo，两者完全相同）：
 //   - 等级 ≥ 门槛（cfg.MinLevel → 该玩法全局配置 → 默认 40；等级未知(0) 一律不进）；
+//     **例外（2026-09-29 修复②）**：已派（心跳 daily 或持久台账"今日已派"、未满）的号豁免 ——
+//     池内陈旧等级不再把"续跑号"拦在候选外（掉线补拉的关键路径）；
 //   - 今日该玩法**未满**（心跳 done≥limit / 独立满额表；含"机器人已不再上报 daily"的兜底）；
 //   - 余额闸不拦（cfg.BalanceGate>0 且余额已知且不足 → 不进：传送费不够，派了又停）；
 //   - 背包预检：心跳 bag 近似满（dailyBagTooFull）→ 不进（派下去必死在采购/交付，P0-2）；
@@ -427,10 +429,28 @@ func dailyBagTooFull(r state.Robot) bool {
 // 禁止回读 a.AutoTask（锁重入死锁，见 autotask.Deps 契约）。
 func (a *API) shareDailyCandidateOf(kind autotask.Kind, acc string, r state.Robot, cfg autotask.Config,
 	kinds map[string]intent.Kind, hasLive bool, level int) (autotask.Candidate, bool) {
-	if level < a.shareDailyMinLevelOf(kind, cfg) {
+	key := a.shareDailyKeyOf(kind)
+	if key == "" {
+		return autotask.Candidate{}, false
+	}
+	fullToday := a.shareDailyFullTodayOf(acc, r, kind)
+	// "已派/续跑"先行判定（2026-09-29 神捕闸门修复②：等级闸豁免的前提）：
+	// 心跳 daily 有记录，或持久台账"今日已派"（均未满）。
+	assigned := false
+	if _, has := r.DailyOf(key); has && !fullToday {
+		assigned = true
+	}
+	if !assigned && a.St != nil && a.St.ShareDailyAssignedToday(acc, key) && !fullToday {
+		assigned = true
+	}
+	// 等级闸（含豁免）：**已派（续跑）的号不受等级闸硬拦** —— 池内 zone-level 只在建号/验证时
+	// 写入、长期陈旧（现场当前区 <40 有 4893、≥40 仅 4；离线号候选等级回落该值 → 掉线即出局）。
+	// 已派号当天的服务端票条件必然已过（它就是跑过/正在跑），等级准确性交给接取时服务端校验；
+	// 心跳等级回写池（SyncPoolLevel）是配套根治。未派号保持原口径：等级未知/不足不进。
+	if !assigned && level < a.shareDailyMinLevelOf(kind, cfg) {
 		return autotask.Candidate{}, false // 等级未知(0)/不足：服务端按票条件拒（≥40），别白跑
 	}
-	if a.shareDailyFullTodayOf(acc, r, kind) {
+	if fullToday {
 		return autotask.Candidate{}, false // 今日该玩法已满/不可用（心跳 + 独立满额表双闸）
 	}
 	if a.shareDailyMoneyShort(r, cfg.BalanceGate) {
@@ -438,18 +458,6 @@ func (a *API) shareDailyCandidateOf(kind autotask.Kind, acc string, r state.Robo
 	}
 	if dailyBagTooFull(r) {
 		return autotask.Candidate{}, false // 背包预检（P0-2）：近满包不派，换号
-	}
-	key := a.shareDailyKeyOf(kind)
-	if key == "" {
-		return autotask.Candidate{}, false
-	}
-	assigned := false
-	if _, has := r.DailyOf(key); has && !a.shareDailyFullTodayOf(acc, r, kind) {
-		assigned = true
-	}
-	if !assigned && a.St != nil && a.St.ShareDailyAssignedToday(acc, key) &&
-		!a.shareDailyFullTodayOf(acc, r, kind) {
-		assigned = true
 	}
 	if k := kinds[acc]; k != "" && k != intent.Kind(kind) && !assigned {
 		ghostFull := (a.St != nil && a.St.GhostDoneToday(acc)) || ghostDailyFull(r)

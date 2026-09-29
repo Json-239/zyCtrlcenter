@@ -50,6 +50,9 @@ type Handler struct {
 	// restartAutoAdd 机器人进程重启握手后的"自动补一次批量上线"回调（可空，由 main 注入；
 	// 2026-09-29 A+C 的 C 侧；开关/节流/幂等在壳层 api.OnRobotRestartHello 里）。
 	restartAutoAdd func(cleared []string)
+	// levelSync 心跳"有效等级"回写账号池（可空，由 main 注入；2026-09-29 神捕闸门修复②：
+	// 池内 zone-level 只在建号/验证写入 → 陈旧；壳层 api.SyncPoolLevel 负责变化判定+合并落盘）。
+	levelSync func(account, zone string, level int)
 
 	mu             sync.Mutex
 	posBatch       map[string]map[string]any
@@ -104,6 +107,9 @@ func (h *Handler) SetReghoster(fn func(account, reason string)) { h.reghoster = 
 
 // SetRestartAutoAdd 注入"机器人重启后自动补一次批量上线"回调（main 装配；nil = 不自动补）。
 func (h *Handler) SetRestartAutoAdd(fn func(cleared []string)) { h.restartAutoAdd = fn }
+
+// SetLevelSync 注入"心跳有效等级回写账号池"回调（main 装配；nil = 不回写）。
+func (h *Handler) SetLevelSync(fn func(account, zone string, level int)) { h.levelSync = fn }
 
 func (h *Handler) SetBroadcast(fn func(map[string]any)) {
 	h.broadcast = fn
@@ -966,6 +972,12 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			level, chainDone = r.Level, r.ChainDone
 		})
 		h.logLevelUpdate(account, zone, lv)
+		// 2026-09-29 神捕闸门修复②：把"有效等级"（防抖后的 r.Level）回写账号池 zone-level ——
+		// 池内等级原先只在建号/验证时写入，离线号候选/补拉会回落到陈旧值被等级闸淘汰。
+		// 只回写 >0 的有效值；"是否变化/是否需要落盘"由壳层（api.SyncPoolLevel）判定。
+		if h.levelSync != nil && level > 0 {
+			h.levelSync(account, zone, level)
+		}
 		for _, k := range fullMarks { // 闭包外落表（见上：避免 Update 写锁重入）
 			h.St.MarkShareDailyFull(account, k)
 		}

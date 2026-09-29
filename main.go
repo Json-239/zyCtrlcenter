@@ -220,6 +220,8 @@ func main() {
 	ev.SetReghoster(webAPI.Reghost.Request)
 	// 2026-09-29 A+C：机器人重启握手（hello）清忙态后自动补一次批量上线（开关 CTRL_RESTART_AUTO_ADD，默认开）
 	ev.SetRestartAutoAdd(webAPI.OnRobotRestartHello)
+	// 2026-09-29 神捕闸门修复②：心跳有效等级回写账号池 zone-level（池内陈旧等级的根治）
+	ev.SetLevelSync(webAPI.SyncPoolLevel)
 	skipHook = webAPI.GhostSkipFunc()
 	go webAPI.AutoTask.Run(ctx)
 	go webAPI.Reghost.Run(ctx)
