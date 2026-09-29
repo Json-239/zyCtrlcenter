@@ -211,6 +211,8 @@ func main() {
 	webAPI.AutoTask = autotask.New(webAPI.AutoTaskDeps())
 	webAPI.Reghost = reghost.New(webAPI.ReghostDeps())
 	ev.SetReghoster(webAPI.Reghost.Request)
+	// 2026-09-29 A+C：机器人重启握手（hello）清忙态后自动补一次批量上线（开关 CTRL_RESTART_AUTO_ADD，默认开）
+	ev.SetRestartAutoAdd(webAPI.OnRobotRestartHello)
 	skipHook = webAPI.GhostSkipFunc()
 	go webAPI.AutoTask.Run(ctx)
 	go webAPI.Reghost.Run(ctx)

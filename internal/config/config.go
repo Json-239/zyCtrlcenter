@@ -77,6 +77,16 @@ type Config struct {
 	// 可用环境变量 CTRL_GHOST_DAILY_LIMIT 覆盖。
 	GhostDailyLimit int
 
+	// ---- 机器人重启兜底（2026-09-29 重登停滞事故 A+C 的 C 侧）----
+	//
+	// RestartAutoAdd 机器人重启握手（hello）后自动补一次批量上线：**默认开**。
+	// 背景：机器人进程重启后中控把号全标离线（并清运行时忙态，见 A），但水位的补号是
+	// 分钟级节拍且受多道闸门（轮换/预算/暂停）限制；事故现场（18:56 重登停滞）恢复
+	// 靠人工 `robots_manage add`×3。默认开 = 重启即自动拉回"刚被 hello 清出的本区号"，
+	// 跳过人工暂停/已移除（语义与批量上线一致）；10 分钟冷却防重启风暴；
+	// 复用 sendOnlineChunks（10 个/批、300ms 间隔）同一条分批通路。
+	// 设 CTRL_RESTART_AUTO_ADD=0 关闭（回到纯水位/池补号）。
+	RestartAutoAdd bool
 	// ---- 分享日常（P0：大唐神捕；2026-09-23 方案 §4.3/§7 契约）----
 	//
 	// ShareDailyEnabled 分享日常（shenbu 策略）总开关：**默认关**——只有显式打开后，
@@ -312,6 +322,7 @@ func build(base string, opts *cliOpts) *Config {
 		GhostNavChainID:      env("CTRL_GHOST_NAV_CHAIN", "zhongkui_nav"),
 		GhostBaseChainID:     env("CTRL_GHOST_BASE_CHAIN", "newbie_full"),
 		GhostDailyLimit:      envInt("CTRL_GHOST_DAILY_LIMIT", 50),
+		RestartAutoAdd:       envBool("CTRL_RESTART_AUTO_ADD", true),
 		ShareDailyEnabled:    envBool("CTRL_SHARE_DAILY", false),
 		ShareDailyChainID:    env("CTRL_SHARE_DAILY_CHAIN", "shenbu_nav"),
 		ShareDailyKey:        env("CTRL_SHARE_DAILY_KEY", "share_daily_大唐神捕"),

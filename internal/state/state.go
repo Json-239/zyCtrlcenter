@@ -354,6 +354,37 @@ func (r Robot) TeamTokenUseTS() int64 {
 	return 0
 }
 
+// ClearRuntimeBusyOnRestart 机器人进程重启（hello 握手）把该号标记离线时，**同步清运行时忙态**。
+//
+// 背景（2026-09-29 重登停滞事故）：hello 清扫原先只清 Online/HS，残留 State=FIGHT/Walking/
+// GhostActive 等"在忙"字段 → `api/waterline.go` 的 `Busy: hasLive && Busy(r)` 把
+// "已离线但仍显示在忙"的号全部滤出补号候选（544 可用 → ~77）→ 水位池空、无人补号；
+// restorer 又按 state=FIGHT 判"在跑"跳过 → 双重致盲（人工 add×3 才恢复）。
+//
+// 清理边界（**只清运行时忙态**）：
+//   - 清：Online/HS → false；State → "OFFLINE"；Fight=false；Walk/Hatch → nil；
+//     Ghost.enabled → false（保留 done/limit/count_date/state，进度展示不丢）；
+//     Booth → nil（重启=收摊，否则面板残留"摆摊中"）。
+//   - **不动**：满额标记（St 独立表）、意图表、派发台账/在途、等级/货币/链完成、
+//     卡死计数/熔断（St 表）、组队心跳块（等下次心跳自然刷）。
+func (r *Robot) ClearRuntimeBusyOnRestart() {
+	r.Online = false
+	r.HS = false
+	r.State = "OFFLINE"
+	r.Fight = false
+	r.Walk = nil
+	r.Hatch = nil
+	if r.Ghost != nil {
+		m2 := make(map[string]any, len(r.Ghost))
+		for k, v := range r.Ghost {
+			m2[k] = v
+		}
+		m2["enabled"] = false // GhostActive 判据；done/limit/count_date/state 保留（进度展示）
+		r.Ghost = m2
+	}
+	r.Booth = nil
+}
+
 // State 全局状态（并发安全）。
 type State struct {
 	// ghostUnavail 账号 → "今天抓鬼不可用/已满"的日期串（跨日自动失效）。

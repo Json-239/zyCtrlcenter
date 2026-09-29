@@ -137,7 +137,11 @@ func (a *API) waterlineCandidates() []waterline.Candidate {
 		}
 		out = append(out, waterline.Candidate{
 			Account: acc, Usable: usable, Removed: removed,
-			Online: hasLive && r.Online, Busy: hasLive && waterline.Busy(r),
+			Online: hasLive && r.Online,
+			// 2026-09-29（重登停滞事故 B 项）：Busy 内部已对离线号直接返回 false ——
+			// "离线 + 残留忙态"的号不再被 PickOnlineCandidates 的 c.Busy 滤掉（A 清 hello
+			// 路径，B 兜其他来源；见 waterline.Busy 注释）。
+			Busy: hasLive && waterline.Busy(r),
 			// 2026-09-23 R3：人工暂停的号不自动拉起（也不自动压号，见 waterline.PickOffline）。
 			Paused: a.St != nil && a.St.IsPaused(acc),
 			Level:  level, ChainDone: chainDone,

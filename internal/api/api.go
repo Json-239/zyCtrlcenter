@@ -64,6 +64,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"zyctrlcenter/internal/accountverify"
 	"zyctrlcenter/internal/chainlib"
@@ -144,6 +145,10 @@ type API struct {
 	daily *dailySessions
 	// throttle 注册自适应限速器（进程内一份；见 handlers_create.go）。
 	throttle *CreateThrottle
+	// restartAddMu / restartAddAt 机器人重启后自动补号的节流（2026-09-29 A+C 的 C 侧；
+	// 见 handlers.go OnRobotRestartHello：10 分钟冷却，防重启风暴重复补）。
+	restartAddMu sync.Mutex
+	restartAddAt time.Time
 }
 
 // New 创建 API。

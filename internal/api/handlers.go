@@ -1095,6 +1095,74 @@ func (a *API) handleRobotRestart(w http.ResponseWriter, r *http.Request) {
 		"msg": "机器人进程已重启（部署目录 " + a.Cfg.DeployDir + "）"})
 }
 
+// 机器人重启后的自动补号参数（2026-09-29 A+C 的 C 侧；开关=CTRL_RESTART_AUTO_ADD 默认开）。
+const (
+	// restartAutoAddDelay hello 后等多久再下发 add：给机器人进程把命令循环/游戏连接拉起来
+	// （与恢复引擎 RESTORE_DELAY_SEC=8 同口径；add 本身在机器人侧可排队，留余量更稳）。
+	restartAutoAddDelay = 8 * time.Second
+	// restartAutoAddCooldown 两次自动补之间的冷却：机器人反复重启/控制通道抖动时防风暴；
+	// 正常重启间隔远大于 10 分钟，不影响恢复时效。
+	restartAutoAddCooldown = 10 * time.Minute
+)
+
+// OnRobotRestartHello 机器人进程重启握手（hello）后的"自动补一次批量上线"——兜底防呆（C）。
+//
+// 由 event.Handler 在 onHello 清忙态后回调（main 注入 SetRestartAutoAdd），入参 = 刚被
+// hello 清出的本区账号（即"重启前在线、现在确实掉线"的那批）。
+//
+// 为什么只拉"刚清出的号"而不是"全部离线号"：①事故语义 = 重启使这些号掉线，拉回它们即恢复；
+// ②重启前就离线的号由水位器/各池按目标与轮换正常补（避免绕过预算/轮换一次性灌爆）；
+// ③人工暂停/已移除的号明确跳过（语义与批量上线一致：这两类只由人工操作恢复）。
+//
+// 幂等/节流：10 分钟冷却（restartAutoAddCooldown）；开关 CTRL_RESTART_AUTO_ADD（默认开）。
+func (a *API) OnRobotRestartHello(cleared []string) {
+	if len(cleared) == 0 {
+		return
+	}
+	if a.Cfg != nil && !a.Cfg.RestartAutoAdd {
+		a.Log.Printf("[RESTART-ADD] 跳过自动补号（CTRL_RESTART_AUTO_ADD=off）：%d 个刚离线的号交给水位器/池补", len(cleared))
+		return
+	}
+	// 过滤人工暂停/已移除（这两类不自动拉起；语义同批量上线/候选闸）
+	accs := make([]string, 0, len(cleared))
+	skipped := 0
+	for _, acc := range cleared {
+		if a.St != nil && (a.St.IsPaused(acc) || a.St.IsRemoved(acc)) {
+			skipped++
+			continue
+		}
+		accs = append(accs, acc)
+	}
+	if len(accs) == 0 {
+		a.Log.Printf("[RESTART-ADD] 无可补号（%d 个全部为暂停/已移除）", skipped)
+		return
+	}
+	// 冷却（重启风暴/通道抖动防抖）
+	a.restartAddMu.Lock()
+	if !a.restartAddAt.IsZero() && time.Since(a.restartAddAt) < restartAutoAddCooldown {
+		last := a.restartAddAt
+		a.restartAddMu.Unlock()
+		a.Log.Printf("[RESTART-ADD] 冷却期内跳过（上次 %s，本次 %d 个；冷却 %s）",
+			last.Format("15:04:05"), len(accs), restartAutoAddCooldown)
+		return
+	}
+	a.restartAddAt = time.Now()
+	a.restartAddMu.Unlock()
+	// 异步下发：等机器人就绪（restartAutoAddDelay）→ 复用批量上线同一条分批通路
+	// （sendOnlineChunks：10 个/批 + 300ms 间隔；密码只从池里取，无密码的号自动跳过）。
+	go func() {
+		time.Sleep(restartAutoAddDelay)
+		sent, chunks, noPwd := a.sendOnlineChunks(accs, a.gameAddrOf(""), 10, 300, "restart_auto_add")
+		a.Log.Printf("[RESTART-ADD] 重启自动补号：%d/%d 个已下发（%d 批，跳过无密码 %d；暂停/已移除 %d）",
+			len(sent), len(accs), chunks, len(noPwd), skipped)
+		if a.Store != nil {
+			a.Store.LogEvent(map[string]any{"type": "api", "action": "restart_auto_add",
+				"zone": a.currentZoneKey(), "requested": len(accs), "sent": len(sent),
+				"chunks": chunks, "no_pwd": len(noPwd), "filtered": skipped})
+		}
+	}()
+}
+
 // handleRobotsClearRemoved 清空"已移除"名单（POST /api/robots/clear_removed）。
 //
 // 用途（2026-09-22 生产）：AutoRemoveOnDone 会把某些原因下线的号永久排除出候选池，

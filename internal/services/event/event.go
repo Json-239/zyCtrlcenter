@@ -47,6 +47,9 @@ type Handler struct {
 
 	// reghoster 卡死自动重登恢复入口（可空，由 main 注入 reghost.Runner.Request）。
 	reghoster func(account, reason string)
+	// restartAutoAdd 机器人进程重启握手后的"自动补一次批量上线"回调（可空，由 main 注入；
+	// 2026-09-29 A+C 的 C 侧；开关/节流/幂等在壳层 api.OnRobotRestartHello 里）。
+	restartAutoAdd func(cleared []string)
 
 	mu             sync.Mutex
 	posBatch       map[string]map[string]any
@@ -98,6 +101,9 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 // SetBroadcast 注入 WS 广播函数（api 层创建 Hub 后调用）。
 // SetReghoster 注入"卡死自动重登恢复"入口（main 装配；nil = 不自动恢复）。
 func (h *Handler) SetReghoster(fn func(account, reason string)) { h.reghoster = fn }
+
+// SetRestartAutoAdd 注入"机器人重启后自动补一次批量上线"回调（main 装配；nil = 不自动补）。
+func (h *Handler) SetRestartAutoAdd(fn func(cleared []string)) { h.restartAutoAdd = fn }
 
 func (h *Handler) SetBroadcast(fn func(map[string]any)) {
 	h.broadcast = fn
@@ -587,6 +593,11 @@ func (h *Handler) logLevelUpdate(account, zone string, u levelUpdate) {
 // 水位器/自动任务判定"达标"而不补号（生产实测：重启后 230 个号没回来、游戏里看不见，
 // 只能人工批量 add 恢复）。因此**收到 hello（仅进程握手；pong 不触发）**时，把该区
 // 在线号标记离线，交由水位器/自动任务重新推号。
+//
+// 2026-09-29 重登停滞事故（A+C）：原实现只清 Online/HS —— 残留 State=FIGHT/游荡/抓鬼等在忙
+// 字段 → 水位补号候选被 `Busy: hasLive && Busy(r)` 全部滤掉（544→77，池空）。
+// 现在：①（A）标记离线时同步**清运行时忙态**（state.ClearRuntimeBusyOnRestart，边界见其注释）；
+// ②（C）把刚清出的账号列表交给注入的"重启自动补一次批量上线"回调（壳层实现 + 开关/节流）。
 func (h *Handler) onHello(ev map[string]any) {
 	evType := str(ev, "type")
 	h.Log.Printf("[EVENT] 机器人握手 %s version=%v pid=%v zone=%s",
@@ -596,6 +607,7 @@ func (h *Handler) onHello(ev map[string]any) {
 	}
 	zone := zoneOf(ev)
 	cleared := 0
+	clearedAccs := make([]string, 0, 64)
 	for _, acc := range h.St.Accounts() {
 		r, ok := h.St.Get(acc)
 		if !ok || !r.Online {
@@ -605,13 +617,17 @@ func (h *Handler) onHello(ev map[string]any) {
 			continue // 其它区的号不动（多区部署）
 		}
 		h.St.Update(acc, func(rr *state.Robot) {
-			rr.Online = false
-			rr.HS = false
+			rr.ClearRuntimeBusyOnRestart() // A：离线 + 清运行时忙态（只清忙态，满额/意图/台账不动）
 		})
 		cleared++
+		clearedAccs = append(clearedAccs, acc)
 	}
 	if cleared > 0 {
-		h.Log.Printf("[EVENT] 机器人重启握手(hello)：已把 %d 个号标记离线 → 水位器/自动任务将重新推号", cleared)
+		h.Log.Printf("[EVENT] 机器人重启握手(hello)：已把 %d 个号标记离线（含清运行时忙态）→ 水位器/自动任务将重新推号", cleared)
+	}
+	// C：兜底防呆 —— 机器人重启成功路径自动补一次批量上线（壳层注入；开关/节流/幂等由壳层控制）
+	if h.restartAutoAdd != nil && len(clearedAccs) > 0 {
+		h.restartAutoAdd(clearedAccs)
 	}
 	// 2026-09-23 技能策略配置：机器人（重）连上即补发一份（重启不丢）
 	h.PushSkillConfig()

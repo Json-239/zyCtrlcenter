@@ -491,6 +491,13 @@ func shuffleCandidates(cands []Candidate, rnd func(int) int) {
 // （同样不进"空闲"候选）—— 结果等价；Go 侧合并进 Busy，是为了让所有"不打扰/不回收"的
 // 判据天然统一，不再出现第三套口径（三池交互审计 C5）。
 func Busy(r state.Robot) bool {
+	// 2026-09-29（重登停滞事故 B 项）：**离线号的"忙"一律不算** —— Busy 的语义是
+	// "正在跑的号别打扰"，离线号不存在"被打扰"；反而残留忙态会把它从补号候选里滤掉
+	// （PickOnlineCandidates 跳过 c.Busy；现场 544 可用 → ~77 池空即此机制）。
+	// A 修（hello 清忙态）覆盖重启路径；这里兜住其它"离线残留忙态"来源（崩溃/老数据/断链）。
+	if !r.Online {
+		return false
+	}
 	if r.Fight || r.GhostActive() || r.Walking() {
 		return true
 	}
