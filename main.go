@@ -76,6 +76,13 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[SHAREDAILY] 今日已派神捕台账已载入: %d 条（重启恢复用）", n)
 	}
+	// 2026-09-29：满额表落盘（重启后"✓ 完成可见"不丢——总览合成 done 分支靠它；
+	// 现场 20:25 重启丢了当日 9 烽火+1 神捕的标记）。文件 <DataDir>/share_daily_full.json。
+	if n, err := st.EnableShareDailyFullPersist(filepath.Join(cfg.DataDir, "share_daily_full.json")); err != nil {
+		log.Printf("[SHAREDAILY] 满额表加载失败（忽略；按未满处理）: %v", err)
+	} else if n > 0 {
+		log.Printf("[SHAREDAILY] 今日满额表已载入: %d 条（重启恢复用）", n)
+	}
 	runStore := store.New(cfg.DataDir, cfg.RunsKeepDays, cfg.RunsMaxMB)
 	if removed := runStore.CleanupOldRuns(cfg.RunsKeepDays); len(removed) > 0 {
 		log.Printf("[STORE] 已清理超过 %d 天的历史运行日志: %v", cfg.RunsKeepDays, removed)

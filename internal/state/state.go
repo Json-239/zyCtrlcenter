@@ -414,6 +414,12 @@ type State struct {
 	shareDailyAssigned map[string]string
 	// shareDailyAssignPath 台账落盘路径（空 = 纯内存，不落盘；测试/未装配场景）。
 	shareDailyAssignPath string
+	// shareDailyFullPath 满额表落盘路径（空 = 纯内存；2026-09-29 落盘修复）。
+	//
+	// 为什么也要落盘：满额表是"今日完成 ✓"的合成来源（sharedaily.go 总览合成 done 分支）——
+	// 中控重启清表后，**已完成并离线的号在面板上丢失 ✓**（现场 09-29 20:25 重启丢了 9 烽火+1 神捕，
+	// 用户误判"一天零完成"）。落盘后重启即恢复；跨日惰性失效逻辑不变（载入只收今日条目）。
+	shareDailyFullPath string
 
 	mu sync.RWMutex
 
@@ -493,16 +499,85 @@ func (s *State) GhostUnavailableTodayCount() int {
 func dailyFullKey(account, shareKey string) string { return account + "|" + shareKey }
 
 // MarkShareDailyFull 记下"该号今天的这个玩法已满/不可用"（跨日自动失效）。
+//
+// 2026-09-29 落盘修复：写入前顺手清掉非今日条目（文件不随天数增长），配了落盘路径时
+// 原子写（失败静默——满额表丢一条只影响"✓ 展示与拦派"，不该阻塞下发主流程）。
 func (s *State) MarkShareDailyFull(account, shareKey string) {
 	if account == "" || shareKey == "" {
 		return
 	}
+	today := time.Now().Format("20060102")
 	s.mu.Lock()
 	if s.shareDailyFull == nil {
 		s.shareDailyFull = map[string]string{}
 	}
-	s.shareDailyFull[dailyFullKey(account, shareKey)] = time.Now().Format("20060102")
+	for k, d := range s.shareDailyFull {
+		if d != today {
+			delete(s.shareDailyFull, k)
+		}
+	}
+	s.shareDailyFull[dailyFullKey(account, shareKey)] = today
+	path, raw := s.shareDailyFullPath, s.marshalShareDailyFullLocked()
 	s.mu.Unlock()
+	writeFileAtomic(path, raw)
+}
+
+// shareDailyFullFile 满额表落盘形态（JSON；见 EnableShareDailyFullPersist）。
+type shareDailyFullFile struct {
+	// Full "账号|玩法键" → "YYYYMMDD"（当天该玩法已满/不可用）。
+	Full      map[string]string `json:"full"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
+}
+
+// marshalShareDailyFullLocked 序列化满额表（须持锁调用；无落盘路径返回 nil → 写盘空操作）。
+func (s *State) marshalShareDailyFullLocked() []byte {
+	if s.shareDailyFullPath == "" {
+		return nil
+	}
+	b, err := json.MarshalIndent(shareDailyFullFile{Full: s.shareDailyFull, UpdatedAt: time.Now()}, "", "  ")
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// EnableShareDailyFullPersist 开启满额表落盘并载入既有文件（path 空 = 关闭，纯内存）。
+//
+// 返回载入的**今日**条目数（跨日条目丢弃，惰性失效）；文件不存在 = 首次运行，返回 (0, nil)。
+// 载入/解析失败不阻断启动（调用方记日志；损坏文件按空表继续，首次 Mark 时覆盖重建）。
+func (s *State) EnableShareDailyFullPersist(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+	s.mu.Lock()
+	s.shareDailyFullPath = path
+	s.mu.Unlock()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil // 首次运行：等首次 Mark 创建
+		}
+		return 0, err
+	}
+	var f shareDailyFullFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		return 0, err
+	}
+	today := time.Now().Format("20060102")
+	n := 0
+	s.mu.Lock()
+	if s.shareDailyFull == nil {
+		s.shareDailyFull = map[string]string{}
+	}
+	for k, d := range f.Full {
+		if d == today { // 跨日惰性失效：只载入今天的
+			s.shareDailyFull[k] = d
+			n++
+		}
+	}
+	s.mu.Unlock()
+	return n, nil
 }
 
 // ShareDailyFullToday 该号今天该玩法是否已满/不可用（跨日自动 false）。
