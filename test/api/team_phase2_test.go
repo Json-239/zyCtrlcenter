@@ -195,6 +195,49 @@ func TestTeamStatusRobotsTeamFields(t *testing.T) {
 	}
 }
 
+// 心跳 team 块（机器人端定稿：只有 role_id、无账号）→ 台账**缺失**（如中控重启后内存台账为空）
+// 也能避让 + status 里队长账号按 rid 反查。
+func TestTeamHeartbeatRoleIDResolutionAndAvoidance(t *testing.T) {
+	env := newTestEnv(t, "")
+	testsupport.InstallGhostNav(t, env.cfg.ChainDir)
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+
+	cap, m1 := "hcap@xy3.com", "hm1@xy3.com"
+	feedRobot(t, env, cap, map[string]any{"role_id": 501, "team": map[string]any{
+		"role": "captain", "captain_role_id": 501, "member_role_ids": []any{502},
+		"parted": false, "setup_done": true, "token_use_ts": float64(1790000000000),
+		"token_count": 8}})
+	feedRobot(t, env, m1, map[string]any{"role_id": 502, "team": map[string]any{
+		"role": "member", "captain_role_id": 501, "member_role_ids": []any{502},
+		"parted": false, "setup_done": true}})
+
+	// ① 台账为空（未走 /api/team/setup）→ 心跳兜底避让生效
+	if ok, msg := env.api.LaunchTask(autotask.KindGhost, []string{m1}); ok ||
+		!strings.Contains(msg, "队内号") {
+		t.Fatalf("心跳 team 块（member）应触发避让，实际 ok=%v msg=%s", ok, msg)
+	}
+	if ok, _ := env.api.LaunchTask(autotask.KindGhost, []string{cap}); ok {
+		t.Fatal("心跳 team 块（captain）应触发避让")
+	}
+
+	// ② 建队台账 + 最终格式心跳（rid-only）→ status 按 rid 反查队长账号；
+	//    心跳-only（无台账）的避让已由 ① 覆盖（status robots 只列台账成员，不重复断言）。
+	env.ev.TeamJobSet(cap, []string{m1}, "invite", "")
+	env.ev.TeamMarkReady(cap, nil)
+	body := getJSON(t, env.srv.URL+"/api/team/status")
+	robots, _ := body["robots"].(map[string]any)
+	capR, _ := robots[cap].(map[string]any)
+	if capR["team_role"] != "captain" || capR["team_captain"] != cap ||
+		capR["ledger_role"] != "captain" {
+		t.Fatalf("队长行应带心跳角色+rid 反查队长账号+台账角色: %v", capR)
+	}
+	m1R, _ := robots[m1].(map[string]any)
+	if m1R["team_role"] != "member" || m1R["team_captain"] != cap {
+		t.Fatalf("队员行 team_captain 应按 rid 反查为队长账号 %s: %v", cap, m1R)
+	}
+}
+
 // 游荡派发避让（DispatchRoamEx 是"面板下发 + 游荡池 keeper"共用的唯一出口）：
 // 队内号一律不发 random_walk，失败原因可见（不静默）。
 func TestDispatchRoamSkipsTeamAccounts(t *testing.T) {

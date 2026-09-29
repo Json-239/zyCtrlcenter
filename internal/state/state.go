@@ -286,7 +286,10 @@ func (r Robot) TeamRole() string {
 	return s
 }
 
-// TeamCaptainAccount 心跳上报的队长账号（不在队 → ""）。
+// TeamCaptainAccount 心跳上报的队长账号（老口径/手工路径；不在队 → ""）。
+//
+// 注意：机器人端 2026-09-29 定稿的 team 块**只有 role_id、拿不到账号**（"captain_role_id"），
+// 消费方（api.teamRoleOf）应先用本函数，空则退回 TeamCaptainRoleID() 再 rid→账号反查。
 func (r Robot) TeamCaptainAccount() string {
 	m := r.TeamBlock()
 	if m == nil {
@@ -294,6 +297,23 @@ func (r Robot) TeamCaptainAccount() string {
 	}
 	s, _ := m["captain"].(string)
 	return s
+}
+
+// TeamCaptainRoleID 心跳 team 块的队长 role_id（定稿字段 captain_role_id；无 → 0）。
+func (r Robot) TeamCaptainRoleID() int {
+	m := r.TeamBlock()
+	if m == nil {
+		return 0
+	}
+	switch v := m["captain_role_id"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
 }
 
 // TeamParted 是否暂离中（队友暂离=不参战/不被队长交付覆盖，观测用）。

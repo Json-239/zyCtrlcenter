@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"zyctrlcenter/internal/state"
 )
 
 // handleTeamSetup POST /api/team/setup
@@ -316,9 +318,11 @@ func (a *API) handleTeamDispatch(w http.ResponseWriter, r *http.Request) {
 
 // teamRoleOf 该账号的"组队角色"（中控判断派发避让用）：台账（下发/事件）∪ 心跳（机器人事实）。
 //
-//	role="captain"：队长（含未就绪 job——就绪前同样不能再派单人任务）
-//	role="member" ：队员
+//	role="captain"/"member"/"applicant"：队内/在队流程中（applicant=申请入队等待期，同样不打扰）
 //	不清空：两边都没有 → ("", "")（不在队，正常派发）
+//
+// 心跳块 2026-09-29 定稿**只有 role_id**：队长账号先取 `captain`（无则）用 `captain_role_id`
+// 反查（见 heartbeatCaptainOf）。
 func (a *API) teamRoleOf(account string) (role, captain string) {
 	if a.Events != nil {
 		if r0, cap, ok := a.Events.TeamRoleOf(account); ok {
@@ -327,12 +331,41 @@ func (a *API) teamRoleOf(account string) (role, captain string) {
 	}
 	if a.St != nil {
 		if rb, ok := a.St.Get(account); ok {
-			if r0 := rb.TeamRole(); r0 == "captain" || r0 == "member" {
-				return r0, rb.TeamCaptainAccount()
+			if r0 := rb.TeamRole(); r0 != "" {
+				return r0, a.heartbeatCaptainOf(rb, account)
 			}
 		}
 	}
 	return "", ""
+}
+
+// heartbeatCaptainOf 心跳 team 块的队长账号解析：captain(账号) → captain_role_id 反查；
+// 自己就是队长（rid==自身 RoleID）→ 返回自己。
+func (a *API) heartbeatCaptainOf(rb state.Robot, account string) string {
+	if cap := rb.TeamCaptainAccount(); cap != "" {
+		return cap
+	}
+	rid := rb.TeamCaptainRoleID()
+	if rid <= 0 {
+		return ""
+	}
+	if rb.RoleID == rid {
+		return account
+	}
+	return a.accountOfRoleID(rid)
+}
+
+// accountOfRoleID 心跳 RoleID → 账号反查（心跳 team 块 rid→账号；找不到返回 ""）。
+func (a *API) accountOfRoleID(rid int) string {
+	if rid <= 0 || a.St == nil {
+		return ""
+	}
+	for _, r := range a.St.Snapshot() {
+		if r.RoleID == rid {
+			return r.Account
+		}
+	}
+	return ""
 }
 
 // dropTeamAccounts 从批量派发里剔除"队内号"（队长/队员/待就绪 job）——阶段 2 最小避让：
@@ -366,10 +399,13 @@ func (a *API) dropTeamAccounts(accs []string, what string) (keep, skipped []stri
 //
 // 2026-09-29 阶段 2 扩展：robots 摘要带组队观测字段 ——
 //
-//	team     心跳 team 块原样（role/captain/members/parted/setup_done/token_use_ts?，机器人事实）
-//	ledger_role  中控台账角色（captain|member；含 pending job——与派发避让同源）
+//	team     心跳 team 块原样（定稿：role/captain_role_id/member_role_ids/parted/setup_done/
+//	         token_use_ts/token_use_count/token_count(仅队长)；机器人事实）
+//	team_role / team_captain  心跳角色 + 队长账号（rid→账号反查；定稿块只有 rid）
+//	ledger_role / ledger_captain  中控台账角色（captain|member；含 pending job——与派发避让同源）
 //	parted   暂离标记（心跳；无心跳块 → false）
 //	token_use_ts 助战令最近使用（机器人本地 ms；0=未知——用于换算"令剩余时长"）
+//	token_last / member_state  事件来源（team_token / team_member_state；定稿未把 token 放心跳时的权威观测）
 func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 	if a.Events == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "事件通道不可用"})
@@ -389,10 +425,14 @@ func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 				"state": rb.State, "mapid": rb.MapID, "pos": rb.Pos, "level": rb.Level,
 				"parted": rb.TeamParted()}
 			if tb := rb.TeamBlock(); tb != nil {
-				item["team"] = tb
+				item["team"] = tb // 心跳原样（定稿：role/captain_role_id/member_role_ids/parted/setup_done/token_*）
+				if role := rb.TeamRole(); role != "" {
+					item["team_role"] = role // 心跳事实（captain|member|applicant）
+					item["team_captain"] = a.heartbeatCaptainOf(rb, acc)
+				}
 			}
-			if role, cap := a.teamRoleOf(acc); role != "" {
-				item["ledger_role"] = role
+			if role, cap, ok := a.Events.TeamRoleOf(acc); ok {
+				item["ledger_role"] = role // 中控台账（下发/事件来源；含 pending job）
 				item["ledger_captain"] = cap
 			}
 			if ts := rb.TeamTokenUseTS(); ts > 0 {
