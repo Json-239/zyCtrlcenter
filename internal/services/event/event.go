@@ -379,9 +379,21 @@ func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, 
 	// ghost 意图补发 ghost_start 把日常顶掉 → 点钟馗卡死 → 熔断（robot0005278 同款）。
 	// 口径与 handlers.decideKind 的「续跑·台账」一致：台账命中且未见满额 → 维持该玩法意图；
 	// 满额号照旧判抓鬼（名额让出来）。池停用时台账已被清（handleAutoTaskStop），不受影响。
-	if dec.Known && dec.Kind == intent.KindGhost {
+	//
+	// 2026-09-28 扩展（用户拍板"B 根治"：修"烽火抢光神捕候选"现场 5207/5256/5274）：
+	//   判成 **fenghuo** 时同样走台账兜底 —— 因为"心跳只有烽火（宫廷10）"时
+	//   DecideDailyStates 里 Shenbu.Known=false 会直接判 fenghuo，而"续跑·台账"的
+	//   shenbu 台账明明在（今日已派未满）—— 原实现只兜 ghost, 于是"设计口径
+	//   shenbu 优先（两个都未满先跑满神捕再转烽火）"在重登场景失效 → 神捕池
+	//   running 永远 0（每 5 分钟重挑同一批，被烽火占着）。改判规则：
+	//     · dec=ghost  → 台账命中的玩法直接接管（原逻辑不变）；
+	//     · dec=fenghuo → 仅当台账命中 **shenbu** 时改判 shenbu（shenbu 优先）；
+	//       台账命中 fenghuo 或均未命中 → 保持 fenghuo（心跳权威）。
+	if dec.Known && (dec.Kind == intent.KindGhost || dec.Kind == intent.KindFenghuo) {
 		if k, why, ok := h.dailyAssignedIntent(account); ok {
-			dec = intent.Decision{Known: true, Kind: k, Reason: why}
+			if dec.Kind == intent.KindGhost || k == intent.KindShenbu {
+				dec = intent.Decision{Known: true, Kind: k, Reason: why}
+			}
 		}
 	}
 	prev, changed, err := h.Intents.Apply(account, dec, zone, source)
