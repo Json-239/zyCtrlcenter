@@ -138,6 +138,81 @@
       ]
     },
     {
+      "item_id": 152132,
+      "name": "守护技能『满历练』书（10 种：强身/不屈/愤怒/狂奔/急行/神行/拖泥带水/阴魂不散/穷途末路/四面楚歌）",
+      "aliases": [152133, 152134, 152135, 152136, 152137, 152138, 152139, 152140, 152141],
+      "category": "skill_book",
+      "implemented": "no",
+      "server": {"action": "item_step s1=action_send_notice（仅发通知）；item_class=守护技能书；params: related_skill_index/related_skill_proficiency=4999", "use_on_summon": false},
+      "expected": "可直接使用——把对应守护技能的历练值直接提升至当前上限（『仅对已学习的技能生效』）。用户口径 2026-09-29：『技能经验的物品……这个也是可以使用的』",
+      "sites": [],
+      "note": "机器人端全仓无『满历练/历练』处理（grep 0 命中；同族技能书 152124『狂奔』等亦未实现，使用协议候选=C2S_SUMMON_LEARN_SKILL=80034，无调用点）。现场在线号持有『X·满历练』=0 条（未发放/未出现）。机制风险（同 F6/F11）：无 use_on_summon 参数 → `__tidy_bag` 会把它当『可消耗品』发人物 C2S_USE_ITEM → 服务端 step1=`SendNoticeAction`（只发通知、**物品不消耗**，item_action.py:1013）→ 反复空发"
+    },
+    {
+      "item_id": 152180,
+      "name": "自选技能历练礼包（可自选 4 本 / 6 本满历练书）",
+      "aliases": [152185],
+      "category": "gift_box",
+      "implemented": "no",
+      "server": {"action": "item_step s1=action_item_dialog（右键弹对话选技能）→ s2..s7=action_reward_stair（发放对应满历练书）", "use_on_summon": false},
+      "expected": "可直接使用（开箱时选择一本满历练书）——用户口径『技能经验物品可以使用』",
+      "sites": [
+        {"module": "bag_ops", "function": "auto_open_gifts(关键词命中但流程不通)", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login", "trigger": "名字含『礼包』→ 会被自动开箱；但 s1=action_item_dialog 需要玩家选择 → 机器人无『物品对话』处理 → **可能卡 DIALOG**（现场未持有该物品，未触发）", "cooldown": "一次性", "config": ["GIFT_KEYWORDS"], "deduction": "本地扣减+pop bag（若协议发出）"}
+      ],
+      "note": "152180=4 选 1（强身/不屈/愤怒/狂奔），152185=6 选 1（急行/神行/拖泥带水/阴魂不散/穷途末路/四面楚歌）。现场 0 条持有"
+    },
+    {
+      "item_id": 101105,
+      "name": "天命宝箱（提升全部 N 阶技能熟练度 1000 点；101105-101109 五档）",
+      "aliases": [101106, 101107, 101108, 101109],
+      "category": "gift_box",
+      "implemented": "partial",
+      "server": {"action": "item_step 分支树（action_switch_forward ×N + action_reward_stair；**无 action_item_dialog**——自动开不弹对话）", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "auto_open_gifts", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login(登录后首次快照，一次性)", "trigger": "名字含『宝箱』必命中", "cooldown": "一次性", "config": ["GIFT_KEYWORDS"], "deduction": "本地扣减+pop bag"},
+        {"module": "daily_ghost", "function": "__tidy_bag(可消耗品兜底)", "file": "daily_ghost.py", "line": 3261, "protocol": "C2S_USE_ITEM", "scene": "tidy(买令前/福利后)", "trigger": "非装备非任务 → USE（**受 TIDY_MAX_ITEMS=30 配额与背包顺序限制**）", "cooldown": "随 tidy", "config": ["TIDY_MAX_ITEMS(常量)"], "deduction": "不扣（依赖下次快照）", "note": "见 F12：开箱饥饿"}
+      ],
+      "obtain": ["等级奖励（encourage_level 30/35/40/45/50 档发 101105-101108——已由 encourage_claim 领取）；怪物掉落（拾取栏取回）"],
+      "note": "用户口径 2026-09-29：『天命宝箱，名字叫，可以直接使用』✓（开箱链路在）。**现场 616 条堆积在背包**（分号统计：PICK 区 7 / 背包 616）——原因：① auto_open 仅登录跑一次 ② tidy 30 件配额+顺序饥饿（见 F12）。服务端 can_drop=否（禁丢）"
+    },
+    {
+      "item_id": 110097,
+      "name": "渡劫造化丹",
+      "category": "exp_pill",
+      "implemented": "no",
+      "server": {"action": "item_step：s1 switch_forward → s2 action_item_dialog → s4 action_add_daily_item_sign+action_reward_stair（加经验+记每日次数）→ 兑换 NPC 李德久(13368)", "use_on_summon": false},
+      "expected": "可直接使用（获得经验，等级越高每日可用次数越多；另有兑换 NPC）——用户口径『渡劫造化丹……只能使用，禁止丢弃』",
+      "drop_policy": "禁丢（用户口径 2026-09-29；服务端 can_drop=是，但业务口径禁丢。**建议入 DROP_PROTECT_INDEXES**——见 F13）",
+      "sites": [
+        {"module": "daily_ghost", "function": "__tidy_bag(可消耗品兜底)", "file": "daily_ghost.py", "line": 3261, "protocol": "C2S_USE_ITEM", "scene": "tidy", "trigger": "非装备非任务 → 会被兜底 USE；但流程含 action_item_dialog → **可能弹对话卡住**（现场 0 持有，未触发）", "cooldown": "随 tidy", "config": [], "deduction": "不扣"}
+      ],
+      "note": "现场在线号持有=0 条。机器人无专项实现；『禁丢』建议见 F13"
+    },
+    {
+      "item_id": 101001,
+      "name": "飞行旗 / 高级飞行旗 / 超级飞行旗",
+      "aliases": [101002, 101091],
+      "category": "misc",
+      "implemented": "no",
+      "server": {"action": "item_class=飞行（定点传送道具；无 item_step）", "use_on_summon": false},
+      "expected": "机器人不依赖飞行旗导航（自走/跳转链）；使用与否非需求",
+      "drop_policy": "可丢（用户口径 2026-09-29：『旗子可以丢弃……不需要有什么限制』）——现状核对：**不在 DROP_PROTECT_INDEXES、也无任何主动丢弃路径**（丢弃只针对装备/追捕令）→ 允许丢弃、当前不主动丢",
+      "sites": [],
+      "note": "服务端 can_drop=是（可丢）。现场持有：飞行旗+高级 合计 44 号、超级 0"
+    },
+    {
+      "item_id": 101046,
+      "name": "经验道具家族（经验宝盒/经验锦盒/经验花炮/高级经验花炮/经验加成丹/2倍经验卡/高徒经验卷轴/新春经验券/乾元造化丹/叶子猪经验宝箱）",
+      "aliases": [101083, 101332, 101366, 101049, 101320, 101087, 101379, 101425, 190102, 190180],
+      "category": "exp",
+      "implemented": "partial",
+      "server": {"action": "三类：add_buff（101087 2倍经验卡/101049·101320 经验加成丹——纯生效）；reward_stair 直给（101379 高徒经验卷轴）；**dialog+reward_stair（101046/101083/101332/101366/101425/190102——流程含 action_item_dialog，USE 后弹『物品对话』）**", "use_on_summon": false},
+      "sites": [
+        {"module": "daily_ghost", "function": "__tidy_bag(可消耗品兜底)", "file": "daily_ghost.py", "line": 3261, "protocol": "C2S_USE_ITEM", "scene": "tidy", "trigger": "非装备非任务 → 兜底 USE：add_buff/reward_stair 类**有效**；含 action_item_dialog 的**可能弹对话卡住**（机器人无『物品对话』处理；现场持有样本少，未触发确认）", "cooldown": "随 tidy", "config": [], "deduction": "不扣"}
+      ],
+      "note": "现场持有（在线号名『经验』命中共 187 条，含高级经验花炮等）。用户口径 2026-09-29：『技能经验的物品……可以使用』。除 buff 类外均为『兜底使用』，无专项"
+    },
+    {
       "item_id": 101079,
       "name": "储备金财富宝箱",
       "aliases": [103003, 103005],
@@ -166,6 +241,7 @@
       "category": "exp_pill",
       "implemented": "yes",
       "server": {"action": "action_reward_stair(+action_item_dialog)", "param": "+50000/+30000/+15000 第一参战守护经验", "use_on_summon": false},
+      "drop_policy": "禁丢（用户口径 2026-09-29：『渡劫造化丹 守护经验丹不能丢弃，只能使用，这可都是好东西』——贵重物品。现状核对见 F13：不在 DROP_PROTECT_INDEXES、但无任何丢弃路径会丢非装备 → 结构上安全；**建议入保护名单**）",
       "sites": [
         {"module": "daily_ghost", "function": "__tidy_bag + is_summon_only_item", "file": "daily_ghost.py", "line": 3008, "protocol": "C2S_USE_ITEM", "scene": "tidy", "trigger": "有参战守护(m_fighting_summon_id)时使用；无参战守护时跳过（SUMMON_EXP_ITEM_INDEXES=101373/101375/190034, daily_ghost.py:2978；判据 is_summon_only_item:2981）", "cooldown": "同 tidy", "config": ["SUMMON_EXP_ITEM_INDEXES(硬编码)"], "deduction": "不扣"}
       ]
@@ -269,6 +345,10 @@
     {"id": "F7", "severity": "中", "title": "『看似可调实际没接线』清单", "detail": "① robot_bag_cleanup_interval_sec=3（config.py:198）全仓无引用（实际冷却硬编码 _BAG_CLEAN_COOLDOWN_MS=3000, auto_summon.py:24）——09-21 发现仍在；② robot_summon_happy_threshold=90（config.py:175）全仓无引用（实际用 robot_summon_happy_ratio=0.5）——两个欢乐度阈值并存；③ 蛋名单双份：bag_ops.MOUNT_EGG_NAMES(113) 与 Go internal/api/hatch.go mountEggs(59-70)——机器人端 40 名单改两侧之一会漂移。", "evidence": ["config.py:198", "auto_summon.py:24", "config.py:175", "auto_summon.py:412", "bag_ops.py:113", "internal/api/hatch.go:59"]},
     {"id": "F8", "severity": "低", "title": "死代码/遗留", "detail": "① bag_ops.auto_equip_items(348) 无调用点（09-21 遗漏排查复现）；② item_tester.py 为遗留模块（send_use_item；robot_operator.py:65/83 调用被注释）；③ trace_with_npc_tester/shop_probe 为调试探针（含 C2S_USE_ITEM/DELITEM 调试路径），非生产链路。", "evidence": ["bag_ops.py:348", "item_tester.py:10", "robot_operator.py:65", "trace_with_npc_tester.py:88"]},
     {"id": "F9", "severity": "低", "title": "使用时机分散在四个『会话』，无统一物品使用调度", "detail": "空闲（auto_summon.tick）、抓鬼（daily_ghost.tick）、任务链（quest_engine.tick）、分享日常（share_daily→heal_tick）各自触发；同一物品在不同会话行为不完全一致（如抓鬼疗伤附带买药链、分享日常只吃药不买药）。新增『使用物品』类需求时无统一挂点，容易再长第 5 份实现。", "evidence": ["auto_summon.py:788", "daily_ghost.py:3173", "quest_engine.py:4952", "share_daily.py:2290"]},
-    {"id": "F10", "severity": "低", "title": "等级礼包『开箱时机』：auto_open_gifts 仅登录首跑，任务中获得的礼包当次不开", "detail": "等级装备礼包（1013682 主线30级 / 101369 支线30级 / 1013681·1013683·101370 等）是任务奖励，在任务链途中入包；auto_open_gifts 只在『登录后首次背包快照』跑一次（bag_opened 一次性，msghandle.py:355）→ 当次会话不自动开。兜底两条：① daily_ghost.__tidy_bag 的『可消耗品』路径（抓鬼买令前/福利后触发）；② 下次登录。另：等级奖励系统（encourage_level 20/25/30/35/40/45/50 档）由 encourage_claim 实现『领取』（C2S_ACCEPT_LEVEL_ENCOURAGE=80255），其奖励物为储备金箱/服务卡/丹药/坐骑蛋等，不含等级礼包物品。", "evidence": ["bag_ops.py:264", "msghandle.py:355", "daily_ghost.py:3261", "config/encourage/level_encourage.xml", "config/reward/reward_task_trunk.xml:2116", "config/reward/reward_task_branch.xml:1379"]}
+    {"id": "F10", "severity": "低", "title": "等级礼包『开箱时机』：auto_open_gifts 仅登录首跑，任务中获得的礼包当次不开", "detail": "等级装备礼包（1013682 主线30级 / 101369 支线30级 / 1013681·1013683·101370 等）是任务奖励，在任务链途中入包；auto_open_gifts 只在『登录后首次背包快照』跑一次（bag_opened 一次性，msghandle.py:355）→ 当次会话不自动开。兜底两条：① daily_ghost.__tidy_bag 的『可消耗品』路径（抓鬼买令前/福利后触发）；② 下次登录。另：等级奖励系统（encourage_level 20/25/30/35/40/45/50 档）由 encourage_claim 实现『领取』（C2S_ACCEPT_LEVEL_ENCOURAGE=80255），其奖励物为储备金箱/服务卡/丹药/坐骑蛋等，不含等级礼包物品。", "evidence": ["bag_ops.py:264", "msghandle.py:355", "daily_ghost.py:3261", "config/encourage/level_encourage.xml", "config/reward/reward_task_trunk.xml:2116", "config/reward/reward_task_branch.xml:1379"]},
+    {"id": "F11", "severity": "中", "title": "守护技能书/『满历练』书族：未实现 + tidy 反复空发（同 F6 型）", "detail": "『X·满历练』10 种（152132-152141）与守护技能书（152124 狂奔/152125 忠心/152127 急救等）均未实现（机器人无 C2S_SUMMON_LEARN_SKILL=80034 调用）；且：无 use_on_summon 参数 → `__tidy_bag` 把它们当『可消耗品』发人物 C2S_USE_ITEM → 服务端 step1=`SendNoticeAction`（只发通知、**不消耗物品**，item_action.py:1013）→ 反复空发。现场铁证：在线号『狂奔』堆积 230 条（单号最高 x111）、神行 101、愤怒 84、强身 81、不屈 60 —— 从未被消耗；『X·满历练』现场 0 条。", "evidence": ["config/item/item.xml:152132", "config/item/item.xml:152124", "script/item/item_action.py:1013", "protocol2/c2s_key.py:37（80034 无调用点）", "现场 /api/status 统计 2026-09-29"]},
+    {"id": "F12", "severity": "中", "title": "天命宝箱 616 条堆积 = 开箱饥饿（auto_open 仅登录 + tidy 30 件配额与顺序）", "detail": "用户口径『天命宝箱可直接使用』——开箱链路本身在（auto_open_gifts 名字含『宝箱』必命中 + tidy 兜底），**但现场 616 条堆积在背包**（PICK 区仅 7 条，拾取栏清理已把掉落箱取回）：① `auto_open_gifts` 仅登录首跑（当次会话获得的箱子不开）；② `__tidy_bag` 每轮最多处理 30 件（TIDY_MAX_ITEMS=30）且按背包顺序 —— 药品/材料/技能书占满配额，宝箱排在后面**永远轮不到**（饥饿）。建议（P2）：把『礼包/宝箱』提入 tidy 优先段或每轮独立小配额。", "evidence": ["bag_ops.py:264", "daily_ghost.py:3261", "daily_ghost.py:242（TIDY_MAX_ITEMS=30）", "现场统计 2026-09-29：天命宝箱 PICK=7/背包=616"]},
+    {"id": "F13", "severity": "高", "title": "『禁丢』核查（team-lead 点名）：渡劫造化丹/守护经验丹 —— 显式保护名单未覆盖（结构上安全），建议补入 DROP_PROTECT_INDEXES", "detail": "【明确回答：有保护 / 无保护】= **显式名单无、结构路径有**。① 显式：`bag_ops.DROP_PROTECT_INDEXES=(190146,102007,102010)`（助战令/金创药/昙花霜）**不含** 110097（渡劫造化丹）/101373·101375·190034（守护经验丹）；② 结构：当前全部丢弃路径**只针对装备**（should_drop_equip）与**追捕令**（drop_pursuit_orders）——tidy 经 2026-09-29 修复后也只丢装备——**无任何路径会丢非装备类丹药 → 现状不会误丢**；③ 风险（脆弱）：防误丢依赖『丢弃只针对装备』的隐式约定（P2-1『非装备消耗品未 pos 化』与未来整理扩展可能打破）→ **建议**：把 110097 与 101373/101375/190034 加入 `DROP_PROTECT_INDEXES`（与金创药同级显式白名单），与用户口径『只能使用、禁止丢弃』对齐。", "evidence": ["bag_ops.py:392（DROP_PROTECT_INDEXES）", "bag_ops.py:509（should_drop_equip 仅装备）", "daily_ghost.py:3261（tidy 修复后只丢装备）", "config/item/item.xml:110097 / 101373"]},
+    {"id": "F14", "severity": "低", "title": "含 action_item_dialog 的物品被自动 USE 会弹『物品对话』（理论卡 DIALOG 风险）", "detail": "已识别 8 类物品的 item_step 含 `action_item_dialog`（自选技能历练礼包 152180/152185、经验宝盒 101046、经验锦盒 101083、经验花炮 101332、高级经验花炮 101366、新春经验券 101425、乾元造化丹 190102、渡劫造化丹 110097）——被 auto_open_gifts（名字含『礼包』）或 tidy 兜底自动 USE 后**会弹出『物品对话』**；机器人无『物品对话』处理逻辑（对话引擎只处理 NPC 任务对话）→ **理论会卡 DIALOG/悬挂**（现场这些物品持有量极少或 0，未实测触发）。与 F1『tidy 无差别 USE』同根；如后续发放渠道开启需一并处理。", "evidence": ["config/item/item.xml:152180/101046/101083/101332/101366/101425/190102/110097", "bag_ops.py:264", "daily_ghost.py:3261"]}
   ]
 }
