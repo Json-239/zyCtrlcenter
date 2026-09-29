@@ -8,7 +8,7 @@
 //
 // 页面结构：统计条 + 筛选（类别/状态/搜索）+ 物品表（点击行看详情）+ 右侧详情抽屉。
 // 详情回答"这个物品是怎么实现使用的"：用途/服务端语义/实现点（文件:函数:行）/触发条件/
-// 阈值与配置化/扣减口径 + 关联的 F1-F9 不一致项（按证据行号自动关联，同文件 ±3 行内）。
+// 阈值与配置化/扣减口径 + 关联的 F1-FN 不一致项（按证据行号自动关联，同文件 ±3 行内）。
 import { computed, onMounted, ref } from 'vue'
 import { apiGet } from '../api'
 
@@ -47,7 +47,9 @@ const catLabels = computed(() => {
   return out
 })
 
-// 把"已实现条目 + 未实现清单"归一成同一张表的行（未实现项没有 sites，只有 expected/evidence）
+// 把"已实现条目 + 未实现清单"归一成同一张表的行（未实现项没有 sites，只有 expected/evidence）。
+// 2026-09-29 catalog v2（item-usage-audit e7a94e1/10da2f6）：items 里也出现 implemented=no/partial 且
+// sites 为空的条目；新增纯加法字段 expected/drop_policy/obtain/contents/note —— 一律可选展示（有才渲染）。
 const rows = computed(() => {
   const items = (catalog.value?.items || []).map((it, i) => ({
     key: `it-${i}-${it.name}`,
@@ -58,6 +60,11 @@ const rows = computed(() => {
     implemented: normStatus(it.implemented),
     sites: it.sites || [],
     server: it.server || null,
+    expected: it.expected || '',       // 期望实现（未实现/半实现条目的说明）
+    dropPolicy: it.drop_policy || '',  // 丢弃策略（如"禁丢"）
+    obtain: it.obtain || [],           // 获得来源（数组）
+    contents: it.contents || null,     // 内容物（{编号: 说明}）
+    note: it.note || '',
     unimpl: null,
   }))
   const un = (catalog.value?.unimplemented || []).map((u, i) => ({
@@ -69,6 +76,11 @@ const rows = computed(() => {
     implemented: normStatus(u.status),
     sites: [],
     server: null,
+    expected: u.expected || '',
+    dropPolicy: '',
+    obtain: [],
+    contents: null,
+    note: '',
     unimpl: u,
   }))
   return items.concat(un)
@@ -296,12 +308,25 @@ onMounted(load)
           <span>{{ detail.server.use_on_summon ? '是（use_on_summon）' : '否' }}</span></div>
       </div>
 
-      <!-- 未实现/半实现的原因（清单 unimplemented 段） -->
-      <div v-if="detail.unimpl" class="sect">
-        <h4>未实现说明</h4>
-        <div class="kv"><span class="k">期望实现</span><span class="mono">{{ detail.unimpl.expected || '—' }}</span></div>
-        <div class="kv"><span class="k">现状标注</span><span>{{ detail.unimpl.status || '—' }}</span></div>
-        <div class="kv"><span class="k">证据</span><span>{{ detail.unimpl.evidence || '—' }}</span></div>
+      <!-- 补充信息（catalog v2 加法字段：有才渲染） -->
+      <div v-if="detail.obtain.length || detail.contents || detail.dropPolicy || detail.note" class="sect">
+        <h4>补充信息</h4>
+        <div v-if="detail.obtain.length" class="kv"><span class="k">获得来源</span>
+          <span><div v-for="(o, i) in detail.obtain" :key="i" class="pre">{{ o }}</div></span></div>
+        <div v-if="detail.contents" class="kv"><span class="k">内容物</span>
+          <span><div v-for="(v, k) in detail.contents" :key="k" class="pre"><span class="mono">{{ k }}</span> {{ v }}</div></span></div>
+        <div v-if="detail.dropPolicy" class="kv"><span class="k">丢弃策略</span><span class="pre">{{ detail.dropPolicy }}</span></div>
+        <div v-if="detail.note" class="kv"><span class="k">备注</span><span class="pre">{{ detail.note }}</span></div>
+      </div>
+
+      <!-- 未实现/半实现说明（清单 unimplemented 段，或 items 内的 expected 字段） -->
+      <div v-if="detail.unimpl || detail.expected" class="sect">
+        <h4>未实现 / 半实现说明</h4>
+        <div v-if="detail.expected" class="kv"><span class="k">期望实现</span><span>{{ detail.expected }}</span></div>
+        <template v-if="detail.unimpl">
+          <div class="kv"><span class="k">现状标注</span><span>{{ detail.unimpl.status || '—' }}</span></div>
+          <div class="kv"><span class="k">证据</span><span>{{ detail.unimpl.evidence || '—' }}</span></div>
+        </template>
       </div>
 
       <!-- 实现点：每处 = 一个"在哪、何时、用了什么阈值" -->
@@ -331,9 +356,13 @@ onMounted(load)
           <div class="kv" v-if="s.note"><span class="k">备注</span><span>{{ s.note }}</span></div>
         </div>
       </div>
-      <div v-else-if="!detail.unimpl" class="sect muted">无实现点记录。</div>
+      <div v-else class="sect muted">
+        <template v-if="detail.implemented === 'no'">未实现：暂无任何使用实现（期望见上「未实现 / 半实现说明」）。</template>
+        <template v-else-if="detail.unimpl">无机器人端实现点（见上「未实现 / 半实现说明」）。</template>
+        <template v-else>无实现点记录。</template>
+      </div>
 
-      <!-- 关联的不一致项（F1-F9） -->
+      <!-- 关联的不一致项（F1-FN，随清单增长；自动关联） -->
       <div class="sect">
         <h4>关联不一致项</h4>
         <template v-if="relatedFindings(detail).length">
@@ -347,7 +376,7 @@ onMounted(load)
           </div>
         </template>
         <div v-else class="muted small">
-          未关联到 F1-F9 不一致项（关联规则：证据行号与该物品实现位置同文件且相差 ≤3 行）。
+          未关联到不一致项（关联规则：证据行号与该物品实现位置同文件且相差 ≤3 行）。
         </div>
       </div>
     </template>
