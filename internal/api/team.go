@@ -240,8 +240,136 @@ func (a *API) handleTeamDisband(w http.ResponseWriter, r *http.Request) {
 		"accounts": allAccs, "msg": msg})
 }
 
+// handleTeamDispatch POST /api/team/dispatch
+//
+// 请求：{captain, daily_limit?}；行为：校验队长在线 + 队伍就绪 → 给**队长单号**下发
+// `ghost_start role=captain`（带导航载荷/daily_limit/done），**队员一条命令都不发**（待命）。
+//
+// 为什么是独立接口而不是 setup 加 dispatch:true（阶段 2 评估）：
+//   - 时序：setup 立即返回，而派发要等 team_ready（集结完成）——"先完成手头工作单元→建队
+//     集结（人齐）→再开接"是用户口径；两步分开才能把"等就绪"表达清楚（dispatch 就绪前
+//     直接拒绝并提示）；
+//   - 复用：D13 队长转移后新队长接续、阶段 3/4 编排补派，都走"给（新）队长派任务"这一动作，
+//     独立接口便于复用与审计（/api/team/dispatch 出现即"这队开抓了"）。
+func (a *API) handleTeamDispatch(w http.ResponseWriter, r *http.Request) {
+	body := readBody(r)
+	captain := strings.TrimSpace(toStr(body["captain"]))
+	fail := func(msg string, extra map[string]any) {
+		obj := map[string]any{"ok": false, "msg": msg}
+		for k, v := range extra {
+			obj[k] = v
+		}
+		writeJSON(w, http.StatusOK, obj)
+	}
+	if captain == "" {
+		fail("captain 必填（队长账号）", nil)
+		return
+	}
+	if a.Events == nil {
+		fail("事件通道不可用（命令下发不了）", nil)
+		return
+	}
+	rb, ok := a.St.Get(captain)
+	if !ok || !rb.Online {
+		fail("队长不在线（等上线并收到心跳后再派）", nil)
+		return
+	}
+	// 就绪判据：台账 ready 队优先；兼容手工路径（心跳 team.role=captain 且 setup_done）。
+	ready := false
+	teams, _ := a.Events.TeamLedger()
+	for _, t := range teams {
+		if t.Captain == captain {
+			ready = true
+			break
+		}
+	}
+	if !ready && rb.TeamRole() == "captain" && rb.TeamSetupDone() {
+		ready = true
+	}
+	if !ready {
+		fail("队伍未就绪：等 team_ready 事件（建队后集结完成）再派；GET /api/team/status 可核对", nil)
+		return
+	}
+	limit := toInt(body["daily_limit"], 0)
+	if limit <= 0 {
+		limit = a.chainPayloads().GhostDailyLimit()
+	}
+	cmd, err := a.ghostStartCmdOf([]string{captain}, "captain", limit)
+	if err != nil {
+		fail("队长派发失败："+err.Error(), nil)
+		return
+	}
+	if !a.Events.SendCmd(cmd, "team_dispatch_ghost_start") {
+		fail("下发失败：机器人控制通道未连接", nil)
+		return
+	}
+	a.markGhostDispatch([]string{captain}) // 在途记账（与手动/池派发同口径，防重复下发）
+	if a.Store != nil {
+		a.Store.LogEvent(map[string]any{"type": "api", "action": "team_dispatch",
+			"zone": a.currentZoneKey(), "captain": captain, "daily_limit": limit,
+			"chain_id": cmd["chain_id"]})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "captain": captain,
+		"daily_limit": limit, "chain_id": cmd["chain_id"],
+		"msg": "已给队长下发抓鬼（role=captain）：" + captain + "；队员保持待命，不单独派任务"})
+}
+
+// teamRoleOf 该账号的"组队角色"（中控判断派发避让用）：台账（下发/事件）∪ 心跳（机器人事实）。
+//
+//	role="captain"：队长（含未就绪 job——就绪前同样不能再派单人任务）
+//	role="member" ：队员
+//	不清空：两边都没有 → ("", "")（不在队，正常派发）
+func (a *API) teamRoleOf(account string) (role, captain string) {
+	if a.Events != nil {
+		if r0, cap, ok := a.Events.TeamRoleOf(account); ok {
+			return r0, cap
+		}
+	}
+	if a.St != nil {
+		if rb, ok := a.St.Get(account); ok {
+			if r0 := rb.TeamRole(); r0 == "captain" || r0 == "member" {
+				return r0, rb.TeamCaptainAccount()
+			}
+		}
+	}
+	return "", ""
+}
+
+// dropTeamAccounts 从批量派发里剔除"队内号"（队长/队员/待就绪 job）——阶段 2 最小避让：
+// 普通任务下发（池/补发/启动自动分配）不打扰队伍；队长任务只能走 /api/team/dispatch（阶段 3
+// 再做全量编排避让：候选过滤/水位/回收）。返回（保留, 剔除）两份；命中合并记一条日志。
+func (a *API) dropTeamAccounts(accs []string, what string) (keep, skipped []string) {
+	if len(accs) == 0 {
+		return accs, nil
+	}
+	keep = make([]string, 0, len(accs))
+	var desc []string
+	for _, acc := range accs {
+		role, cap := a.teamRoleOf(acc)
+		if role == "" {
+			keep = append(keep, acc)
+			continue
+		}
+		skipped = append(skipped, acc)
+		desc = append(desc, fmt.Sprintf("%s(%s→%s)", acc, role, cap))
+	}
+	if len(skipped) > 0 {
+		a.Log.Printf("[组队] %s 跳过队内号 %d 个：%s（走组队编排 /api/team/dispatch）",
+			what, len(skipped), strings.Join(desc, "、"))
+	}
+	return keep, skipped
+}
+
 // handleTeamStatus GET /api/team/status
+//
 // 返回：{teams:[已就绪], jobs:[未就绪], robots:{账号→摘要}}（只读；供手动试点核对）。
+//
+// 2026-09-29 阶段 2 扩展：robots 摘要带组队观测字段 ——
+//
+//	team     心跳 team 块原样（role/captain/members/parted/setup_done/token_use_ts?，机器人事实）
+//	ledger_role  中控台账角色（captain|member；含 pending job——与派发避让同源）
+//	parted   暂离标记（心跳；无心跳块 → false）
+//	token_use_ts 助战令最近使用（机器人本地 ms；0=未知——用于换算"令剩余时长"）
 func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 	if a.Events == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "事件通道不可用"})
@@ -257,8 +385,20 @@ func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rb, ok := a.St.Get(acc); ok {
-			robots[acc] = map[string]any{"online": rb.Online, "role_id": rb.RoleID,
-				"state": rb.State, "mapid": rb.MapID, "pos": rb.Pos, "level": rb.Level}
+			item := map[string]any{"online": rb.Online, "role_id": rb.RoleID,
+				"state": rb.State, "mapid": rb.MapID, "pos": rb.Pos, "level": rb.Level,
+				"parted": rb.TeamParted()}
+			if tb := rb.TeamBlock(); tb != nil {
+				item["team"] = tb
+			}
+			if role, cap := a.teamRoleOf(acc); role != "" {
+				item["ledger_role"] = role
+				item["ledger_captain"] = cap
+			}
+			if ts := rb.TeamTokenUseTS(); ts > 0 {
+				item["token_use_ts"] = ts // 助战令最近使用（机器人本地 ms；1 令=60min 口径，计划 §3.4/D14）
+			}
+			robots[acc] = item
 		} else {
 			robots[acc] = map[string]any{"online": false, "msg": "无状态记录"}
 		}

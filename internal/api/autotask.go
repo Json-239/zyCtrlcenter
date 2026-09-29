@@ -218,6 +218,12 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 					" 自动恢复；面板「解除熔断」或「立即补发该号」可提前解除）"
 			}
 		}
+		// 2026-09-29 阶段 2（组队）：队内号不自动补发任何单人任务（队长/队员/待就绪 job）——
+		// 队长任务走 /api/team/dispatch（role=captain），队员保持待命；阶段 3 再做恢复编排
+		// （队长补发=重建队流程、队伍级恢复）。
+		if role, cap := a.teamRoleOf(account); role != "" {
+			return true, "组队中（" + role + "，队长 " + cap + "）→ 走组队编排，不自动补发单人任务"
+		}
 		// 2026-09-23 分享日常（shenbu；2026-09-24 扩到 fenghuo）：自有闸门（池状态 + 今日满额），
 		// 与抓鬼同款但只对本 kind。两个玩法按各自玩法键判（满额表/心跳/台账均按 key 隔离）。
 		// 注意：池未启用时这里拦下 —— 与"池停用不自动补发"的既有口径一致。
@@ -1056,6 +1062,15 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 			return false, "全部为人工暂停（面板点过「停止」；再点「启动/立即补发/上线」即解除）"
 		}
 	}
+	// 2026-09-29 阶段 2（组队）：普通任务下发避让队内号（队长/队员/待就绪 job）——
+	// 抓鬼队长的任务只能走 /api/team/dispatch（role=captain），队员保持待命；
+	// 池/重登补发/其它 LaunchTask 调用方一并在此外被拦（阶段 3 升级为候选/水位全量编排避让）。
+	if keep, skipped := a.dropTeamAccounts(accs, kind.Label()); len(skipped) > 0 {
+		accs = keep
+		if len(accs) == 0 {
+			return false, "全部为队内号（组队编排接管；队长派任务用 /api/team/dispatch）"
+		}
+	}
 	switch kind {
 	case autotask.KindNewbie:
 		chainID := a.Cfg.DefaultChainID
@@ -1076,18 +1091,9 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		return true, "已下发新手链: " + strings.Join(accs, ", ")
 
 	case autotask.KindGhost:
-		nav, err := a.chainPayloads().Ghost()
+		cmd, err := a.ghostStartCmdOf(accs, "solo", a.chainPayloads().GhostDailyLimit())
 		if err != nil {
-			return false, "抓鬼导航数据不可用: " + err.Error()
-		}
-		ghostChainID := a.chainPayloads().GhostNavChainID()
-		if nav.ChainID != "" {
-			ghostChainID = nav.ChainID
-		}
-		cmd := map[string]any{"cmd": "ghost_start", "chain_id": ghostChainID, "chain": nav,
-			"role": "solo", "daily_limit": a.chainPayloads().GhostDailyLimit(), "accounts": accs}
-		if done := a.ghostDoneMap(accs); len(done) > 0 {
-			cmd["done"] = done
+			return false, err.Error()
 		}
 		if !a.Events.SendCmd(cmd, "autotask_ghost_start") {
 			return false, "下发失败：机器人通道未连接"
@@ -1105,6 +1111,35 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		return a.launchShareDailyOf(kind, accs)
 	}
 	return false, "未知策略: " + string(kind)
+}
+
+// ghostStartCmdOf 组装抓鬼启动命令（单一构造点，避免各派发路径漂移）：
+//
+//	role="solo"    普通派发（任务池 / 重登恢复 / 手动自动分配）
+//	role="captain" 组队派发（/api/team/dispatch，阶段 2；队员不发任务命令）
+//
+// 载荷 = 基座链 newbie_full + 抓鬼声明 zhongkui_nav（机器人只认 cmd["chain"]，缺失=原地不动）。
+func (a *API) ghostStartCmdOf(accs []string, role string, dailyLimit int) (map[string]any, error) {
+	if role == "" {
+		role = "solo"
+	}
+	nav, err := a.chainPayloads().Ghost()
+	if err != nil {
+		return nil, errors.New("抓鬼导航数据不可用: " + err.Error())
+	}
+	ghostChainID := a.chainPayloads().GhostNavChainID()
+	if nav.ChainID != "" {
+		ghostChainID = nav.ChainID
+	}
+	if dailyLimit <= 0 {
+		dailyLimit = a.chainPayloads().GhostDailyLimit()
+	}
+	cmd := map[string]any{"cmd": "ghost_start", "chain_id": ghostChainID, "chain": nav,
+		"role": role, "daily_limit": dailyLimit, "accounts": accs}
+	if done := a.ghostDoneMap(accs); len(done) > 0 {
+		cmd["done"] = done
+	}
+	return cmd, nil
 }
 
 // ---------------------------------------------------------------- 面板接口

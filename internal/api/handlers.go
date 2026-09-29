@@ -505,6 +505,14 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		sort.Strings(targets)
 	}
 
+	// 2026-09-29 阶段 2（组队）：队内号（队长/队员/待就绪）不参与普通「启动」自动分配 ——
+	// 队伍走 /api/team/dispatch（队长）与待命（队员）。命中的号保留一行说明（不静默）。
+	var teamSkipped []string
+	if len(targets) > 0 {
+		keep, skipped := a.dropTeamAccounts(targets, "启动(自动分配)")
+		targets, teamSkipped = keep, skipped
+	}
+
 	// 意图表里还没有这个号时（刚 add、还没报等级），回退用**账号池里的当前条件**判一次：
 	// ≥31 级或链已完成 → 抓鬼；<31 → 新手链。这样"启动自动分配"永远按当前条件分配**一条**，
 	// 而不是盲目发默认链（≥31 的号发 newbie_full 会被机器人端按 already_done 跳过 = 看起来"没分配"）。
@@ -546,6 +554,11 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			assignments = append(assignments, map[string]any{
 				"account": acc, "command": "start_chain", "chain_id": defaultChainID, "reason": why})
 		}
+	}
+
+	for _, acc := range teamSkipped {
+		assignments = append(assignments, map[string]any{"account": acc, "command": "",
+			"reason": "队内号（组队编排接管；队长派任务用 /api/team/dispatch）"})
 	}
 
 	// 2026-09-23 P0：池配额截断 —— "启动(自动分配)"不再无上限直派。

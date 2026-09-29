@@ -52,6 +52,7 @@
 //	POST /api/booth/start     一键启动摆摊（写计划文件 enabled=true + 号不在图11时自动送图，可选鉴权）
 //	POST /api/booth/stop      一键停止摆摊（写计划文件 enabled=false；号离线不自动拉起，可选鉴权）
 //	POST /api/team/setup      组队下发（队长+队员；阶段1试点：先清旧队再建队；可选鉴权，见 team.go）
+//	POST /api/team/dispatch   给**队长**派任务（ghost_start role=captain；就绪后调用；可选鉴权，见 team.go）
 //	POST /api/team/disband    解散队伍（accounts 或 all:true；队长 team_disband + 队员 team_clear 兜底，可选鉴权）
 //	GET  /api/team/status     组队台账（teams/jobs/robots 摘要，只读）
 //	GET  /ws                  实时事件推送（WebSocket）
@@ -235,6 +236,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	// 2026-09-29 组队（抓鬼试点·阶段 1）：建队/解散/状态；命令由机器人端 team_captain 执行，
 	// 事件（team_ready/…）落台账（internal/services/event）。阶段 1 不自动派任务。
 	mux.HandleFunc("POST /api/team/setup", a.requireToken(a.handleTeamSetup))
+	mux.HandleFunc("POST /api/team/dispatch", a.requireToken(a.handleTeamDispatch))
 	mux.HandleFunc("POST /api/team/disband", a.requireToken(a.handleTeamDisband))
 	mux.HandleFunc("GET /api/team/status", a.handleTeamStatus)
 	mux.HandleFunc("/ws", a.handleWS)

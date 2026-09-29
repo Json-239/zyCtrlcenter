@@ -111,8 +111,13 @@ type Robot struct {
 	// SvrOnline 全服在线（含真实玩家）：机器人 `@online` 回执解析后上报，{count,ts}。
 	// 只有"查到过"的那个号会带这个字段（整进程 2 分钟查一次），中控取最新一条展示。
 	SvrOnline map[string]any `json:"svr_online,omitempty"`
-	Route     any            `json:"route,omitempty"`
-	HS        bool           `json:"hs"` // 游戏服握手完成（≠登录成功）
+	// Team 组队状态（机器人心跳上报原样透传，2026-09-29 阶段 2 契约）：
+	// {role:captain|member, captain:<队长账号>, members:[<账号>], parted, setup_done, token_use_ts?}
+	// 不在队时机器人省略/置 null → nil（消费方按"不在队"处理；心跳缺失会清残留）。
+	// 用途：组队派发避让（普通 ghost_start 不发队内号）、/api/team/status 观测。
+	Team  any  `json:"team,omitempty"`
+	Route any  `json:"route,omitempty"`
+	HS    bool `json:"hs"` // 游戏服握手完成（≠登录成功）
 	// HasEgg 是否有坐骑蛋（装备栏五行珠槽在孵 or 背包里有）—— 孵化池过滤用；机器人上报。
 	HasEgg    bool    `json:"has_egg,omitempty"`
 	ErrCode   string  `json:"err_code,omitempty"`
@@ -263,6 +268,70 @@ func (r Robot) Walking() bool {
 	}
 	en, ok := m["enabled"].(bool)
 	return ok && en
+}
+
+// TeamBlock 组队心跳块（无块/形状不符 → nil；见 Robot.Team 字段注释）。
+func (r Robot) TeamBlock() map[string]any {
+	m, _ := r.Team.(map[string]any)
+	return m
+}
+
+// TeamRole 心跳上报的队内角色（"captain"/"member"；不在队/未上报 → ""）。
+func (r Robot) TeamRole() string {
+	m := r.TeamBlock()
+	if m == nil {
+		return ""
+	}
+	s, _ := m["role"].(string)
+	return s
+}
+
+// TeamCaptainAccount 心跳上报的队长账号（不在队 → ""）。
+func (r Robot) TeamCaptainAccount() string {
+	m := r.TeamBlock()
+	if m == nil {
+		return ""
+	}
+	s, _ := m["captain"].(string)
+	return s
+}
+
+// TeamParted 是否暂离中（队友暂离=不参战/不被队长交付覆盖，观测用）。
+func (r Robot) TeamParted() bool {
+	m := r.TeamBlock()
+	if m == nil {
+		return false
+	}
+	b, _ := m["parted"].(bool)
+	return b
+}
+
+// TeamSetupDone 建队集结是否已完成（心跳上报；观测用）。
+func (r Robot) TeamSetupDone() bool {
+	m := r.TeamBlock()
+	if m == nil {
+		return false
+	}
+	b, _ := m["setup_done"].(bool)
+	return b
+}
+
+// TeamTokenUseTS 助战令最近一次使用时间（机器人本地毫秒；无上报 → 0 = 未知）。
+// 领战令 1 令=60 分钟（计划 §3.4/D14），面板据此显示"令剩余时间"。
+func (r Robot) TeamTokenUseTS() int64 {
+	m := r.TeamBlock()
+	if m == nil {
+		return 0
+	}
+	switch v := m["token_use_ts"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	}
+	return 0
 }
 
 // State 全局状态（并发安全）。

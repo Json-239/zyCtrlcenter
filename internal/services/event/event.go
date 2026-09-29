@@ -268,6 +268,96 @@ func cloneTeam(t *TeamInfo) TeamInfo {
 	return out
 }
 
+// TeamRoleOf 该账号在中控组队台账里的角色（阶段 2 派发避让的唯一事实源）：
+//
+//	("captain", captain, true)  队长（含已下发未就绪的 pending job——就绪前同样不能再派单人任务）
+//	("member",  captain, true)  队员
+//	("", "", false)             不在台账（含已解散/未组队）
+//
+// 说明：心跳 team 块（机器人侧事实）由 api 层在台账未命中时兜底（见 api.teamRoleOf），
+// 两侧取并集；本函数保持"只读台账"，可在任意场景安全调用。
+func (h *Handler) TeamRoleOf(account string) (role, captain string, ok bool) {
+	if account == "" {
+		return "", "", false
+	}
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	for cap, info := range h.teams {
+		if cap == account {
+			return "captain", cap, true
+		}
+		for _, m := range info.Members {
+			if m == account {
+				return "member", cap, true
+			}
+		}
+	}
+	for cap, info := range h.teamJobs {
+		if cap == account {
+			return "captain", cap, true
+		}
+		for _, m := range info.Members {
+			if m == account {
+				return "member", cap, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// TeamPromote 队长转移（S2C_TEAM_PROMOTE 90393 / D13）：newCaptain 从队员升为队长，旧队长转队员。
+//
+// 幂等：newCaptain 已是某队队长 → 返回 ""（不动作）。找不到所属队 → 返回 ""（调用方记日志；
+// 可能是台账缺失的手工路径——等 team_ready 重建）。
+// 迁移后 MemberRoleIDs 置空（旧队长的 rid 未知，等下一次 team_ready 重建；不影响派发避让——
+// 避让按账号而不是 rid）。
+func (h *Handler) TeamPromote(newCaptain string) (oldCaptain string) {
+	if newCaptain == "" {
+		return ""
+	}
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	if _, ok := h.teams[newCaptain]; ok {
+		return "" // 已是队长：幂等
+	}
+	now := time.Now().Unix()
+	migrate := func(cap string, info *TeamInfo) string {
+		idx := -1
+		for i, m := range info.Members {
+			if m == newCaptain {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return ""
+		}
+		members := append([]string{}, info.Members[:idx]...)
+		members = append(members, info.Members[idx+1:]...)
+		members = append(members, cap) // 旧队长转队员
+		info.Captain = newCaptain
+		info.Members = members
+		info.MemberRoleIDs = nil
+		info.UpdatedAt = now
+		return cap
+	}
+	for cap, info := range h.teams {
+		if old := migrate(cap, info); old != "" {
+			delete(h.teams, cap)
+			h.teams[newCaptain] = info
+			return old
+		}
+	}
+	for cap, info := range h.teamJobs {
+		if old := migrate(cap, info); old != "" {
+			delete(h.teamJobs, cap)
+			h.teamJobs[newCaptain] = info
+			return old
+		}
+	}
+	return ""
+}
+
 // intListOf 把事件里的数组（[]any 数字，如 team_ready.members=队员 role_id 列表）转成 []int。
 func intListOf(v any) []int {
 	raw, ok := v.([]any)
@@ -310,6 +400,7 @@ func (h *Handler) handlers() map[string]func(map[string]any) {
 		"team_disbanded":  h.onTeamDisbanded,
 		"team_rejoined":   h.onTeamRejoined,
 		"team_return_nav": h.onTeamReturnNav,
+		"team_promote":    h.onTeamPromote,
 	}
 }
 
@@ -802,6 +893,13 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			} else {
 				r.BagFullAgeMS = 0
 			}
+			// 组队状态（2026-09-29 阶段 2 契约）：原样透传 {role,captain,members,parted,setup_done,token_use_ts?}；
+			// 不带/为 null = 不在队 → 清残留（消费方：派发避让 api.dropTeamAccounts、状态接口）。
+			if v, ok := st["team"]; ok && v != nil {
+				r.Team = v
+			} else {
+				r.Team = nil
+			}
 			if v, ok := st["equip"]; ok {
 				r.Equip = v
 			}
@@ -1140,6 +1238,47 @@ func (h *Handler) onTeamReturnNav(ev map[string]any) {
 	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": str(ev, "account"),
 		"zone": zoneOf(ev),
 		"msg":  "[组队] 归队导航请求" + target + "（route_walk 模块缺失，当前仅记录；阶段 2 接通）"})
+}
+
+// onTeamPromote 队长转移（S2C_TEAM_PROMOTE 90393 / D13，2026-09-29 阶段 2）：
+// 事件形状（与 team-feature-plan 对齐）：{"type":"team_promote","new_captain_role_id":RID,
+// "new_team_name":NAME[,"new_captain_account":ACC]}——每个收到 90393 的号各发一条（幂等）。
+//
+// 台账迁移：新队长（rid→账号反查，优先事件自带账号）由队员升为队长，旧队长转队员；
+// 找不到队（手工路径/台账缺失）→ 仅记日志，等下一次 team_ready 重建。
+func (h *Handler) onTeamPromote(ev map[string]any) {
+	newCap := str(ev, "new_captain_account")
+	if newCap == "" {
+		newCap = h.accountByRoleID(toInt(ev["new_captain_role_id"]))
+	}
+	if newCap == "" {
+		h.Store.LogEvent(map[string]any{"type": "log", "level": "warn", "account": str(ev, "account"),
+			"zone": zoneOf(ev), "msg": fmt.Sprintf(
+				"[组队] 队长转移事件：新队长无法映射账号（role_id=%v，等心跳）→ 台账未动",
+				ev["new_captain_role_id"])})
+		return
+	}
+	old := h.TeamPromote(newCap)
+	msg := fmt.Sprintf("[组队] 队长转移：%s → %s（队伍 %s）", old, newCap, str(ev, "new_team_name"))
+	if old == "" {
+		msg = "[组队] 队长转移事件：" + newCap + "（台账无匹配队，等 team_ready 重建）"
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": str(ev, "account"),
+		"zone": zoneOf(ev), "msg": msg})
+}
+
+// accountByRoleID 心跳 RoleID → 账号反查（角色 id 全服唯一；找不到返回 ""）。
+// 事件低频（仅建队/转移），全量扫描可接受。
+func (h *Handler) accountByRoleID(rid int) string {
+	if rid <= 0 || h.St == nil {
+		return ""
+	}
+	for _, r := range h.St.Snapshot() {
+		if r.RoleID == rid {
+			return r.Account
+		}
+	}
+	return ""
 }
 
 func (h *Handler) onGhostDone(ev map[string]any) {
