@@ -151,9 +151,14 @@ const stats = computed(() => {
 const catOptions = computed(() => {
   const used = new Set(rows.value.map((r) => r.category))
   const opts = []
+  const declared = new Set()
   for (const c of catalog.value?.categories || []) {
+    declared.add(c.key)
     if (used.has(c.key)) opts.push({ key: c.key, label: c.label })
   }
+  // 数据侧可能先用新键（如 exp/misc/skill_book）而 categories[] 还没来得及声明中文名——
+  // 这类键也要能筛选（label 回退用键名），否则条目"看得见、筛不到"。
+  for (const k of used) if (k && !declared.has(k)) opts.push({ key: k, label: k + '（未声明）' })
   if (used.has('')) opts.push({ key: NO_CAT, label: '未分类（未实现清单）' })
   return opts
 })
