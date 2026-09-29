@@ -70,6 +70,7 @@ _p3_mod = types.ModuleType("protocol3")
 _p3_mod.C2S_SELLER_START_BOOTH = 80170
 _p3_mod.C2S_UP_SELLER_ITEM = 80236
 _p3_mod.C2S_SELLER_CLOSE_BOOTH = 80070
+_p3_mod.C2S_SAVE_OFFLINE_BOOTH_SETTING = 80274   # 2026-09-28 离线摆摊（样板）
 _p3_mod.C2S_PLAYERMOVE = 10001
 _p3_mod.C2S_NOTIFY_POSITION = 10002
 sys.modules["protocol3"] = _p3_mod
@@ -127,8 +128,10 @@ def _fake_set_pose(ro, x, y, mapid=None, source=""):
 _ro_op.set_pose = _fake_set_pose
 sys.modules["robot_operator"] = _ro_op
 
-# client: 物品名表
+# client: 物品名表 + 2026-09-28 离线摆摊"禁自动重登名单"（真模块重依赖不裸 import；
+#   真源码的豁免/清理逻辑另用静态断言校验，见用例 13 段）
 _cl_mod = types.ModuleType("client")
+_cl_mod.g_offline_booth_hold = set()
 _cl_mod.g_item_data_dict = {
     170001: {"item_name": "云母粉"},
     111029: {"item_name": "乌金"},
@@ -258,12 +261,27 @@ ro = FakeRobot(mapid=38)
 booth._PLAN_CACHE["ms"] = 0
 booth.tick(ro, 1000)
 b = ro.m_booth
-check("等级>=50: 激活建对象", b is not None and b.enabled)
-check("激活初始: INIT→WAIT_MAP(图不符)", b.state == "WAIT_MAP", b.state)
-check("激活: 未发任何包", len(ro.sent) == 0, ro.sent)
+# 2026-09-28 死锁防护(硬卡 1032 根因): 当前图 != 计划图 → 拒绝激活(记 ACTIVATE_SKIP),
+#   不再进入 WAIT_MAP 冻结 main_tester 全模块; 计划保持 enabled, 图对上后自动激活。
+check("图不符(38≠11): 拒绝激活(ACTIVATE_SKIP)", b is None or not b.enabled, getattr(b, "state", None))
+check("图不符: 未发任何包", len(ro.sent) == 0, ro.sent)
+_booth_src = io.open(os.path.join(REPO_SCRIPT, "booth.py"), encoding="utf-8", errors="replace").read()
+check("图不符: 记 ACTIVATE_SKIP 日志(源码锚点)", "ACTIVATE_SKIP" in _booth_src)
+ro.m_mapid = 11
+booth._PLAN_CACHE["ms"] = 0
+booth.tick(ro, 2000)
+b = ro.m_booth
+check("图对上: 自动激活(不粘滞)", b is not None and b.enabled)
+check("图对上: INIT→GOTO(在目标图)", b.state == "GOTO", b.state)
 
-# WAIT_MAP 超时
-booth.tick(ro, 1000 + 61 * 1000)
+# WAIT_MAP 语义保留(号图未知(=0)时先激活等图; 超时兜底不回归)
+ro = FakeRobot(mapid=0)
+booth._PLAN_CACHE["ms"] = 0
+booth.tick(ro, 3000)
+b = ro.m_booth
+check("图未知(0): 激活进 WAIT_MAP(原语义保留)",
+      b is not None and b.enabled and b.state == "WAIT_MAP", getattr(b, "state", None))
+booth.tick(ro, 3000 + 61 * 1000)
 check("WAIT_MAP 超时 → FAIL", b.state == "FAIL" and not b.enabled, b.state)
 
 # ================================================================ 4) 全流程（地图=11, 已在目标点）
@@ -671,6 +689,151 @@ b = ro.m_booth
 check("心跳: 字段齐 (enabled/state/sold_count/income/name)",
       all(hasattr(b, k) for k in ("enabled", "state", "sold_count", "income", "name")))
 check("心跳: 名字已冻结", b.name == "杂货小摊", b.name)
+
+# ================================================================ 13) 离线摆摊（2026-09-28 样板）
+# 计划 offline_minutes>0: 上架完成 → OFFLINE_SET → 发 80274[分,0,0,0,0]
+#   → 加入 client.g_offline_booth_hold（禁自动重登）→ OFFLINE_WAIT（不再动作）
+rm_plan()
+_p = base_plan(up_items=[{"item_index": 170001, "name": "云母粉", "price": 1000}])
+_p["offline_minutes"] = 60
+write_plan(_p)
+ro = FakeRobot()
+set_bag(ro, [(170001, 17617794429167748, 210, 8192, None)])
+t = 200000
+booth.tick(ro, t)                     # INIT→GOTO
+t += 1000
+booth.tick(ro, t)                     # GOTO→OPEN
+t += 2000
+booth.tick(ro, t)                     # OPEN: 发开摊
+booth.on_seller_start_booth(ro, [8000216, 1, "杂货小摊", 1409, 1109])
+t += 1000
+booth.tick(ro, t)                     # OPEN→UP
+b = ro.m_booth
+check("离线: 激活冻结 offline_minutes=60", b.offline_minutes == 60, b.offline_minutes)
+t += 1000
+booth.tick(ro, t)                     # UP: 发第一件
+booth.on_up_item(ro, [17617794429167748, 1000])
+t += 1000
+booth.tick(ro, t)                     # UP: 空 → OFFLINE_SET（而非 HOLD）
+b = ro.m_booth
+check("离线: 上架完成→OFFLINE_SET(非 HOLD)", b.state == "OFFLINE_SET", b.state)
+t += 1000
+booth.tick(ro, t)                     # OFFLINE_SET: 发 80274 + 加豁免
+check("离线: 发包 80274 [60,0,0,0,0]",
+      ro.sent[-1] == (80274, [60, 0, 0, 0, 0]), ro.sent[-1:])
+import client as _cli   # selftest 环境里是 stub（真 client 重依赖，见上方 stub 段）
+_in_hold = ACCT in _cli.g_offline_booth_hold
+check("离线: 已加禁自动重登豁免(client.g_offline_booth_hold)", _in_hold)
+check("离线: →OFFLINE_WAIT(等踢线)", b.state == "OFFLINE_WAIT", b.state)
+_n_before = len(ro.sent)
+t += 5000
+booth.tick(ro, t)                     # OFFLINE_WAIT: 不再发包
+check("离线: WAIT 中不再动作(幂等)", len(ro.sent) == _n_before, len(ro.sent))
+
+# 回收语义 + client 真源码静态断言（框架层禁热更/重依赖，裸 import 不可行）
+import client as _cli2
+_cli2.g_offline_booth_hold.discard(ACCT)
+check("离线: 豁免可清除(回收=manage add 清理)", ACCT not in _cli2.g_offline_booth_hold)
+_cli_src = io.open(os.path.join(REPO_SCRIPT, "client.py"), encoding="utf-8", errors="replace").read()
+check("离线: client 真源码含豁免名单定义", "g_offline_booth_hold = set()" in _cli_src)
+check("离线: client 真源码 relogin 豁免判断", "if account in g_offline_booth_hold:" in _cli_src)
+check("离线: client 真源码 manage add 清豁免", "g_offline_booth_hold.discard(" in _cli_src)
+# 计划撤下后停用（防污染后续）
+rm_plan()
+t += 1000
+booth.tick(ro, t)
+
+# ================================================================ 14) 90134 立即关闭客户端（离线摆摊踢线链路, 2026-09-28）
+# 根因: 服务端 close_role_client(role_operator.py:641-647) 只发 S2C_IMMEDIATE_CLOSE_CLIENT
+#   (90134) 由客户端自行断开; 此前 protocol3.FORMAT_MS 未注册 → C++ 层丢包 → 信号从未
+#   到达机器人(diag 零 recv 佐证): 离线摆摊"踢线"不生效、被顶号/被踢号假在线。
+# 本段: ① protocol3/msghandle 真源码静态断言（注册齐全）;
+#       ② stub-exec msghandle.immediate_close_client_handle 行为（drop_robot 语义）。
+_p3_src = io.open(os.path.join(REPO_SCRIPT, "protocol3.py"),
+                  encoding="utf-8", errors="replace").read()
+check("90134: protocol3 含常量别名",
+      "S2C_IMMEDIATE_CLOSE_CLIENT = protocol2.s2c_key.S2C_IMMEDIATE_CLOSE_CLIENT" in _p3_src)
+check("90134: protocol3 含 FORMAT_MS 注册",
+      "FORMAT_MS[S2C_IMMEDIATE_CLOSE_CLIENT] = protocol2.get_s2c_format(S2C_IMMEDIATE_CLOSE_CLIENT)" in _p3_src)
+check("90134: protocol3 g_handle_map 注册",
+      "S2C_IMMEDIATE_CLOSE_CLIENT : msghandle.immediate_close_client_handle," in _p3_src)
+_mh_src = io.open(os.path.join(REPO_SCRIPT, "msghandle.py"),
+                  encoding="utf-8", errors="replace").read()
+check("90134: msghandle 含 handler 定义",
+      "def immediate_close_client_handle(fd, datalist):" in _mh_src)
+check("90134: handler 核心=drop_robot 断开",
+      "robot_mgr.g_mgr.drop_robot(robot_object)" in _mh_src)
+
+# -- 行为: stub 环境 exec msghandle 真源码（顶层仅 import+常量, 无跨模块顶层调用;
+#    唯一顶层外引用= _MONEY_ATTR_FIELD 元组里的 4 个 keys 货币键）
+_keys_mod = types.ModuleType("keys")
+_keys_mod.MONEY = 9560
+_keys_mod.DEPOSIT = 9561
+_keys_mod.COOKIE_SCHOOL_CONTRIBUTION = 9617
+_keys_mod.COOKIE_KAIYUAN_MONEY = 9618
+sys.modules["keys"] = _keys_mod
+for _n in ("cnet", "robot", "role_data", "team_tester", "fight_tester"):
+    if _n not in sys.modules:
+        sys.modules[_n] = types.ModuleType(_n)
+
+
+class _FakeGMrg(object):
+    def __init__(self):
+        self.robots = {}
+        self.dropped = []
+        self.raise_drop = False
+
+    def get_robot_object_by_fd(self, fd):
+        return self.robots.get(fd)
+
+    def drop_robot(self, ro):
+        if self.raise_drop:
+            raise RuntimeError("drop boom")
+        self.dropped.append(ro)
+
+
+_rm_mod = types.ModuleType("robot_mgr")
+_rm_mod.g_mgr = _FakeGMrg()
+sys.modules["robot_mgr"] = _rm_mod
+
+_mh_ns = {}
+_exec_err = ""
+try:
+    exec(compile(_mh_src, os.path.join(REPO_SCRIPT, "msghandle.py"), "exec"), _mh_ns)
+except Exception as _e:
+    _exec_err = repr(_e)
+check("90134: msghandle 源码可 exec(stub 环境)", _exec_err == "", _exec_err)
+
+_handler = _mh_ns.get("immediate_close_client_handle")
+check("90134: handler 可调用", callable(_handler))
+if not callable(_handler):
+    _handler = lambda fd, dl: None
+
+_ro_a = types.SimpleNamespace(m_account=["robot0001032@xy3.com", "pw"], m_fd=9001)
+_rm_mod.g_mgr.robots[9001] = _ro_a
+_n_diag = len(_diag_lines)
+_handler(9001, [""])
+check("90134: handler 断开连接(drop_robot 被调)",
+      len(_rm_mod.g_mgr.dropped) == 1 and _rm_mod.g_mgr.dropped[0] is _ro_a)
+check("90134: handler 记 diag(IMMEDIATE_CLOSE_CLIENT)",
+      any("IMMEDIATE_CLOSE_CLIENT" in x for x in _diag_lines[_n_diag:]))
+
+# 未知 fd: 静默返回（不 drop 不抛）
+_handler(9999, [""])
+check("90134: 未知 fd 安全(不 drop)", len(_rm_mod.g_mgr.dropped) == 1)
+
+# drop 抛异常: 吞掉不外抛（diag 记 RAISED; 防 C 层回调栈内炸掉 process_msg）
+_ro_b = types.SimpleNamespace(m_account=["robot0001092@xy3.com", "pw"], m_fd=9002)
+_rm_mod.g_mgr.robots[9002] = _ro_b
+_rm_mod.g_mgr.raise_drop = True
+_boom_ok = True
+try:
+    _handler(9002, [""])
+except Exception:
+    _boom_ok = False
+_rm_mod.g_mgr.raise_drop = False
+check("90134: drop 异常不外抛",
+      _boom_ok and any("drop RAISED" in x for x in _diag_lines))
 
 # ================================================================ 汇总
 shutil.rmtree(_tmpdir, ignore_errors=True)

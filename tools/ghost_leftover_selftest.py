@@ -342,6 +342,8 @@ def main():
     check("A32 出口不改协议面(只用既有 __emit/__log/__emit_state)",
           enter_block is not None and "send_message" not in enter_block
           and "protocol" not in enter_block)
+    check("A33 出口停用会话(g.enabled = False): 中控不再当'抓鬼在跑', 孵化/游荡池可接手",
+          enter_block is not None and "g.enabled = False" in enter_block)
 
     # ============================================================ B. 行为测试
     ns, calls, ok = _load_dynamic(dh)
@@ -387,6 +389,8 @@ def main():
         check("B8 首次进入返回 True", r1 is True)
         check("B9 置 leftover_stop=True", g.leftover_stop is True)
         check("B10 状态置 DONE(停状态机)", g.state == "DONE")
+        check("B10b 停用会话: g.enabled is False(中控不再当'抓鬼在跑')",
+              getattr(g, "enabled", True) is False)
         check("B11 任务表**保留**(与服务端一致)", 2019501 in q.tasks)
         check("B12 动态导航已清(不再巡逻/换图)",
               q.dynamic_npcs == {} and q.pending is None and q.walk_target is None

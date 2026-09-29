@@ -104,6 +104,20 @@ def main():
           i >= 0 and j > i and "skipped_summon += 1" in seg and "else:" in seg,
           "未匹配到 if is_summon_only_item → skipped_summon += 1 → else to_use.append")
 
+    # ---- ④ 孵化蛋不参与 TIDY_BAG(2026-09-24: 蛋被当消耗品使用 → 弹"放置/先留着"对话,
+    #      并把蛋从装备栏 4108 脱下回背包, 与 mount_egg 自动放蛋互相打架; robot0001019 实测) ----
+    _egg_cond = "egg_kind(_idx) is not None"
+    _egg_i = src.find(_egg_cond)
+    _use_i = src.find("to_use.append", _egg_i) if _egg_i >= 0 else -1
+    check("TIDY_BAG: 蛋(坐骑蛋/元气蛋)跳过分支存在且在 to_use.append 之前",
+          _egg_i >= 0 and _use_i > _egg_i
+          and "bag_ops" in src[max(0, _egg_i - 300):_egg_i],
+          "未匹配到 egg_kind(_idx) is not None → continue(在收集循环内、to_use.append 之前)")
+    # 敏感度: 删掉蛋跳过条件后, 同款检查必须失败(证明本条真的盯着该分支)
+    _mut = src.replace("_bo_egg.egg_kind(_idx) is not None", "False")
+    check("反例-删掉蛋跳过条件则存在性检查失败(敏感度)",
+          _mut.find(_egg_cond) < 0)
+
     # ---- 输出 ----
     nfail = 0
     for name, ok, detail in results:

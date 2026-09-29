@@ -293,6 +293,12 @@ def _install_stubs():
     dg.SCRIPT_VERSION = "stub"
     dg.dispatch_cmd = lambda ro, cmd: {"cmd": cmd.get("cmd"), "result": "ok"}
     dg.on_task_limited = lambda ro, dl, is_load=None: None
+    # 2026-09-29 2 池修复包：share_daily 包满清理复用 daily_ghost.__tidy_bag（stub 记录调用）
+    dg.TIDY_LOG = {"calls": 0}
+    def _dg_tidy_bag(ro):
+        dg.TIDY_LOG["calls"] += 1
+        return 1
+    setattr(dg, "__tidy_bag", _dg_tidy_bag)
     sys.modules["daily_ghost"] = dg
     # 2026-09-24：会话内吃药接线（share_daily.tick → auto_summon.heal_tick）
     asm = types.ModuleType("auto_summon")
@@ -988,7 +994,7 @@ r.m_team = t
 check("S20 队长带成员 → 拒绝", "其他成员" in S.team_block_reason(r), S.team_block_reason(r))
 
 # ================================================================
-# 18) S21 · 包满 5 码
+# 18) S21 · 包满 5 码（2026-09-29 2 池修复包：首次本地清理重试 → 再失败才停）
 # ================================================================
 for code in (360, 415, 418, 528, 1295):
     r = fresh_robot()
@@ -998,8 +1004,16 @@ for code in (360, 415, 418, 528, 1295):
     g.state = "ACCEPT"
     g.accept_start_ms = (time.time() - 4.0) * 1000
     getattr(S, "__on_accept")(r, g, r.m_quest, time.time() * 1000)
-    check("S21 码 %d → 停止(包裹已满)" % code,
-          g.state == "STOPPED" and g.stop_code == "BAG_FULL",
+    check("S21 码 %d 首次 → 本地清理一次不停止" % code,
+          g.state != "STOPPED" and bool(getattr(g, "bag_cleanup_tried", False)),
+          "%s/%s" % (g.state, getattr(g, "bag_cleanup_tried", None)))
+    # 重试一轮后再次被判包满（新通知/新判定）→ 才停止并上报"需要清包"
+    g.bag_full_ms = time.time() * 1000
+    g.accept_start_ms = (time.time() - 4.0) * 1000
+    getattr(S, "__on_accept")(r, g, r.m_quest, time.time() * 1000)
+    check("S21 码 %d 再失败 → 停止(BAG_FULL, 需要清包)" % code,
+          g.state == "STOPPED" and g.stop_code == "BAG_FULL"
+          and "需要清包" in (g.stop_reason or ""),
           "%s/%s" % (g.state, g.stop_code))
 r = fresh_robot()
 g = new_state()

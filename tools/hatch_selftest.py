@@ -336,6 +336,75 @@ check("⑩反例-msghandle 删掉路由后检查函数会报 FAIL",
 	not _route_pat.search(src_msgh.replace("mount_egg.on_notice_args", "pass"))
 	and bool(_route_pat.search(src_msgh)))
 
+# ---------------------------------------------------------------- ⑪ 自动放蛋(2026-09-24 用户口径: 有蛋直接放)
+# 无会话 + 蛋在背包 → tick 发换包裹协议到 4108, 记尝试 + 打日志
+ra = StubRobot(bag={101316: [7001, 1, 8200]})
+ra.m_hatch = None
+mount_egg.tick(ra, NOW)
+_sta = getattr(ra, "_egg_autoplace", None)
+check("⑪自动放蛋-背包有蛋(无会话): 发换包裹协议 [id,1,BAG,EQUIP,4108] 到 4108",
+	ra.sent and ra.sent[-1] == (PROTO_CHANG_POCKET, [7001, 1, 5158, 5170, 4108])
+	and _sta is not None and _sta["tries"] == 1 and not _sta["done"]
+	and any("自动放蛋" in str(ev.get("msg", "")) for ev in QE_EVENTS))
+
+# 位置回执(蛋落到 4108) → 标记 done 且不再发
+ra.m_bag_cache[101316] = [7001, 1, 4108]
+mount_egg.tick(ra, NOW + 10000)
+check("⑪自动放蛋-蛋落到 4108: done 且不再发协议",
+	getattr(ra, "_egg_autoplace")["done"] is True and len(ra.sent) == 1)
+
+# 蛋一开始就在 4108 → 不发, 直接 done
+rb = StubRobot(bag={101316: [7002, 1, 4108]})
+rb.m_hatch = None
+mount_egg.tick(rb, NOW)
+check("⑪自动放蛋-蛋已在 4108: 不发协议, 直接 done",
+	not rb.sent and getattr(rb, "_egg_autoplace")["done"] is True)
+
+# 战斗中 → 跳过(等下一轮)
+rc = StubRobot(bag={101316: [7003, 1, 8200]})
+rc.m_hatch = None
+rc.m_fight_state = True
+mount_egg.tick(rc, NOW)
+mount_egg.tick(rc, NOW + 10000)
+check("⑪自动放蛋-战斗中: 不发协议", not rc.sent)
+
+# 未登录 → 跳过
+rd = StubRobot(bag={101316: [7004, 1, 8200]})
+rd.m_hatch = None
+rd.m_logined = False
+mount_egg.tick(rd, NOW)
+check("⑪自动放蛋-未登录: 不发协议", not rd.sent)
+
+# 尝试封顶 → 不再发
+re2 = StubRobot(bag={101316: [7005, 1, 8200]})
+re2.m_hatch = None
+re2._egg_autoplace = {"done": False, "tries": mount_egg.AUTOPLACE_MAX_TRIES, "last_ms": 0}
+mount_egg.tick(re2, NOW)
+check("⑪自动放蛋-尝试封顶(%d 次): 不再发协议" % mount_egg.AUTOPLACE_MAX_TRIES, not re2.sent)
+
+# 节流: 距上次检查不足间隔 → 不检查不发
+rf = StubRobot(bag={101316: [7006, 1, 8200]})
+rf.m_hatch = None
+rf._egg_autoplace = {"done": False, "tries": 0, "last_ms": NOW - 1000}
+mount_egg.tick(rf, NOW)
+check("⑪自动放蛋-节流(%dms 间隔): 不重复检查" % mount_egg.AUTOPLACE_CHECK_MS, not rf.sent)
+
+# 有活跃会话 → 不走自动放蛋分支(交回会话逻辑, 不重复干预)
+rg = StubRobot(bag={101316: [7007, 1, 8200]})
+rg.m_hatch = new_hatch(active=True, now=NOW)
+rg.m_hatch.place_state = "wait_pos"
+rg.m_hatch.place_deadline_ms = NOW + mount_egg.PLACE_TIMEOUT_MS
+mount_egg.tick(rg, NOW)
+check("⑪自动放蛋-有活跃会话: 不走自动放蛋(不创建标记)", getattr(rg, "_egg_autoplace", None) is None)
+
+# 位置未知(老快照无 pos) → 不发协议, 只打一次诊断(可观测)
+rh = StubRobot(bag={101316: [7008, 1]})
+rh.m_hatch = None
+mount_egg.tick(rh, NOW)
+mount_egg.tick(rh, NOW + 10000)
+check("⑪自动放蛋-位置未知: 不发协议, 只打一次诊断",
+	not rh.sent and getattr(rh, "_egg_autoplace").get("warned_other") is True)
+
 print()
 print("脚本目录: %s" % SCRIPT_DIR)
 print("=== 结果: %s (共 %d 项断言, 失败 %d 项) ===" % (
