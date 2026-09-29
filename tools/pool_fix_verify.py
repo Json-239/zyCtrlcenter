@@ -148,6 +148,14 @@ def scan_bot_log(path, windows):
             hits = [k for k, pat in BOT_PATTERNS.items() if pat in line]
             if not hits:
                 continue
+            # TASK_STUCK 分列（2026-09-29 pool-fix-bot 口径）：`type=robot_state` 快照行携带的
+            # 是 error-TTL（≈180s）内的**残留文本**，不是新错误；止血判定只看事件行
+            # （type=log/error，msg 含"任务出错"）。避免把 TTL 尾巴读成"还在卡"。
+            if "task_stuck" in hits:
+                if '"type":"robot_state"' in line:
+                    hits.append("task_stuck_snapshot")
+                else:
+                    hits.append("task_stuck_event")
             for k in hits:
                 day[k] = day.get(k, 0) + 1
             if not windows:
