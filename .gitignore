@@ -33,3 +33,10 @@ nul
 
 # 编辑器/构建备份残留
 *~
+
+# 2026-09-29 追加：exe 历史备份/一次性温启动脚本/编译缓存/临时扫描区
+zyctrlcenter.exe.old_*
+_restart_warm_*.bat
+__pycache__/
+tools/_tmp_scan/
+test/_tmp_scan/
