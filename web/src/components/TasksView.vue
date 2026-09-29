@@ -154,6 +154,27 @@ function qFinished(q) {
   if (s === 'done' || s === 'finished' || s === 'completed') return true
   return (q.limit || 0) > 0 && (q.done || 0) >= q.limit
 }
+// 归一化到两路日常的 canonical kind（keyCN 同款兼容：旧版/心跳原样透传的 share_key，
+// 如 share_daily_大唐神捕 / share_daily_宫廷10）；非烽火/神捕返回 ""。
+function qKindDaily(q) {
+  const k = String(qKey(q) || '')
+  if (k === 'fenghuo' || k === 'shenbu') return k
+  if (k.includes('烽火') || k.includes('宫廷')) return 'fenghuo'
+  if (k.includes('神捕')) return 'shenbu'
+  return ''
+}
+// 今日已完成汇总（对账用：用户反馈"一天没有一个号完成烽火/神捕"，此前面板只能逐行看）：
+// 按**号**去重计烽火/神捕的完成数；完成判据与行内 ✓ 完全一致（qFinished——含"到限但仍 running"）。
+const ovDone = computed(() => {
+  const sets = { fenghuo: new Set(), shenbu: new Set() }
+  for (const r of overviewRows.value) {
+    for (const q of (r.queue || [])) {
+      const k = qKindDaily(q)
+      if (k && qFinished(q)) sets[k].add(r.account)
+    }
+  }
+  return { fenghuo: sets.fenghuo.size, shenbu: sets.shenbu.size }
+})
 // 队列单项文案：完成 → "抓鬼 50/50 ✓"；进行中/未开始/已跳过 → 附状态；未识别状态原样
 function qText(q) {
   const base = `${keyCN(qKey(q))} ${q.done || 0}/${q.limit || 0}`
@@ -421,6 +442,10 @@ async function cancelRegHost(acc) {
       <h3 style="margin: 0">日常轮转总览</h3>
       <span class="muted">每号的今日日常队列与进度：跑满一条自动转下一条，全满转游荡；「顺序」= 中控给的起点顺序（固定 / 随机）</span>
       <span class="spacer" />
+      <el-tag v-if="ovReady" size="small" type="success" effect="plain"
+              title="按号去重统计；完成判据与行内 ✓ 一致（done=limit 或 state=done，含『到限但仍 running』）">
+        今日已完成：烽火 {{ ovDone.fenghuo }} 号 / 神捕 {{ ovDone.shenbu }} 号
+      </el-tag>
       <el-tag size="small" :type="ovReady ? 'success' : 'info'" effect="plain">
         {{ ovReady ? `${overviewRows.length} 个号` : '待接入' }}
       </el-tag>
