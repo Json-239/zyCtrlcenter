@@ -242,10 +242,22 @@ func (a *API) shareDailyBalanceGateOf(kind autotask.Kind) int {
 	return 0
 }
 
-// shareDailyMoneyShort 余额不足（余额未知=不拦；闸值 0=不启用）。
+// shareDailyMoneyShort 资金不足（资金未知=不拦；闸值 0=不启用）。
+//
+// 口径（2026-09-29 神捕闸门修复⑤）：**以储备金为准，缺失时回退银两** ——
+// 采购/日常消耗的资金源是储备金（r.Reserve，服务端 9617）；旧实现只看银两（r.Money），
+// 现场在线 230 里 227 个 0<money<1000 被闸挡死（而它们的储备金往往几十万级），
+// 神捕候选源被压空。储备金为 0（未同步/真穷）时回退银两语义，保持"未知不拦"。
 // gate 由调用方给出：无锁场景用 a.shareDailyBalanceGateOf(kind)，持锁候选用 cfg.BalanceGate。
 func (a *API) shareDailyMoneyShort(r state.Robot, gate int) bool {
-	return gate > 0 && r.Money > 0 && r.Money < int64(gate)
+	if gate <= 0 {
+		return false
+	}
+	fund := r.Reserve
+	if fund == 0 {
+		fund = r.Money // 储备金未同步（0）→ 回退银两口径
+	}
+	return fund > 0 && fund < int64(gate)
 }
 
 // shareDailyFullTodayOf 该号今日该玩法是否已满/不可用：
