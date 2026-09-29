@@ -273,3 +273,41 @@ func TestDispatchRoamSkipsTeamAccounts(t *testing.T) {
 		t.Fatalf("只该派非队号 %s，实际 %v", free, accs)
 	}
 }
+
+// test-only（复核 P2-5 补测）：队员误调 /api/team/dispatch 必须被显式拒绝 ——
+// 该号是队员（非队长），就绪校验不通过（台账/心跳都不是 captain）→ 拒绝且零命令。
+func TestTeamDispatchRejectsMemberCaller(t *testing.T) {
+	env := newTestEnv(t, "")
+	testsupport.InstallGhostNav(t, env.cfg.ChainDir)
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	_, m1 := readyTeam(t, env)
+
+	_, body := postJSON(t, env.srv.URL+"/api/team/dispatch", map[string]any{"captain": m1}, nil)
+	if body["ok"] != false {
+		t.Fatalf("队员不能作为队长接收派发（应拒绝），实际 %v", body)
+	}
+	if cmd := rb.TryReadCmd(300 * time.Millisecond); cmd != nil {
+		t.Fatalf("队员误调不该下发任何命令，实际 %v", cmd)
+	}
+}
+
+// test-only（复核 P2-5 补测）：dispatch 的 daily_limit 自定义值必须原样透传
+// （不传/≤0 才回落默认；见 ghostStartCmdOf）。
+func TestTeamDispatchCustomDailyLimit(t *testing.T) {
+	env := newTestEnv(t, "")
+	testsupport.InstallGhostNav(t, env.cfg.ChainDir)
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	cap, _ := readyTeam(t, env)
+
+	_, body := postJSON(t, env.srv.URL+"/api/team/dispatch",
+		map[string]any{"captain": cap, "daily_limit": 30}, nil)
+	if body["ok"] != true || body["daily_limit"] != float64(30) {
+		t.Fatalf("应透传 daily_limit=30，实际 %v", body)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["daily_limit"] != float64(30) {
+		t.Fatalf("命令里的 daily_limit 应为 30（非默认值），实际 %v", cmd["daily_limit"])
+	}
+}
