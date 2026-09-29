@@ -17,9 +17,10 @@
   roampool.go:55 → 号在服务端还有额度时提前"满额"停抓鬼转游荡（现场 196/408 号、317 次）。
 
 本脚本（三段）：
-  A 静态：源码断言（守卫存在 / 只有一处累加 / 常量正确 / 注释证据链完整）；
+  A 静态：源码断言（守卫存在 / 只有一处累加 / 常量正确 / 注释证据链完整 / P1 队员守卫位次）；
   B 动态：真执行 on_finish_task（mock 依赖）—— 打鬼+1、交付+0、一轮=+1、满额只在打鬼触发、
-          跨夜仍归零；并把守卫改回旧实现做**变异测试**（旧码必须被本脚本抓住）；
+          跨夜仍归零、队员计数保留但拦自主收工（P1）；并把守卫改回旧实现做**变异测试**
+          （旧码必须被本脚本抓住）；
   C 回放：用**真实生产日志**(data/bot_logs/*/runs_20260923.log) 重放
           (ts, 20195xx FINISH) + 登录校准读数，断言
             C1 两次校准之间 新码本地增量 == 服务端增量（旧码必然多计 = 本区间轮数）
@@ -80,6 +81,9 @@ check("A5 is_ghost_task 覆盖含交付任务的 2019501~2019513",
                 r"GHOST_TASK_MIN <= int\(ti\) <= GHOST_TASK_MAX$", dh) is not None)
 check("A6 满额出口仍在（计满 → __emit_ghost_done）",
       "if g.done_count >= g.daily_limit:" in dh and "__emit_ghost_done(robot_object, g," in dh)
+check("A7 P1 队员守卫在满额出口之前（计数保留 + 拦自主收工）",
+      re.search(r"(?ms)if __member_standby\(g\):.*?return True\n\tif g\.done_count >= "
+                r"g\.daily_limit:", dh) is not None)
 
 # ================================================================ B 动态（真执行）
 m = re.search(r"(?ms)^def on_finish_task\(.*?(?=^\S)", dh)
@@ -108,8 +112,13 @@ def build(src):
     def _set_state(g, s, *a):
         g.state = s
 
+    def _member_standby(g):
+        # P1(2026-09-29 复核补丁): 与生产 daily_ghost.__member_standby 同口径
+        return str(getattr(g, "role", "solo")) == "member"
+
     ns.update({
         "is_ghost_task": _is_ghost_task,
+        "__member_standby": _member_standby,
         "__today_key": lambda: TODAY,
         "__log": lambda ro, lv, msg: logs.append(msg),
         "__emit": lambda ro, ev: emits.append(ev),
@@ -199,6 +208,17 @@ if SRC:
     lfn(ro, [SUBMIT])
     check("B7 变异测试: 旧实现一轮 → +2（自检能抓住 2× 回归）", g.done_count == 12,
           "done=%s" % g.done_count)
+
+    # B8 P1 守卫（2026-09-29 独立复核补丁）: 队员(role=member) FINISH → 计数保留 +1,
+    #    但拦自主收工（不发 DONE/转游荡/切 READY —— 整队收工由中控统一）
+    _n_done0 = len(dones)   # dones 跨用例共享（B4 已累积），用增量判定
+    g, ro = mk_env(done=49)
+    g.role = "member"
+    ro.m_quest.tasks[2019508] = [2019508, 0, 0, 0]
+    fn(ro, [2019508])
+    check("B8 队员(role=member) 打鬼 FINISH: done 保留 +1(49→50), 不触发 DONE/游荡",
+          g.done_count == 50 and len(dones) == _n_done0 and g.state != "DONE",
+          "done=%s state=%s 新增 dones=%s" % (g.done_count, g.state, dones[_n_done0:]))
 
 # ================================================================ C 回放（真实生产日志）
 def load_log(path):
