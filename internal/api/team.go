@@ -398,6 +398,14 @@ func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 			if ts := rb.TeamTokenUseTS(); ts > 0 {
 				item["token_use_ts"] = ts // 助战令最近使用（机器人本地 ms；1 令=60min 口径，计划 §3.4/D14）
 			}
+			// 助战令链结果 / 队员态：来自事件（阶段 2 机器人端未加心跳 token 字段，
+			// 见 team-feature-plan 定稿 #6 → 观测以事件为准）。
+			if rec := a.Events.TeamTokenLast(acc); rec != nil {
+				item["token_last"] = rec // {ok,reason,count,reserve,use_ts,use_count,at}；ok:false = D13 判据
+			}
+			if rec := a.Events.TeamMemberStateLast(acc); rec != nil {
+				item["member_state"] = rec // {role,parted,setup_done,at}
+			}
 			robots[acc] = item
 		} else {
 			robots[acc] = map[string]any{"online": false, "msg": "无状态记录"}

@@ -268,6 +268,11 @@ func (a *API) roampoolRobots() []state.Robot {
 		if key != "" && r.Zone != "" && r.Zone != key {
 			continue
 		}
+		// 2026-09-29 阶段 2（组队）：队内号不进游荡池视野 —— 不参与游荡挑选/回收/补位，
+		// 也不计入"空闲余量"（它们不是余量号；阶段 3 升级为全量编排避让）。
+		if role, _ := a.teamRoleOf(r.Account); role != "" {
+			continue
+		}
 		out = append(out, r)
 	}
 	return out

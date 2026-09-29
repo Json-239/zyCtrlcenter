@@ -163,6 +163,12 @@ func TestTeamStatusRobotsTeamFields(t *testing.T) {
 	feedRobot(t, env, m1, map[string]any{"team": map[string]any{
 		"role": "member", "captain": cap, "members": []any{cap, m1},
 		"parted": true, "setup_done": true}})
+	// 助战令链结果 / 队员态：来自事件（机器人端定稿未加心跳 token 字段）
+	env.ev.HandleEvent(map[string]any{"type": "team_token", "account": cap,
+		"ok": true, "reason": "READY", "count": 9, "reserve": 330000,
+		"use_ts": 1790000000000, "use_count": 1})
+	env.ev.HandleEvent(map[string]any{"type": "team_member_state", "account": m1,
+		"role": "member", "parted": false, "setup_done": true})
 
 	body := getJSON(t, env.srv.URL+"/api/team/status")
 	robots, _ := body["robots"].(map[string]any)
@@ -174,9 +180,53 @@ func TestTeamStatusRobotsTeamFields(t *testing.T) {
 	if capR["token_use_ts"] != float64(1790000000000) {
 		t.Fatalf("应透传助战令 token_use_ts: %v", capR["token_use_ts"])
 	}
+	tk, _ := capR["token_last"].(map[string]any)
+	if tk["ok"] != true || tk["reason"] != "READY" || tk["count"] != float64(9) {
+		t.Fatalf("应带事件来源的助战令状态 token_last: %v", capR["token_last"])
+	}
 	m1R, _ := robots[m1].(map[string]any)
 	tm2, _ := m1R["team"].(map[string]any)
 	if tm2["role"] != "member" || m1R["parted"] != true || m1R["ledger_role"] != "member" {
 		t.Fatalf("队员行应带 member/parted=true/ledger_role=member: %v", m1R)
+	}
+	ms, _ := m1R["member_state"].(map[string]any)
+	if ms["parted"] != false || ms["setup_done"] != true {
+		t.Fatalf("应带事件来源的队员态 member_state: %v", m1R["member_state"])
+	}
+}
+
+// 游荡派发避让（DispatchRoamEx 是"面板下发 + 游荡池 keeper"共用的唯一出口）：
+// 队内号一律不发 random_walk，失败原因可见（不静默）。
+func TestDispatchRoamSkipsTeamAccounts(t *testing.T) {
+	env := newTestEnv(t, "")
+	installWalkChain(t, env)
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+	_, m1 := readyTeam(t, env)
+
+	_, body := postJSON(t, env.srv.URL+"/api/random_walk", map[string]any{
+		"accounts": []string{m1}, "mapid": 6}, nil)
+	if body["ok"] != false || body["sent"] != float64(0) {
+		t.Fatalf("队内号不该被派游荡，实际 %v", body)
+	}
+	if !strings.Contains(toStrAny(body["msg"]), "队内号") {
+		t.Fatalf("失败原因应说明队内号避让，实际 %v", body["msg"])
+	}
+	if cmd := rb.TryReadCmd(300 * time.Millisecond); cmd != nil {
+		t.Fatalf("不该下发 random_walk，实际 %v", cmd)
+	}
+
+	// 混批：非队号照常派游荡（只发非队号）
+	free := "tfree3@xy3.com"
+	feedRobot(t, env, free, nil)
+	_, body = postJSON(t, env.srv.URL+"/api/random_walk", map[string]any{
+		"accounts": []string{m1, free}, "mapid": 6}, nil)
+	if body["ok"] != true || body["sent"] != float64(1) {
+		t.Fatalf("混批应只派非队号（sent=1），实际 %v", body)
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	accs := asSlice(cmd["accounts"])
+	if len(accs) != 1 || accs[0] != free {
+		t.Fatalf("只该派非队号 %s，实际 %v", free, accs)
 	}
 }

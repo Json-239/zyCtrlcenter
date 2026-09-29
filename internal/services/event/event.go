@@ -52,11 +52,16 @@ type Handler struct {
 	posBatch       map[string]map[string]any
 	posFlusherOnce sync.Once
 
-	// ---------------- 组队台账（2026-09-29 阶段 1，抓鬼试点；内存态） ----------------
-	// teamMu 保护 teams / teamJobs（HTTP 线程与事件循环线程并发读写）。
+	// ---------------- 组队台账（2026-09-29 阶段 1/2，抓鬼试点；内存态） ----------------
+	// teamMu 保护 teams / teamJobs / teamTokenLast / teamMemberState（HTTP 线程与事件循环线程并发读写）。
 	teamMu   sync.Mutex
 	teams    map[string]*TeamInfo // 队长账号 → 已就绪队伍（team_ready 后）
 	teamJobs map[string]*TeamInfo // 队长账号 → 已下发未就绪的组队任务（state=pending）
+	// teamTokenLast 账号 → 最近一条 team_token 事件（助战令链结果；阶段 2 机器人端事件源，
+	// 心跳未带 token 字段——见 team-feature-plan 定稿 #6）。观测接口读，D13 编排阶段用。
+	teamTokenLast map[string]map[string]any
+	// teamMemberState 账号 → 最近一条 team_member_state（role/parted/setup_done 变化）。
+	teamMemberState map[string]map[string]any
 }
 
 // New 创建事件处理器；Broadcast 由 API 层稍后注入。
@@ -76,15 +81,17 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 		dec.FenghuoKey = cfg.FenghuoKey
 	}
 	return &Handler{
-		Cfg:      cfg,
-		St:       st,
-		Store:    runStore,
-		Ctrl:     c,
-		Log:      log,
-		Intents:  intent.NewPlan(dec),
-		posBatch: map[string]map[string]any{},
-		teams:    map[string]*TeamInfo{},
-		teamJobs: map[string]*TeamInfo{},
+		Cfg:             cfg,
+		St:              st,
+		Store:           runStore,
+		Ctrl:            c,
+		Log:             log,
+		Intents:         intent.NewPlan(dec),
+		posBatch:        map[string]map[string]any{},
+		teams:           map[string]*TeamInfo{},
+		teamJobs:        map[string]*TeamInfo{},
+		teamTokenLast:   map[string]map[string]any{},
+		teamMemberState: map[string]map[string]any{},
 	}
 }
 
@@ -396,11 +403,14 @@ func (h *Handler) handlers() map[string]func(map[string]any) {
 		"ghost_offline":      h.onGhostOffline,
 		"log":                h.onLog,
 		// 组队（2026-09-29 阶段 1：协议打通 —— 只记台账/日志，不参与编排）
-		"team_ready":      h.onTeamReady,
-		"team_disbanded":  h.onTeamDisbanded,
-		"team_rejoined":   h.onTeamRejoined,
-		"team_return_nav": h.onTeamReturnNav,
-		"team_promote":    h.onTeamPromote,
+		"team_ready":        h.onTeamReady,
+		"team_disbanded":    h.onTeamDisbanded,
+		"team_rejoined":     h.onTeamRejoined,
+		"team_return_nav":   h.onTeamReturnNav,
+		"team_promoted":     h.onTeamPromote,     // 机器人端定稿事件名（S2C_TEAM_PROMOTE 90393）
+		"team_promote":      h.onTeamPromote,     // 兼容早期命名（计划文档/手工路径）
+		"team_token":        h.onTeamToken,       // 助战令链结果（阶段 2 机器人端新增）
+		"team_member_state": h.onTeamMemberState, // 队员态（暂离/归队/就绪）
 	}
 }
 
@@ -1247,15 +1257,19 @@ func (h *Handler) onTeamReturnNav(ev map[string]any) {
 // 台账迁移：新队长（rid→账号反查，优先事件自带账号）由队员升为队长，旧队长转队员；
 // 找不到队（手工路径/台账缺失）→ 仅记日志，等下一次 team_ready 重建。
 func (h *Handler) onTeamPromote(ev map[string]any) {
+	// 字段兼容（机器人端定稿 = new_captain:<rid>；早期提案 new_captain_role_id；手工可直带账号）
 	newCap := str(ev, "new_captain_account")
 	if newCap == "" {
 		newCap = h.accountByRoleID(toInt(ev["new_captain_role_id"]))
 	}
 	if newCap == "" {
+		newCap = h.accountByRoleID(toInt(ev["new_captain"]))
+	}
+	if newCap == "" {
 		h.Store.LogEvent(map[string]any{"type": "log", "level": "warn", "account": str(ev, "account"),
 			"zone": zoneOf(ev), "msg": fmt.Sprintf(
-				"[组队] 队长转移事件：新队长无法映射账号（role_id=%v，等心跳）→ 台账未动",
-				ev["new_captain_role_id"])})
+				"[组队] 队长转移事件：新队长无法映射账号（new_captain=%v，等心跳）→ 台账未动",
+				ev["new_captain"])})
 		return
 	}
 	old := h.TeamPromote(newCap)
@@ -1279,6 +1293,95 @@ func (h *Handler) accountByRoleID(rid int) string {
 		}
 	}
 	return ""
+}
+
+// onTeamToken 助战令链结果（阶段 2 机器人端事件，team-feature-plan 定稿）：
+// {"type":"team_token","account":<队长>,"ok":true|false,"reason":"READY|NO_TOKEN|NO_MONEY|BUY_FAIL",
+// "count":N,"reserve":M,"use_ts":ms,"use_count":N}（失败 60s 节流）。
+//
+// ok:true = 队长已"有令且已使用"（免费到手也算）→ 可以接任务；ok:false = D13 判据（阶段 3
+// 编排：先 team_promote 换队长，不可行再 disband）。本阶段只入台账/日志 + 供 /api/team/status 观测。
+func (h *Handler) onTeamToken(ev map[string]any) {
+	account := str(ev, "account")
+	h.Store.LogEvent(ev)
+	if account == "" {
+		return
+	}
+	rec := map[string]any{
+		"ok": toBool(ev["ok"]), "reason": str(ev, "reason"),
+		"count": toInt(ev["count"]), "reserve": toInt(ev["reserve"]),
+		"use_ts": toInt(ev["use_ts"]), "use_count": toInt(ev["use_count"]),
+		"at": time.Now().Unix(),
+	}
+	h.teamMu.Lock()
+	if h.teamTokenLast == nil {
+		h.teamTokenLast = map[string]map[string]any{}
+	}
+	h.teamTokenLast[account] = rec
+	h.teamMu.Unlock()
+	level, msg := "info", "[组队] 助战令就绪："+account+"（可接任务）"
+	if !toBool(ev["ok"]) {
+		level = "warn"
+		msg = fmt.Sprintf("[组队] 助战令不可用：%s（reason=%s，包内 %d，储备金 %d）→ 阶段 3 按 D13 处理（转队长/解散）",
+			account, str(ev, "reason"), toInt(ev["count"]), toInt(ev["reserve"]))
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": level, "account": account,
+		"zone": zoneOf(ev), "msg": msg})
+}
+
+// onTeamMemberState 队员态变化（暂离/归队/就绪；team-feature-plan 定稿）：
+// {"type":"team_member_state","account":<队员>,"role":..,"parted":true|false,"setup_done":..}
+// 本阶段：入台账（观测）+ 日志；编排联动（暂离告警/召唤）留阶段 3。
+func (h *Handler) onTeamMemberState(ev map[string]any) {
+	account := str(ev, "account")
+	h.Store.LogEvent(ev)
+	if account == "" {
+		return
+	}
+	rec := map[string]any{
+		"role": str(ev, "role"), "parted": toBool(ev["parted"]),
+		"setup_done": toBool(ev["setup_done"]), "at": time.Now().Unix(),
+	}
+	h.teamMu.Lock()
+	if h.teamMemberState == nil {
+		h.teamMemberState = map[string]map[string]any{}
+	}
+	h.teamMemberState[account] = rec
+	h.teamMu.Unlock()
+	stateTxt := "活跃"
+	if toBool(ev["parted"]) {
+		stateTxt = "暂离"
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": account,
+		"zone": zoneOf(ev), "msg": "[组队] 队员态：" + account + " " + stateTxt + "（" + str(ev, "role") + "）"})
+}
+
+// TeamTokenLast 最近一条 team_token（助战令链结果；无 → nil）。HTTP 只读用。
+func (h *Handler) TeamTokenLast(account string) map[string]any {
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	if rec, ok := h.teamTokenLast[account]; ok {
+		out := make(map[string]any, len(rec))
+		for k, v := range rec {
+			out[k] = v
+		}
+		return out
+	}
+	return nil
+}
+
+// TeamMemberStateLast 最近一条 team_member_state（队员态；无 → nil）。HTTP 只读用。
+func (h *Handler) TeamMemberStateLast(account string) map[string]any {
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	if rec, ok := h.teamMemberState[account]; ok {
+		out := make(map[string]any, len(rec))
+		for k, v := range rec {
+			out[k] = v
+		}
+		return out
+	}
+	return nil
 }
 
 func (h *Handler) onGhostDone(ev map[string]any) {

@@ -233,6 +233,14 @@ func (a *API) DispatchRoamEx(req RoamReq) RoamResult {
 	}
 
 	online, failed := a.onlineAccounts(accounts)
+	// 2026-09-29 阶段 2（组队）：队内号不发游荡（队长/队员待命不被游荡带走，避免拆队；
+	// 阶段 3 升级为候选/水位/回收的全量编排避让）。
+	if keep, skipped := a.dropTeamAccounts(online, "游荡"); len(skipped) > 0 {
+		for _, acc := range skipped {
+			failed = append(failed, map[string]any{"account": acc, "msg": "队内号（组队编排接管；不派游荡）"})
+		}
+		online = keep
+	}
 	res.Failed = failed
 	if len(online) == 0 {
 		res.Msg = "没有可下发的号：" + failedText(failed)

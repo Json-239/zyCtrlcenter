@@ -20,7 +20,7 @@ func TestTeamPromoteMigratesLedger(t *testing.T) {
 	h.TeamMarkReady(cap0, []int{})
 
 	// ① 事件带新队长账号（推荐路径）：m1 升队长，旧队长 cap0 转队员，m2 保留
-	h.HandleEvent(map[string]any{"type": "team_promote", "account": m1,
+	h.HandleEvent(map[string]any{"type": "team_promoted", "account": m1,
 		"new_captain_account": m1, "new_team_name": m1 + "的队伍"})
 	teams, jobs := h.TeamLedger()
 	if len(jobs) != 0 || len(teams) != 1 || teams[0].Captain != m1 {
@@ -48,9 +48,9 @@ func TestTeamPromoteMigratesLedger(t *testing.T) {
 		t.Fatal("不在队账号不该命中台账")
 	}
 
-	// ② 事件只带 role_id（无账号）→ 心跳 RoleID 反查：m2 升队长
+	// ② 事件只带 role_id（定稿字段 new_captain:<rid>）→ 心跳 RoleID 反查：m2 升队长
 	st.Update(m2, func(r *state.Robot) { r.RoleID = 777; r.Online = true })
-	h.HandleEvent(map[string]any{"type": "team_promote", "account": m2, "new_captain_role_id": 777})
+	h.HandleEvent(map[string]any{"type": "team_promoted", "account": m2, "new_captain": 777})
 	teams, _ = h.TeamLedger()
 	if len(teams) != 1 || teams[0].Captain != m2 {
 		t.Fatalf("rid 反查后队长应为 m2，实际 %+v", teams)
@@ -66,14 +66,14 @@ func TestTeamPromoteMigratesLedger(t *testing.T) {
 	}
 
 	// ③ 幂等：同一事件重放（各成员各发一条时会重复）→ 不报错、不破坏台账
-	h.HandleEvent(map[string]any{"type": "team_promote", "account": m2, "new_captain_role_id": 777})
+	h.HandleEvent(map[string]any{"type": "team_promoted", "account": m2, "new_captain": 777})
 	teams, _ = h.TeamLedger()
 	if len(teams) != 1 || teams[0].Captain != m2 {
 		t.Fatalf("重放应幂等，实际 %+v", teams)
 	}
 
 	// ④ 找不到队（手工路径）→ 仅日志，不 panic、不改动
-	h.HandleEvent(map[string]any{"type": "team_promote", "account": "lonely@x.com",
+	h.HandleEvent(map[string]any{"type": "team_promoted", "account": "lonely@x.com",
 		"new_captain_account": "lonely@x.com"})
 	teams, _ = h.TeamLedger()
 	if len(teams) != 1 || teams[0].Captain != m2 {
