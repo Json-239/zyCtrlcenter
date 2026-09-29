@@ -96,14 +96,45 @@
       ]
     },
     {
-      "item_id": 1013681,
-      "name": "20级装备大礼包",
-      "aliases": [1013682, 1013683],
+      "item_id": 1013682,
+      "name": "等级装备礼包（10/20/30/40 级）",
+      "aliases": [101367, 1013681, 1013683, 101369, 101370],
       "category": "gift_box",
       "implemented": "yes",
-      "server": {"action": "action_reward_stair", "use_on_summon": false},
+      "server": {"action": "action_reward_stair（右键打开获得对应等级装备）", "use_on_summon": false},
+      "obtain": [
+        "1013682 30级装备大礼包 ← 主线任务奖励（reward_task_trunk.xml:2116）+ 运营活动（reward_activity_operations.xml:1478）",
+        "101369 30级装备礼包 ← 支线任务奖励（reward_task_branch.xml:1379）",
+        "109150 新春升级礼包 ← 春节活动（reward_activity_for_2013_springfestival.xml:7）+ 充值活动（recharge.xml）",
+        "101367 10级装备礼包 ← 当前配置表无发放途径（level_encourage.xml 注释「新手任务整改后，10级、15级礼包不需要了」）",
+        "1013681 / 1013683 / 101370 ← 当前配置表无发放途径（历史遗留，待核实）"
+      ],
+      "contents": {
+        "101367": "10级紫色衣服+武器各1（各带2个宝石孔）",
+        "1013681": "20级蓝色武器/帽子/衣服/鞋子/项链各1",
+        "1013682": "30级紫色武器/帽子/衣服/鞋子/项链各1",
+        "1013683": "40级蓝色武器/帽子/衣服/鞋子/项链各1",
+        "101369": "30级蓝色帽子/衣服/武器各1（各带2个3级红孔）",
+        "101370": "40级蓝色帽子/衣服/鞋子各1（各带2个3级红孔）"
+      },
       "sites": [
-        {"module": "bag_ops", "function": "auto_open_gifts", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login(登录后首次背包快照，bag_opened 一次性)", "trigger": "物品名含 GIFT_KEYWORDS(宝箱/宝盒/礼包/礼盒/钱袋/锦囊/宝囊/福袋, bag_ops.py:245) 或 index∈KNOWN_GIFT_INDEXES(1013681/1013682/1013683/101368, bag_ops.py:251)", "cooldown": "一次性", "config": ["GIFT_KEYWORDS/KNOWN_GIFT_INDEXES(硬编码常量)"], "deduction": "本地扣减+pop bag", "note": "挂载点 msghandle.py:355；101368 已不在服务端 item.xml（见 findings F5）"}
+        {"module": "bag_ops", "function": "auto_open_gifts", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login(登录后首次背包快照，bag_opened 一次性)", "trigger": "物品名含 GIFT_KEYWORDS(宝箱/宝盒/礼包/礼盒/钱袋/锦囊/宝囊/福袋, bag_ops.py:245) → 本体系 6 个名字全部命中『礼包』；或 index∈KNOWN_GIFT_INDEXES(1013681/1013682/1013683/101368, bag_ops.py:251)", "cooldown": "一次性", "config": ["GIFT_KEYWORDS/KNOWN_GIFT_INDEXES(硬编码常量)"], "deduction": "本地扣减+pop bag", "note": "挂载点 msghandle.py:355；101368 已不在服务端 item.xml（见 findings F5）"},
+        {"module": "daily_ghost", "function": "__tidy_bag(可消耗品兜底分支)", "file": "daily_ghost.py", "line": 3261, "protocol": "C2S_USE_ITEM", "scene": "tidy(抓鬼买令前 / 福利后)", "trigger": "『非装备非任务』且不在跳过名单 → 视为可消耗品使用（礼包不在跳过名单，会在此开箱）——**任务中获得的礼包当次会话不会被 auto_open 开，靠此兜底或下次登录**", "cooldown": "随 tidy 触发节拍", "config": [], "deduction": "不扣（依赖下次快照）", "note": "等级奖励（encourage_level 20/25/30/35/40/45/50 档，encourage_claim 已实现『领取』）的奖励物是储备金箱/服务卡/丹/坐骑蛋等，不含等级礼包——见 findings F10"}
+      ]
+    },
+    {
+      "item_id": 109079,
+      "name": "活动升级礼包（黄金冲刺月75级大礼包 / 新春升级礼包）",
+      "aliases": [109150],
+      "category": "gift_box",
+      "implemented": "yes",
+      "server": {"action": "action_reward_stair(109079 另有 action_item_dialog)", "use_on_summon": false},
+      "obtain": [
+        "109150 新春升级礼包 ← 春节活动（reward_activity_for_2013_springfestival.xml:7）+ 充值活动（recharge.xml）——历史活动礼包（当前可能不再发放）",
+        "109079 黄金冲刺月75级大礼包 ← 黄金冲刺月活动（奖励表未直接命中，活动期发放）——历史活动礼包"
+      ],
+      "sites": [
+        {"module": "bag_ops", "function": "auto_open_gifts", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login", "trigger": "物品名含『礼包』关键词命中", "cooldown": "一次性", "config": ["GIFT_KEYWORDS"], "deduction": "本地扣减+pop bag", "note": "与等级装备礼包同一开箱链路"}
       ]
     },
     {
@@ -221,7 +252,7 @@
     {"item_id": 152124, "name": "守护技能书（狂奔 152124/忠心 152125/急救 152127）", "expected": "C2S_SUMMON_LEARN_SKILL(80034)", "status": "no", "evidence": "协议别名存在（protocol2/c2s_key.py:37）无调用点；服务端 item_class=守护技能书（item.xml 152124）"},
     {"item_id": 101009, "name": "宠物口粮", "expected": "action_add_pet_stamina（需 target_pet_index，宠物面板操作）", "status": "partial(无效使用)", "evidence": "use_on_summon 缺失 → is_summon_only_item 返回 False → __tidy_bag 每轮当可消耗品发 C2S_USE_ITEM(3070-3073)；服务端 no-op 不消耗（AddPetStaminaAction 无宠物目标不执行）→ 反复空发。现场 diag 常见于 bag_keys（如 robot0001196）"},
     {"item_id": 110170, "name": "收妖葫", "expected": "C2S_OPEN_CALABASH(80292)", "status": "no", "evidence": "机器人端无调用点（09-21 §2.0 表）；item.xml:110170 item_handler=任务物品 step1=action_show_layout"},
-    {"item_id": 0, "name": "媒体卡/大圣卡", "expected": "C2S_USE_GIFT_CARD(80140)/C2S_USE_SUPER_CARD(80390)", "status": "no", "evidence": "协议表有（protocol2/c2s_list.py:412/415）无调用点"},
+    {"item_id": 0, "name": "媒体卡/大圣卡（含 gift.csv 卡密礼包体系：百度新手冲级礼包29 / 天命内测50·65·75级礼包98-100，施明德 NPC 13443 兑换 CBT50A/CBT65A/CBT75A）", "expected": "C2S_USE_GIFT_CARD(80140)/C2S_USE_SUPER_CARD(80390)", "status": "no", "evidence": "协议表有（protocol2/c2s_list.py:412/415）无调用点；礼包定义 config/gift.csv:33/102-104；NPC 兑换 config/npc/shimingde.xml"},
     {"item_id": 0, "name": "战斗中吃药", "expected": "C2S_FIGHTCMD(80092) 指令号 5 = FIGHTER_CMD_USEITEM", "status": "no", "evidence": "fight_tester 只发攻击指令（09-21 §2.1）；本次复查未见新实现"},
     {"item_id": 0, "name": "卖出（商会/NPC 回收）", "expected": "C2S_SELL_MALL_ITEM(80180)/C2S_NPC_RECOVER(80177)", "status": "no", "evidence": "全脚本无调用点（protocol3.py:96-99 仅别名注册）；仅摆摊上架 C2S_UP_SELLER_ITEM 已用于 booth"},
     {"item_id": 0, "name": "分享日常 use_item 列", "expected": "share_daily.py 配置解析 get_use_item（第 5 列 use_item）", "status": "partial", "evidence": "解析器与 getter 已就绪（share_daily.py:237/336/518），但 share_daily_cfg.csv 全行 use_item 列为空且全脚本无 get_use_item 调用点（grep 仅定义）→ 配置有了、行为未接线"},
@@ -237,6 +268,7 @@
     {"id": "F6", "severity": "中", "title": "半修遗漏：宠物口粮 101009 仍被 tidy 反复空发", "detail": "09-22 修复仅覆盖 use_on_summon=yes 的守护专属道具；101009 无该参数（item.xml 无 item_param），is_summon_only_item 不拦 → __tidy_bag 每轮把它当可消耗品发 C2S_USE_ITEM；服务端 action_add_pet_stamina 需宠物目标，机器人无宠物操作能力 → 静默 no-op 不消耗、无提示、无限循环（历史同型问题：幻兽丹 1268 循环）。代码级判定成立；因日志只打实例 id，未能在 diag 直接验证（标注：需现场核实）。", "evidence": ["daily_ghost.py:3070", "daily_ghost.py:2981", "config/item/item.xml:101009（无 use_on_summon）"]},
     {"id": "F7", "severity": "中", "title": "『看似可调实际没接线』清单", "detail": "① robot_bag_cleanup_interval_sec=3（config.py:198）全仓无引用（实际冷却硬编码 _BAG_CLEAN_COOLDOWN_MS=3000, auto_summon.py:24）——09-21 发现仍在；② robot_summon_happy_threshold=90（config.py:175）全仓无引用（实际用 robot_summon_happy_ratio=0.5）——两个欢乐度阈值并存；③ 蛋名单双份：bag_ops.MOUNT_EGG_NAMES(113) 与 Go internal/api/hatch.go mountEggs(59-70)——机器人端 40 名单改两侧之一会漂移。", "evidence": ["config.py:198", "auto_summon.py:24", "config.py:175", "auto_summon.py:412", "bag_ops.py:113", "internal/api/hatch.go:59"]},
     {"id": "F8", "severity": "低", "title": "死代码/遗留", "detail": "① bag_ops.auto_equip_items(348) 无调用点（09-21 遗漏排查复现）；② item_tester.py 为遗留模块（send_use_item；robot_operator.py:65/83 调用被注释）；③ trace_with_npc_tester/shop_probe 为调试探针（含 C2S_USE_ITEM/DELITEM 调试路径），非生产链路。", "evidence": ["bag_ops.py:348", "item_tester.py:10", "robot_operator.py:65", "trace_with_npc_tester.py:88"]},
-    {"id": "F9", "severity": "低", "title": "使用时机分散在四个『会话』，无统一物品使用调度", "detail": "空闲（auto_summon.tick）、抓鬼（daily_ghost.tick）、任务链（quest_engine.tick）、分享日常（share_daily→heal_tick）各自触发；同一物品在不同会话行为不完全一致（如抓鬼疗伤附带买药链、分享日常只吃药不买药）。新增『使用物品』类需求时无统一挂点，容易再长第 5 份实现。", "evidence": ["auto_summon.py:788", "daily_ghost.py:3173", "quest_engine.py:4952", "share_daily.py:2290"]}
+    {"id": "F9", "severity": "低", "title": "使用时机分散在四个『会话』，无统一物品使用调度", "detail": "空闲（auto_summon.tick）、抓鬼（daily_ghost.tick）、任务链（quest_engine.tick）、分享日常（share_daily→heal_tick）各自触发；同一物品在不同会话行为不完全一致（如抓鬼疗伤附带买药链、分享日常只吃药不买药）。新增『使用物品』类需求时无统一挂点，容易再长第 5 份实现。", "evidence": ["auto_summon.py:788", "daily_ghost.py:3173", "quest_engine.py:4952", "share_daily.py:2290"]},
+    {"id": "F10", "severity": "低", "title": "等级礼包『开箱时机』：auto_open_gifts 仅登录首跑，任务中获得的礼包当次不开", "detail": "等级装备礼包（1013682 主线30级 / 101369 支线30级 / 1013681·1013683·101370 等）是任务奖励，在任务链途中入包；auto_open_gifts 只在『登录后首次背包快照』跑一次（bag_opened 一次性，msghandle.py:355）→ 当次会话不自动开。兜底两条：① daily_ghost.__tidy_bag 的『可消耗品』路径（抓鬼买令前/福利后触发）；② 下次登录。另：等级奖励系统（encourage_level 20/25/30/35/40/45/50 档）由 encourage_claim 实现『领取』（C2S_ACCEPT_LEVEL_ENCOURAGE=80255），其奖励物为储备金箱/服务卡/丹药/坐骑蛋等，不含等级礼包物品。", "evidence": ["bag_ops.py:264", "msghandle.py:355", "daily_ghost.py:3261", "config/encourage/level_encourage.xml", "config/reward/reward_task_trunk.xml:2116", "config/reward/reward_task_branch.xml:1379"]}
   ]
 }
