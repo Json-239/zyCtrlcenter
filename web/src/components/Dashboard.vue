@@ -381,6 +381,135 @@ async function stopBooth() {
   } finally { bsBusy.value = '' }
 }
 
+// ---------------- 组队操作（2026-09-29：抓鬼试点的前端入口）----------------
+// 后端已上线：GET /api/team/status + POST /api/team/{setup,disband,dispatch}（阶段 1/2，见 internal/api/team.go）。
+// 试点口径（用户 2026-09-29 批准）：先完成手头工作单元 → 建队集结（人齐 team_ready）→ 再开接；
+//   建队 = 清旧队 → 邀请（invite，试点推荐）/ 申请（apply）；派任务**只给队长**下发抓鬼
+//   （role=captain，队员保持待命不单独派）；解散是破坏性操作（ElMessageBox 确认惯例）。
+// 观测：/api/team/status.robots 带心跳 team 块（parted/setup_done/token_use_ts）+ 事件来源
+//   （token_last=助战令链结果 / member_state=队员态）；助战令口径 1 令 = 60min（计划 §3.4/D14）。
+const team = reactive({ loading: false, err: '', data: null, at: 0 })
+const teamForm = reactive({ captain: '', members: '', mode: 'invite' })
+const teamPick = ref([])    // 「从在线号选」的临时选择（点「加入队员」并入 members 文本）
+const teamBusy = ref('')    // '' | setup | disband:<cap> | dispatch:<cap>
+const teamLast = ref(null)  // 最近一次下发回执（{ok,msg,...}，post() 同时会 toast）
+
+// 队伍表 = 已就绪（teams）+ 集结中（jobs，setup 已下发未收 team_ready）；按队长账号排序
+const teamRows = computed(() => {
+  const d = team.data || {}
+  const rows = []
+  for (const t of d.teams || []) rows.push({ ...t, ready: true })
+  for (const j of d.jobs || []) rows.push({ ...j, ready: false })
+  return rows.sort((a, b) => String(a.captain || '').localeCompare(String(b.captain || '')))
+})
+const teamRobots = computed(() =>
+  Object.entries((team.data || {}).robots || {}).map(([account, r]) => ({ account, ...r })))
+// 建队候选（简化版：从 /api/status 在线列表挑；抓鬼中的排前面，便于"完成手头单元再建队"时挑人）
+const teamCands = computed(() => (state.status.robots || [])
+  .filter((r) => r.online)
+  .map((r) => ({ account: r.account, level: r.level, state: r.state, mapid: r.mapid,
+    ghost: !!(r.ghost && r.ghost.enabled) }))
+  .sort((a, b) => (b.ghost - a.ghost) || String(a.account).localeCompare(String(b.account))))
+
+function teamCandLabel(c) {
+  return `${c.account} · Lv${c.level ?? '--'} · ${stateLabel(c.state)}${c.ghost ? ' · 抓鬼中' : ''}`
+}
+// 队员文本解析：逗号/顿号/分号/空白/换行都算分隔；保序去重
+function parseMembers(text) {
+  const out = []
+  for (const s of String(text || '').split(/[\s,，、;；]+/)) {
+    const t = s.trim()
+    if (t && !out.includes(t)) out.push(t)
+  }
+  return out
+}
+function addPicks() {
+  const cur = parseMembers(teamForm.members)
+  for (const a of teamPick.value) if (!cur.includes(a)) cur.push(a)
+  teamForm.members = cur.join('\n')
+  teamPick.value = []
+}
+async function loadTeam() {
+  team.loading = true
+  try {
+    const res = await apiGet('/api/team/status')
+    if (res && res.ok === false) { team.data = null; team.err = res.msg || '接口返回失败' }
+    else { team.data = res || {}; team.err = ''; team.at = Date.now() / 1000 }
+  } catch (e) {
+    team.data = null
+    team.err = e.message || String(e)
+  } finally {
+    team.loading = false
+  }
+}
+// 助战令剩余（1 令 = 60min；use_ts 是机器人本地 ms）：心跳无字段时回落到事件来源 token_last
+function tokenText(acc) {
+  const r = ((team.data || {}).robots || {})[acc] || {}
+  const ts = Number(r.token_use_ts) || Number((r.token_last || {}).use_ts) || 0
+  if (!ts) return '—'
+  const leftMin = 60 - (Date.now() - ts) / 60000
+  return leftMin > 0 ? `令剩余 ~${Math.round(leftMin)} 分钟` : '令已过期'
+}
+// 账号观测的"最近事件"（助战令链结果 / 队员态；事件来源，心跳没有这些细项）
+function teamEventText(r) {
+  const parts = []
+  if (r.token_last) {
+    const t = r.token_last
+    parts.push(t.ok === false
+      ? `助战令失败：${t.reason || '未知'}（储备 ${t.reserve ?? '--'}）`
+      : `助战令已用 ${t.count ?? 1} 个（储备 ${t.reserve ?? '--'}）`)
+  }
+  if (r.member_state) {
+    const m = r.member_state
+    parts.push(`队员态 ${m.role || '--'}${m.parted ? '（暂离）' : ''}${m.setup_done ? '·已就绪' : ''}`)
+  }
+  return parts.join('；') || '—'
+}
+async function teamSetup() {
+  const captain = String(teamForm.captain || '').trim()
+  const members = parseMembers(teamForm.members).filter((m) => m !== captain)
+  if (!captain) { ElMessage.warning('请先填队长账号'); return }
+  if (!members.length) { ElMessage.warning('请填至少一名队员（逗号/换行分隔，或从在线号选）'); return }
+  teamBusy.value = 'setup'
+  try {
+    teamLast.value = await post('/api/team/setup', { captain, members, mode: teamForm.mode })
+    await loadTeam() // 台账 pending 即时显示
+  } finally { teamBusy.value = '' }
+}
+async function teamDispatch(row) {
+  const cap = row.captain
+  teamBusy.value = 'dispatch:' + cap
+  try {
+    teamLast.value = await post('/api/team/dispatch', { captain: cap })
+    await loadTeam()
+  } finally { teamBusy.value = '' }
+}
+async function teamDisband(cap) {
+  const yes = await confirmBox(
+    `解散队伍（队长 ${cap}）？\n将为队长下发 team_disband（整队解散），队员做 team_clear 兜底。`,
+    '解散队伍', '解散')
+  if (!yes) return
+  teamBusy.value = 'disband:' + cap
+  try {
+    teamLast.value = await post('/api/team/disband', { accounts: [cap] })
+    await loadTeam()
+  } finally { teamBusy.value = '' }
+}
+async function teamDisbandAll() {
+  const yes = await confirmBox(
+    '解散**全部**队伍？\n按台账逐队下发（队长 team_disband + 队员 team_clear）。',
+    '解散全部队伍', '全部解散')
+  if (!yes) return
+  teamBusy.value = 'disband:all'
+  try {
+    teamLast.value = await post('/api/team/disband', { all: true })
+    await loadTeam()
+  } finally { teamBusy.value = '' }
+}
+let tmTimer = 0
+onMounted(() => { loadTeam(); tmTimer = setInterval(loadTeam, 15000) })
+onUnmounted(() => clearInterval(tmTimer))
+
 // ---------------- 启动哪条链（下拉选，不再"点了也不知道启什么"）----------------
 // id === 'auto' = 不手选链，按账号意图自动分配（新手链/抓鬼），默认就是它
 const chains = reactive({ list: [], dir: '', err: '', id: localStorage.getItem('zy_chain_id') || 'auto' })
@@ -1040,6 +1169,134 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         · <span class="warnText">未发现机器人端计划文件（保存只改中控配置，挂摊仍用旧时长）</span>
       </template>
     </div>
+  </el-card>
+
+  <!-- 组队操作（2026-09-29）：抓鬼试点——建队集结 → 派任务（只发队长）→ 解散 -->
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">组队（抓鬼试点）</span>
+        <span class="spacer" />
+        <span v-if="team.err" class="warnText">组队接口不可用：{{ team.err }}</span>
+        <span v-else class="muted">
+          已就绪 {{ (team.data?.teams || []).length }} 队 · 集结中 {{ (team.data?.jobs || []).length }} 队
+          <template v-if="team.at"> · {{ fmtAgo(team.at) }}刷新</template>
+        </span>
+        <el-button size="small" :loading="team.loading" @click="loadTeam">刷新</el-button>
+      </div>
+    </template>
+
+    <el-table v-if="teamRows.length" :data="teamRows" size="small" row-key="captain" max-height="260">
+      <el-table-column label="队长" min-width="190" show-overflow-tooltip>
+        <template #default="{ row }"><span class="mono">{{ row.captain }}</span></template>
+      </el-table-column>
+      <el-table-column label="队员" min-width="240" show-overflow-tooltip>
+        <template #default="{ row }"><span class="mono">{{ (row.members || []).join('、') || '—' }}</span></template>
+      </el-table-column>
+      <el-table-column label="状态" width="92">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.ready ? 'success' : 'warning'" effect="plain">
+            {{ row.ready ? '已就绪' : '集结中' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="模式" width="76">
+        <template #default="{ row }">{{ row.mode === 'apply' ? '申请' : '邀请' }}</template>
+      </el-table-column>
+      <el-table-column label="助战令（队长）" width="150">
+        <template #default="{ row }"><span class="muted">{{ tokenText(row.captain) }}</span></template>
+      </el-table-column>
+      <el-table-column label="开始" width="96">
+        <template #default="{ row }"><span class="muted">{{ fmtAgo(row.since) }}</span></template>
+      </el-table-column>
+      <el-table-column label="操作" width="168">
+        <template #default="{ row }">
+          <el-button size="small" type="primary" :disabled="!row.ready || !!teamBusy"
+            :loading="teamBusy === 'dispatch:' + row.captain" @click="teamDispatch(row)">派任务</el-button>
+          <el-button size="small" type="danger" plain :disabled="!!teamBusy"
+            :loading="teamBusy === 'disband:' + row.captain" @click="teamDisband(row.captain)">解散</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <div v-else class="sub">
+      当前没有队伍。<template v-if="team.err">组队接口不可用（等中控进程就绪/升级后再试）。</template>
+      试点口径：先完成手头工作单元 → 建队集结（全员在线，收到 team_ready 后状态变「已就绪」）→ 再派任务。
+    </div>
+
+    <div class="param-row">
+      <span class="k">队长</span>
+      <el-input v-model="teamForm.captain" size="small" style="width: 220px" placeholder="robot0001009@xy3.com" />
+      <span class="k">组队方式</span>
+      <el-radio-group v-model="teamForm.mode" size="small">
+        <el-radio-button value="invite">邀请（推荐）</el-radio-button>
+        <el-radio-button value="apply">申请</el-radio-button>
+      </el-radio-group>
+    </div>
+    <div class="param-row">
+      <span class="k">队员</span>
+      <el-input v-model="teamForm.members" type="textarea" :rows="2" style="width: 430px; max-width: 100%"
+        placeholder="多个队员用逗号或换行分隔（上限 4 人 = 队长 + MAX_TEAM_MEMBERS(4)）" />
+    </div>
+    <div class="param-row">
+      <span class="k">从在线号选</span>
+      <el-select v-model="teamPick" multiple filterable collapse-tags size="small"
+        style="width: 430px; max-width: 100%" placeholder="在线号（抓鬼中的排前面）">
+        <el-option v-for="c in teamCands" :key="c.account" :value="c.account" :label="teamCandLabel(c)" />
+      </el-select>
+      <el-button size="small" :disabled="!teamPick.length" @click="addPicks">加入队员</el-button>
+      <span class="spacer" />
+      <el-button type="primary" size="small" :loading="teamBusy === 'setup'" :disabled="!!teamBusy"
+        @click="teamSetup">建队</el-button>
+      <el-button v-if="teamRows.length" type="danger" plain size="small"
+        :loading="teamBusy === 'disband:all'" :disabled="!!teamBusy" @click="teamDisbandAll">解散全部</el-button>
+    </div>
+    <div class="sub">
+      建队 = 先清旧队再邀请/申请（全员须在线且已上报 role_id）；<b>派任务只给队长</b>下发抓鬼（role=captain），
+      队员保持待命（机器人端 MEMBER），不单独派活；解散为破坏性操作（二次确认）。
+      <template v-if="teamLast">
+        <br>最近下发：<span :class="{ warnText: teamLast.ok !== true }">{{ teamLast.msg || '--' }}</span>
+      </template>
+    </div>
+
+    <el-collapse v-if="teamRobots.length" class="team-obs">
+      <el-collapse-item :title="`账号观测（${teamRobots.length}）：心跳队伍块 / 暂离 / 助战令 / 事件`">
+        <el-table :data="teamRobots" size="small" max-height="260">
+          <el-table-column label="账号" min-width="185" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.account }}</span></template>
+          </el-table-column>
+          <el-table-column label="在线" width="64">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.online ? 'success' : 'info'" effect="plain">
+                {{ row.online ? '在线' : '离线' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">{{ stateLabel(row.state) }}</template>
+          </el-table-column>
+          <el-table-column label="组队角色" width="150" show-overflow-tooltip>
+            <template #default="{ row }">
+              {{ row.ledger_role || row.team_role || '—' }}
+              <span v-if="row.ledger_captain || row.team_captain" class="muted">
+                →{{ row.ledger_captain || row.team_captain }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="暂离" width="64">
+            <template #default="{ row }">
+              <el-tag v-if="row.parted" size="small" type="warning" effect="plain">暂离</el-tag>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="助战令" width="150">
+            <template #default="{ row }"><span class="muted">{{ tokenText(row.account) }}</span></template>
+          </el-table-column>
+          <el-table-column label="最近事件" min-width="240" show-overflow-tooltip>
+            <template #default="{ row }">{{ teamEventText(row) }}</template>
+          </el-table-column>
+        </el-table>
+      </el-collapse-item>
+    </el-collapse>
   </el-card>
 
   <el-card class="panel-card" shadow="never">
