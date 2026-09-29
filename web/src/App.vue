@@ -7,6 +7,7 @@ import AccountsView from './components/AccountsView.vue'
 import MapView from './components/MapView.vue'
 import ChainView from './components/ChainView.vue'
 import TasksView from './components/TasksView.vue'
+import ItemsView from './components/ItemsView.vue'
 import ModulesView from './components/ModulesView.vue'
 import LogView from './components/LogView.vue'
 import SystemView from './components/SystemView.vue'
@@ -17,6 +18,7 @@ const tabs = [
   { key: 'accounts', label: '账号池' },
   { key: 'map', label: '地图' },
   { key: 'tasks', label: '任务' },
+  { key: 'items', label: '物品配置' },
   { key: 'chains', label: '链数据' },
   { key: 'modules', label: '模块地图' },
   { key: 'logs', label: '运行日志' },
@@ -24,7 +26,7 @@ const tabs = [
 ]
 const view = computed(() => ({
   dashboard: Dashboard, accounts: AccountsView, map: MapView,
-  tasks: TasksView, chains: ChainView, modules: ModulesView, logs: LogView, system: SystemView,
+  tasks: TasksView, items: ItemsView, chains: ChainView, modules: ModulesView, logs: LogView, system: SystemView,
 }[tab.value]))
 
 const ctrlOnline = computed(() => !!state.status?.robot_connected)

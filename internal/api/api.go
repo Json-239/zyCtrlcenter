@@ -9,6 +9,7 @@
 //	GET  /api/modules         模块地图（注册表 + 最近一次测试报告）
 //	GET  /api/maps            地图名表（mapid → 名称）+ 客户端坐标口径 grid_cell
 //	GET  /api/tasknames       任务号 → 任务名（读游戏配置 task/*.xml；只读）
+//	GET  /api/item_usage      物品使用配置（读 data/item_usage_catalog.json；只读，见 itemusage.go）
 //	GET  /api/map/grid        某地图的网格（阻挡位图）+ 地图名（地图可视化页用）
 //	GET  /api/accounts        账号池列表（池 + 运行时状态合并）+ 统计
 //	GET  /api/accounts/stats  账号池统计（按区）
@@ -175,7 +176,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chains", a.handleChains)
 	mux.HandleFunc("GET /api/modules", a.handleModules) // 只读：模块地图（read 接口不鉴权）
 	mux.HandleFunc("GET /api/maps", a.handleMaps)
-	mux.HandleFunc("GET /api/tasknames", a.handleTaskNames) // 只读：任务号 → 任务名（面板把编号翻成人话）
+	mux.HandleFunc("GET /api/tasknames", a.handleTaskNames)  // 只读：任务号 → 任务名（面板把编号翻成人话）
+	mux.HandleFunc("GET /api/item_usage", a.handleItemUsage) // 只读：物品使用配置（面板「物品配置」页，点击物品看实现）
 	mux.HandleFunc("GET /api/map/grid", a.handleMapGrid)
 	mux.HandleFunc("GET /api/accounts", a.handleAccountsList)
 	mux.HandleFunc("GET /api/accounts/stats", a.handleAccountsStats)

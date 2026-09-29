@@ -1,0 +1,242 @@
+{
+  "version": "2026-09-29",
+  "title": "物品使用配置清单（机器人端已实现盘点，机读版）",
+  "purpose": "供面板『点击物品 → 查看使用实现』消费；配套文档 docs/04-测试/清单-20260929-物品使用配置.md",
+  "sources": {
+    "robot_script": "F:/ZyBin/xm/2d-xiyou-server/robot/deploy/single_robot_zy/script（生产，行号以 2026-09-29 快照为准）",
+    "server_config": "F:/ZyBin/xm/2d-xiyou-server/config/item/item.xml（服务端语义权威源）",
+    "note": "证据口径：每条 site 给 file:line（文件内函数名+行号），可复核；服务端语义按 item_index 条目复核"
+  },
+  "protocols": {
+    "C2S_USE_ITEM": 80218,
+    "C2S_SUMMON_USE_ITEM": 80098,
+    "C2S_DROP_ITEM": 80251,
+    "C2S_CHANGE_ITEM_POCKET": 80032,
+    "C2S_ITEM_RECYCLE": 80117,
+    "C2S_UP_SELLER_ITEM": 80236,
+    "note": "S2C_UPDATE_USE_ITEM_COUNT(90160) 未注册 handler → 所有使用点各自本地扣减（见 findings F4）"
+  },
+  "categories": [
+    {"key": "heal_hp", "label": "疗伤（回血）"},
+    {"key": "heal_mp", "label": "疗伤（回蓝）"},
+    {"key": "summon_food", "label": "守护喂养（欢乐度）"},
+    {"key": "buff_card", "label": "buff 卡（畅享服务）"},
+    {"key": "gift_box", "label": "礼包/宝箱/储备金箱（开箱）"},
+    {"key": "exp_pill", "label": "人物/守护经验丹"},
+    {"key": "equip", "label": "装备（右键=穿戴/比较/丢弃）"},
+    {"key": "bag_expander", "label": "背包扩容（包裹栏）"},
+    {"key": "egg_mount", "label": "坐骑蛋（放置+孵化）"},
+    {"key": "egg_guardian", "label": "元气蛋/守护蛋（图10 打怪孵化）"},
+    {"key": "discard", "label": "丢弃（追捕令/低等级装备）"},
+    {"key": "sell", "label": "卖出（仅摆摊上架）"},
+    {"key": "quest_recycle", "label": "任务上交"}
+  ],
+  "items": [
+    {
+      "item_id": 102007,
+      "name": "金创药",
+      "category": "heal_hp",
+      "implemented": "yes",
+      "server": {"handler": "药品物品", "action": "action_supply_hpmp", "param": "add_hp=800", "use_on_summon": true},
+      "sites": [
+        {"module": "auto_summon", "function": "_try_role_heal", "file": "auto_summon.py", "line": 648, "protocol": "C2S_USE_ITEM", "scene": "idle", "trigger": "空闲(非战斗/非任务/非抓鬼)且 cur_hp<max_hp*robot_heal_hp_ratio(0.5)", "cooldown": "3s(_HEAL_COOLDOWN_MS)", "config": ["robot_auto_heal", "robot_heal_hp_ratio"], "deduction": "本地扣减+清 bag", "note": "依赖 90201/90150 同步血值"},
+        {"module": "daily_ghost", "function": "__use_heal_item(经 tick 疗伤状态机)", "file": "daily_ghost.py", "line": 1221, "protocol": "C2S_USE_ITEM", "scene": "ghost(抓鬼)", "trigger": "抓鬼中 __is_low_hp(<LOW_HP_RATIO=0.5, daily_ghost.py:188) 或 __is_low_mp", "cooldown": "1s/瓶，≤HEAL_ITEM_MAX_ROUNDS(6) 轮，用完转买药(shop_errand)", "config": ["LOW_HP_RATIO(常量)"], "deduction": "本地扣减+清 m_bag_cache+quest.bag", "note": "状态机在 tick(daily_ghost.py:3173) 内 3274-3348"},
+        {"module": "quest_engine", "function": "__fight_end_heal", "file": "quest_engine.py", "line": 4780, "protocol": "C2S_USE_ITEM", "scene": "story(任务链)", "trigger": "剧情战斗结束后 cur_hp<max_hp*0.5 或(无 max 时)cur_hp<3000 绝对值", "cooldown": "无(每帧至多 1 次；调用点 4952，吃了则暂停任务推进)", "config": ["_FIGHT_HEAL_RATIO/_FIGHT_HEAL_ABS(常量)"], "deduction": "本地扣减+清 quest.bag"},
+        {"module": "auto_summon", "function": "heal_tick", "file": "auto_summon.py", "line": 757, "protocol": "C2S_USE_ITEM", "scene": "share_daily/忙会话", "trigger": "复用 _try_role_heal/_try_summon_heal；战斗中跳过；由 share_daily.py:2290 每 tick 调用", "cooldown": "同 _HEAL_COOLDOWN_MS", "config": ["robot_auto_heal"], "deduction": "同左", "note": "2026-09-24 新增入口，不新写实现"}
+      ]
+    },
+    {
+      "item_id": 102010,
+      "name": "昙花霜",
+      "category": "heal_mp",
+      "implemented": "yes",
+      "server": {"handler": "药品物品", "action": "action_supply_hpmp", "param": "add_mp=800", "use_on_summon": true},
+      "sites": [
+        {"module": "auto_summon", "function": "_try_role_heal", "file": "auto_summon.py", "line": 648, "protocol": "C2S_USE_ITEM", "scene": "idle", "trigger": "血不低且 cur_mp<max_mp*robot_heal_mp_ratio(0.5)", "cooldown": "3s", "config": ["robot_auto_heal", "robot_heal_mp_ratio"], "deduction": "本地扣减+清 bag"},
+        {"module": "daily_ghost", "function": "__use_heal_item", "file": "daily_ghost.py", "line": 1221, "protocol": "C2S_USE_ITEM", "scene": "ghost", "trigger": "抓鬼低蓝（低血优先）", "cooldown": "1s/瓶 ≤6 轮", "config": ["LOW_MP_RATIO(常量)"], "deduction": "本地扣减+清缓存"},
+        {"module": "quest_engine", "function": "__fight_end_heal", "file": "quest_engine.py", "line": 4780, "protocol": "C2S_USE_ITEM", "scene": "story", "trigger": "战斗后血不低但蓝低", "cooldown": "同上", "config": [], "deduction": "本地扣减+清 quest.bag"},
+        {"module": "auto_summon", "function": "_try_summon_heal", "file": "auto_summon.py", "line": 687, "protocol": "C2S_SUMMON_USE_ITEM", "scene": "idle", "trigger": "守护低蓝（C2S_SUMMON_USE_ITEM[summon_id,item_id]）", "cooldown": "3s", "config": [], "deduction": "本地扣减+清 bag", "note": "金创药亦走此函数回血"}
+      ]
+    },
+    {
+      "item_id": 101008,
+      "name": "幻兽丹",
+      "category": "summon_food",
+      "implemented": "yes",
+      "server": {"handler": "其它物品", "action": "action_add_summon_happy", "param": "add_summon_happy=10", "use_on_summon": true},
+      "sites": [
+        {"module": "auto_summon", "function": "_try_summon_feed", "file": "auto_summon.py", "line": 384, "protocol": "C2S_SUMMON_USE_ITEM", "scene": "idle", "trigger": "出战守护 happy<robot_summon_happy_max(1000)*robot_summon_happy_ratio(0.5)", "cooldown": "5s(_FEED_COOLDOWN_MS)", "config": ["robot_feed_summon_items", "robot_summon_happy_ratio", "robot_summon_happy_max"], "deduction": "本地扣减+清 bag", "note": "无食物→warn(10min)+可选 shop_errand 采购(robot_auto_buy_food)"}
+      ]
+    },
+    {
+      "item_id": 101054,
+      "name": "高级幻兽丹",
+      "category": "summon_food",
+      "implemented": "yes",
+      "server": {"action": "action_add_summon_happy", "param": "add_summon_happy=100", "use_on_summon": true},
+      "sites": [{"module": "auto_summon", "function": "_try_summon_feed(经 _find_happy_food 列表)", "file": "auto_summon.py", "line": 384, "protocol": "C2S_SUMMON_USE_ITEM", "scene": "idle", "trigger": "同幻兽丹（列表按序取第一个有货的）", "config": ["robot_feed_summon_items"], "deduction": "本地扣减+清 bag"}]
+    },
+    {
+      "item_id": 101055,
+      "name": "超级幻兽丹",
+      "category": "summon_food",
+      "implemented": "yes",
+      "server": {"action": "action_add_summon_happy", "param": "add_summon_happy=300", "use_on_summon": true},
+      "sites": [{"module": "auto_summon", "function": "_try_summon_feed(经 _find_happy_food 列表)", "file": "auto_summon.py", "line": 384, "protocol": "C2S_SUMMON_USE_ITEM", "scene": "idle", "trigger": "同幻兽丹", "config": ["robot_feed_summon_items"], "deduction": "本地扣减+清 bag"}]
+    },
+    {
+      "item_id": 190016,
+      "name": "畅享服务卡",
+      "aliases": [190018, 190033, 190039],
+      "category": "buff_card",
+      "implemented": "yes",
+      "server": {"action": "action_add_buff", "param": "buff_index=1190（附称谓 9008）", "use_on_summon": false},
+      "sites": [
+        {"module": "auto_summon", "function": "use_buff_card", "file": "auto_summon.py", "line": 512, "protocol": "C2S_USE_ITEM", "scene": "idle(robot_use_buff_items_idle 默认 False) 或 pre_daily 领双", "trigger": "背包有 robot_use_buff_items 列表内卡片 且 等级>=robot_use_buff_items_min_level(31)", "cooldown": "随背包整理 3s / 领双一次", "config": ["robot_use_buff_items", "robot_use_buff_items_min_level", "robot_use_buff_items_idle", "robot_claim_double_exp_use_card"], "deduction": "本地扣减+清 bag", "note": "用后称谓被顶成 9008 → _schedule_title_restore(_try_title_restore:489) 延迟 2s/8s 切回常规称谓"}
+      ]
+    },
+    {
+      "item_id": 1013681,
+      "name": "20级装备大礼包",
+      "aliases": [1013682, 1013683],
+      "category": "gift_box",
+      "implemented": "yes",
+      "server": {"action": "action_reward_stair", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "auto_open_gifts", "file": "bag_ops.py", "line": 264, "protocol": "C2S_USE_ITEM", "scene": "login(登录后首次背包快照，bag_opened 一次性)", "trigger": "物品名含 GIFT_KEYWORDS(宝箱/宝盒/礼包/礼盒/钱袋/锦囊/宝囊/福袋, bag_ops.py:245) 或 index∈KNOWN_GIFT_INDEXES(1013681/1013682/1013683/101368, bag_ops.py:251)", "cooldown": "一次性", "config": ["GIFT_KEYWORDS/KNOWN_GIFT_INDEXES(硬编码常量)"], "deduction": "本地扣减+pop bag", "note": "挂载点 msghandle.py:355；101368 已不在服务端 item.xml（见 findings F5）"}
+      ]
+    },
+    {
+      "item_id": 101079,
+      "name": "储备金财富宝箱",
+      "aliases": [103003, 103005],
+      "category": "gift_box",
+      "implemented": "yes",
+      "server": {"action": "action_reward_stair", "param": "5000/20万/30万储备金", "use_on_summon": false},
+      "sites": [
+        {"module": "encourage_claim", "function": "_use_boxes(经 _tidy_tick)", "file": "encourage_claim.py", "line": 741, "protocol": "C2S_USE_ITEM", "scene": "补领奖励后（每日/登陆/在线/等级）", "trigger": "背包含 RESERVE_BOX_ITEM_INDEXES(101079/103003/103005, encourage_claim.py:57)", "cooldown": "领奖后 5s 起；8 个/轮，轮间隔 10s，最多 6 轮", "config": ["RESERVE_BOX_ITEM_INDEXES(硬编码)", "BOX_USE_MAX_PER_ROUND/BOX_ROUND_GAP_MS/BOX_ROUND_MAX"], "deduction": "不扣不清理（只发协议）", "note": "101079 名字含『宝箱』同时命中 auto_open_gifts 关键词 → 两条链路都会开（见 findings F3）"}
+      ]
+    },
+    {
+      "item_id": 101372,
+      "name": "强效人物经验丹",
+      "aliases": [101374],
+      "category": "exp_pill",
+      "implemented": "yes",
+      "server": {"action": "action_reward_stair(+action_item_dialog 确认)", "param": "+50000/+30000 人物经验", "use_on_summon": false},
+      "sites": [
+        {"module": "daily_ghost", "function": "__tidy_bag(消耗品兜底分支)", "file": "daily_ghost.py", "line": 3008, "protocol": "C2S_USE_ITEM", "scene": "tidy(抓鬼买令前/福利后)", "trigger": "『非装备非任务』一律视为可消耗品使用（3070-3073）", "cooldown": "每次整理 30 件上限", "config": [], "deduction": "不扣（依赖服务端消耗+下次快照）", "note": "兜底式使用，无专项实现"}
+      ]
+    },
+    {
+      "item_id": 101373,
+      "name": "强效守护经验丹",
+      "aliases": [101375, 190034],
+      "category": "exp_pill",
+      "implemented": "yes",
+      "server": {"action": "action_reward_stair(+action_item_dialog)", "param": "+50000/+30000/+15000 第一参战守护经验", "use_on_summon": false},
+      "sites": [
+        {"module": "daily_ghost", "function": "__tidy_bag + is_summon_only_item", "file": "daily_ghost.py", "line": 3008, "protocol": "C2S_USE_ITEM", "scene": "tidy", "trigger": "有参战守护(m_fighting_summon_id)时使用；无参战守护时跳过（SUMMON_EXP_ITEM_INDEXES=101373/101375/190034, daily_ghost.py:2978；判据 is_summon_only_item:2981）", "cooldown": "同 tidy", "config": ["SUMMON_EXP_ITEM_INDEXES(硬编码)"], "deduction": "不扣"}
+      ]
+    },
+    {
+      "item_id": 0,
+      "name": "装备（泛类）",
+      "category": "equip",
+      "implemented": "yes",
+      "server": {"action": "背包内 C2S_USE_ITEM=穿戴；装备栏内=解下", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "auto_equip_best_items", "file": "bag_ops.py", "line": 760, "protocol": "C2S_USE_ITEM", "scene": "每次背包快照(msghandle.py:365)", "trigger": "同部位『背包里最好』优于『已穿』才穿；equip_score=先 lv(related_element lvN) 后 quality（bag_ops.py:449/509）", "cooldown": "每次快照，幂等", "config": [], "deduction": "不扣（服务端换装）；顺手丢多余件在 838-841（C2S_DROP_ITEM，过 _DROP_GUARD 防重）"},
+        {"module": "daily_ghost", "function": "__tidy_bag(to_wear 分支)", "file": "daily_ghost.py", "line": 3064, "protocol": "C2S_USE_ITEM", "scene": "tidy", "trigger": "角色等级-item_level<TIDY_MIN_LEVEL_GAP(5) 的装备尝试穿（另一套判据）", "cooldown": "同 tidy", "config": ["TIDY_MIN_LEVEL_GAP(常量)"], "deduction": "不扣"},
+        {"module": "daily_ghost", "function": "__tidy_bag(to_drop 分支)", "file": "daily_ghost.py", "line": 3062, "protocol": "C2S_DROP_ITEM", "scene": "tidy", "trigger": "角色等级-item_level>=5 → 丢弃", "cooldown": "同 tidy", "config": [], "deduction": "不扣"}
+      ]
+    },
+    {
+      "item_id": 0,
+      "name": "背包扩容包（粗布包等，泛类）",
+      "category": "bag_expander",
+      "implemented": "yes",
+      "server": {"action": "put_on_trough_item（装到包裹栏）", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "auto_use_bag_expanders", "file": "bag_ops.py", "line": 885, "protocol": "C2S_USE_ITEM", "scene": "login(登录首次)", "trigger": "_is_bag_expander(bag_ops.py:863)（排除初始包裹 108000）", "cooldown": "一次性", "config": [], "deduction": "不扣", "note": "挂载点 msghandle.py:356"}
+      ]
+    },
+    {
+      "item_id": 101316,
+      "name": "坐骑蛋（40 种，青牛等）",
+      "category": "egg_mount",
+      "implemented": "yes",
+      "server": {"action": "place=equip_class 五行珠槽 4108 + action_mount_egg_hatch（图6 暗雷胜利 80% +1 灵气，30 点孵出）", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "place_mount_egg", "file": "bag_ops.py", "line": 234, "protocol": "C2S_CHANGE_ITEM_POCKET", "scene": "孵化会话/自动放蛋", "trigger": "蛋在背包 → 移到装备栏五行珠槽 4108（不弹对话）", "cooldown": "—", "config": [], "deduction": "—"},
+        {"module": "mount_egg", "function": "__auto_place_egg / __ensure_egg_placed", "file": "mount_egg.py", "line": 486, "protocol": "C2S_CHANGE_ITEM_POCKET", "scene": "有蛋直接放（2026-09-24 用户口径）", "trigger": "背包有坐骑蛋且无进行中孵化会话 → 最多 3 次尝试", "cooldown": "8s 检查节流", "config": ["AUTOPLACE_MAX_TRIES"], "deduction": "—"},
+        {"module": "mount_egg", "function": "tick / on_fight_end / on_notice_args", "file": "mount_egg.py", "line": 533, "protocol": "random_walk(dense) + notice 818/819/820", "scene": "hatch 会话（中控 hatch_start 下发）", "trigger": "到目标图（坐骑蛋=6）游荡踩暗雷，战斗胜利计数；notice 820=快孵出/818=入槽/819=槽满", "cooldown": "上限 max_minutes（默认 60，限 720）", "config": ["dense 档（图6）", "白名单图 6/17/34/40"], "deduction": "—", "note": "蛋受保护集合覆盖（bag_ops.is_protected_item:395），不参与丢弃/使用"}
+      ]
+    },
+    {
+      "item_id": 101340,
+      "name": "元气蛋/守护蛋",
+      "aliases": [102603],
+      "category": "egg_guardian",
+      "implemented": "yes",
+      "server": {"action": "action_egg_add_pneuma（图10 大唐东野林，等级≥50，100 起按 2.5% 或 234 上限必孵）", "use_on_summon": false},
+      "sites": [
+        {"module": "mount_egg", "function": "__ensure_egg_placed(guardian 分支)", "file": "mount_egg.py", "line": 181, "protocol": "无（放背包即可）", "scene": "hatch 会话 kind=guardian", "trigger": "蛋在背包 → 游荡图 10 打怪；notice 785 携带权威元气值", "cooldown": "同 hatch", "config": [], "deduction": "—"}
+      ]
+    },
+    {
+      "item_id": 110173,
+      "name": "追捕令全系列（110173 + 190061~190098）",
+      "category": "discard",
+      "implemented": "yes",
+      "server": {"action": "action_add_task（接受追捕任务；会让钟馗对话被弹引导覆盖）", "use_on_summon": false},
+      "sites": [
+        {"module": "bag_ops", "function": "drop_pursuit_orders", "file": "bag_ops.py", "line": 615, "protocol": "C2S_DROP_ITEM", "scene": "login + 兜底重试 tick", "trigger": "物品名含『追捕令』（is_pursuit_order_name:572）或编号在段内（110173/190061-190066/190069-190098，PURSUIT_ORDER_FALLBACK_SEGMENTS:558）；锁定件跳过（_meta_is_locked:599）", "cooldown": "兜底 tick_pursuit_order_cleanup:707 每号 60s 节流", "config": ["PURSUIT_ORDER_NAME_KEYWORD/PURSUIT_ORDER_FALLBACK_SEGMENTS(硬编码)"], "deduction": "—", "note": "挂载点 main_tester.py:59"}
+      ]
+    },
+    {
+      "item_id": 0,
+      "name": "任意上架物品（摆摊，计划指定）",
+      "category": "sell",
+      "implemented": "partial",
+      "server": {"action": "摊主上架（不消耗物品，仅登记价格）", "use_on_summon": false},
+      "sites": [
+        {"module": "booth", "function": "_st_up", "file": "booth.py", "line": 891, "protocol": "C2S_UP_SELLER_ITEM", "scene": "booth（中控写计划文件 booth_selftest.json）", "trigger": "计划 up_items 列表逐件上架（schema 见 booth.py:37-53，含 item_index/name/price）", "cooldown": "每件等 S2C 回执，6s 超时记失败", "config": ["计划文件（非 config.py）"], "deduction": "—", "note": "『卖出』仅此一条（摆摊），商会/ NPC 回收未实现"}
+      ]
+    },
+    {
+      "item_id": 0,
+      "name": "任务上交道具（泛类）",
+      "category": "quest_recycle",
+      "implemented": "yes",
+      "server": {"action": "任务回收", "use_on_summon": false},
+      "sites": [
+        {"module": "quest_engine", "function": "上交分支", "file": "quest_engine.py", "line": 2592, "protocol": "C2S_ITEM_RECYCLE", "scene": "任务链交付", "trigger": "任务要求上交道具（quest.recycle_ctx）", "cooldown": "—", "config": [], "deduction": "—"}
+      ]
+    }
+  ],
+  "unimplemented": [
+    {"item_id": 108477, "name": "小颗亲密丹（108477/190247/190248/190251）", "expected": "use_on_summon=yes, action_add_summon_close（加亲密度）", "status": "no", "evidence": "全脚本无使用实现；仅被 is_summon_only_item(daily_ghost.py:2981) 保护跳过（不再空发）。2026-09-22 曾标注『主动使用待排期』"},
+    {"item_id": 150401, "name": "内丹（白虹贯日 150401/乘胜追击 150402 等，related_element_index=summon_innerpill_common）", "expected": "C2S_SUMMON_USE_ITEM(80098) 装配 / C2S_TAKE_OUT_PILL(80326)/ C2S_PILL_SUMMON_EXCHANGE_EXP(80093)/ C2S_SUMMON_PILL_TURN(80374)", "status": "no", "evidence": "grep pill/内丹 在 script/*.py 无业务代码（仅 define/names 常量与协议表）；保护跳过（use_on_summon=yes）。09-21 分析 §2.4 结论未变"},
+    {"item_id": 152124, "name": "守护技能书（狂奔 152124/忠心 152125/急救 152127）", "expected": "C2S_SUMMON_LEARN_SKILL(80034)", "status": "no", "evidence": "协议别名存在（protocol2/c2s_key.py:37）无调用点；服务端 item_class=守护技能书（item.xml 152124）"},
+    {"item_id": 101009, "name": "宠物口粮", "expected": "action_add_pet_stamina（需 target_pet_index，宠物面板操作）", "status": "partial(无效使用)", "evidence": "use_on_summon 缺失 → is_summon_only_item 返回 False → __tidy_bag 每轮当可消耗品发 C2S_USE_ITEM(3070-3073)；服务端 no-op 不消耗（AddPetStaminaAction 无宠物目标不执行）→ 反复空发。现场 diag 常见于 bag_keys（如 robot0001196）"},
+    {"item_id": 110170, "name": "收妖葫", "expected": "C2S_OPEN_CALABASH(80292)", "status": "no", "evidence": "机器人端无调用点（09-21 §2.0 表）；item.xml:110170 item_handler=任务物品 step1=action_show_layout"},
+    {"item_id": 0, "name": "媒体卡/大圣卡", "expected": "C2S_USE_GIFT_CARD(80140)/C2S_USE_SUPER_CARD(80390)", "status": "no", "evidence": "协议表有（protocol2/c2s_list.py:412/415）无调用点"},
+    {"item_id": 0, "name": "战斗中吃药", "expected": "C2S_FIGHTCMD(80092) 指令号 5 = FIGHTER_CMD_USEITEM", "status": "no", "evidence": "fight_tester 只发攻击指令（09-21 §2.1）；本次复查未见新实现"},
+    {"item_id": 0, "name": "卖出（商会/NPC 回收）", "expected": "C2S_SELL_MALL_ITEM(80180)/C2S_NPC_RECOVER(80177)", "status": "no", "evidence": "全脚本无调用点（protocol3.py:96-99 仅别名注册）；仅摆摊上架 C2S_UP_SELLER_ITEM 已用于 booth"},
+    {"item_id": 0, "name": "分享日常 use_item 列", "expected": "share_daily.py 配置解析 get_use_item（第 5 列 use_item）", "status": "partial", "evidence": "解析器与 getter 已就绪（share_daily.py:237/336/518），但 share_daily_cfg.csv 全行 use_item 列为空且全脚本无 get_use_item 调用点（grep 仅定义）→ 配置有了、行为未接线"},
+    {"item_id": 0, "name": "宝箱小游戏（sokoban/puzzle）后续协议", "expected": "C2S_COST_OPEN_SOKOBAN(80009)/C2S_COST_OPEN_PUZZLE(80127) 等", "status": "no", "evidence": "09-21 §2.6 结论；本次复查未发现新实现"},
+    {"item_id": 0, "name": "物品合成/拆分/整理/移动/合并", "expected": "C2S_SORT_ITEM(80055)/C2S_CHANGE_ITEM_POSITION(80005)/C2S_MERGE_ITEM_POSITION(80168)/C2S_SPLIT_ITEM(80080)/action_item_compose", "status": "no", "evidence": "无调用点（与 09-21 §2.0『物品通用接口均未用』一致）"}
+  ],
+  "findings": [
+    {"id": "F1", "severity": "高", "title": "同一件事多实现：疗伤药 4 处使用 + 3 套阈值/冷却/扣减口径", "detail": "金创药/昙花霜在 auto_summon._try_role_heal(648)/_try_summon_heal(687)、daily_ghost.__use_heal_item(1221)+tick 状态机(3274-3348)、quest_engine.__fight_end_heal(4780)、heal_tick(757) 四处实现。阈值 0.5 出现三份：config.robot_heal_hp_ratio/mp_ratio(179-180)、daily_ghost.LOW_HP_RATIO/LOW_MP_RATIO(188-189)、quest_engine._FIGHT_HEAL_RATIO+绝对 3000(4765-4766)。冷却 3s/1s/无三种；扣减三种（扣+清 bag / 扣+清 cache+quest.bag / 扣+清 quest.bag）。", "evidence": ["auto_summon.py:648", "auto_summon.py:687", "daily_ghost.py:1221", "daily_ghost.py:3274", "quest_engine.py:4780", "config.py:179"]},
+    {"id": "F2", "severity": "高", "title": "丢弃/穿装备两套判据并存", "detail": "bag_ops.should_drop_equip(509)+equip_score(449)（lv 优先→quality）用于 auto_equip_best_items(760) 与 auto_summon._try_bag_cleanup(551)；daily_ghost.__tidy_bag(3008) 则用『角色等级-item_level>=TIDY_MIN_LEVEL_GAP(5)』丢、『<5』穿。同一件装备可能在一处被穿、另一处被丢（历史 09-21 报告的『穿丢打架』已在 bag_ops 侧统一，但 tidy 仍是第二套判据）。", "evidence": ["bag_ops.py:449", "bag_ops.py:509", "daily_ghost.py:3061", "daily_ghost.py:3064"]},
+    {"id": "F3", "severity": "高", "title": "开箱三处实现、101079 双链路命中", "detail": "① bag_ops.auto_open_gifts(264) 按『名字关键词/已知编号』登录开箱；② daily_ghost.__tidy_bag『非装备非任务一律当消耗品用』(3070-3073)；③ encourage_claim._use_boxes(741) 硬编码三个储备金箱。101079 同时命中 ①（名字含『宝箱』）与 ③ → 同一物品可能被两条链路重复发 C2S_USE_ITEM（服务端幂等消耗，但存在『先被 ①开掉后 ③空发』或反向的浪费与计数分歧；两处都无『已开过』台账）。", "evidence": ["bag_ops.py:245", "bag_ops.py:264", "encourage_claim.py:57", "encourage_claim.py:741", "daily_ghost.py:3070"]},
+    {"id": "F4", "severity": "中", "title": "使用类协议无回执（90160 未注册）→ 本地扣减语义四种写法", "detail": "S2C_UPDATE_USE_ITEM_COUNT(90160) 只有 protocol2 定义（s2c_list.py:673），protocol3 未注册 handler。各使用点自行处理计数：auto_summon 扣+清 bag；daily_ghost 扣+清 cache+quest.bag；quest_engine 扣+清 quest.bag；encourage_claim._use_boxes 不扣不清理（每轮只发协议）。多处并发（如 heal_tick 与 tidy 同帧）时计数可能瞬时漂移。", "evidence": ["protocol2/s2c_list.py:673", "daily_ghost.py:1223", "encourage_claim.py:741", "auto_summon.py:673"]},
+    {"id": "F5", "severity": "中", "title": "物品数据源三份，名字已实际分叉", "detail": "① 服务端 config/item/item.xml（语义权威）；② 机器人端 script/xml/item.xml（client.g_item_data_dict，心跳 bag 名字来源）；③ 中控 chains/*.json item_meta（导航链用）。101317-101319 在 ② 是『白羊羊/醉羊羊/酷羊羊』、①是『白色羊驼/棕色羊驼/黑色羊驼』（bag_ops.py:109-112 注释记录）；bag_ops.KNOWN_GIFT_INDEXES 里 101368 在 ① 中不存在。dress 判据若按名字匹配会两侧不一致。", "evidence": ["bag_ops.py:109", "bag_ops.py:251", "config/item/item.xml:101317", "config/item/item.xml:101368"]},
+    {"id": "F6", "severity": "中", "title": "半修遗漏：宠物口粮 101009 仍被 tidy 反复空发", "detail": "09-22 修复仅覆盖 use_on_summon=yes 的守护专属道具；101009 无该参数（item.xml 无 item_param），is_summon_only_item 不拦 → __tidy_bag 每轮把它当可消耗品发 C2S_USE_ITEM；服务端 action_add_pet_stamina 需宠物目标，机器人无宠物操作能力 → 静默 no-op 不消耗、无提示、无限循环（历史同型问题：幻兽丹 1268 循环）。代码级判定成立；因日志只打实例 id，未能在 diag 直接验证（标注：需现场核实）。", "evidence": ["daily_ghost.py:3070", "daily_ghost.py:2981", "config/item/item.xml:101009（无 use_on_summon）"]},
+    {"id": "F7", "severity": "中", "title": "『看似可调实际没接线』清单", "detail": "① robot_bag_cleanup_interval_sec=3（config.py:198）全仓无引用（实际冷却硬编码 _BAG_CLEAN_COOLDOWN_MS=3000, auto_summon.py:24）——09-21 发现仍在；② robot_summon_happy_threshold=90（config.py:175）全仓无引用（实际用 robot_summon_happy_ratio=0.5）——两个欢乐度阈值并存；③ 蛋名单双份：bag_ops.MOUNT_EGG_NAMES(113) 与 Go internal/api/hatch.go mountEggs(59-70)——机器人端 40 名单改两侧之一会漂移。", "evidence": ["config.py:198", "auto_summon.py:24", "config.py:175", "auto_summon.py:412", "bag_ops.py:113", "internal/api/hatch.go:59"]},
+    {"id": "F8", "severity": "低", "title": "死代码/遗留", "detail": "① bag_ops.auto_equip_items(348) 无调用点（09-21 遗漏排查复现）；② item_tester.py 为遗留模块（send_use_item；robot_operator.py:65/83 调用被注释）；③ trace_with_npc_tester/shop_probe 为调试探针（含 C2S_USE_ITEM/DELITEM 调试路径），非生产链路。", "evidence": ["bag_ops.py:348", "item_tester.py:10", "robot_operator.py:65", "trace_with_npc_tester.py:88"]},
+    {"id": "F9", "severity": "低", "title": "使用时机分散在四个『会话』，无统一物品使用调度", "detail": "空闲（auto_summon.tick）、抓鬼（daily_ghost.tick）、任务链（quest_engine.tick）、分享日常（share_daily→heal_tick）各自触发；同一物品在不同会话行为不完全一致（如抓鬼疗伤附带买药链、分享日常只吃药不买药）。新增『使用物品』类需求时无统一挂点，容易再长第 5 份实现。", "evidence": ["auto_summon.py:788", "daily_ghost.py:3173", "quest_engine.py:4952", "share_daily.py:2290"]}
+  ]
+}
