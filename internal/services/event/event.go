@@ -51,6 +51,12 @@ type Handler struct {
 	mu             sync.Mutex
 	posBatch       map[string]map[string]any
 	posFlusherOnce sync.Once
+
+	// ---------------- 组队台账（2026-09-29 阶段 1，抓鬼试点；内存态） ----------------
+	// teamMu 保护 teams / teamJobs（HTTP 线程与事件循环线程并发读写）。
+	teamMu   sync.Mutex
+	teams    map[string]*TeamInfo // 队长账号 → 已就绪队伍（team_ready 后）
+	teamJobs map[string]*TeamInfo // 队长账号 → 已下发未就绪的组队任务（state=pending）
 }
 
 // New 创建事件处理器；Broadcast 由 API 层稍后注入。
@@ -77,6 +83,8 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 		Log:      log,
 		Intents:  intent.NewPlan(dec),
 		posBatch: map[string]map[string]any{},
+		teams:    map[string]*TeamInfo{},
+		teamJobs: map[string]*TeamInfo{},
 	}
 }
 
@@ -109,6 +117,175 @@ func (h *Handler) RemoveRobot(account, reason string) bool {
 	return ok
 }
 
+// ---------------------------------------------------------------- 组队台账（2026-09-29 阶段 1）
+
+// TeamInfo 队伍台账（阶段 1：内存态；落盘/编排避让在阶段 3）。
+//
+// 数据来源（机器人端 team_captain.py 契约，2026-09-29 核实）：
+//   - POST /api/team/setup 成功后登记 job（state=pending，队长账号为键）；
+//   - 机器人端 team_ready 事件（role=captain，members=已确认队员 role_id）→ 转 ready；
+//   - team_disbanded / team_rejoined / team_return_nav 事件：更新/记录。
+//
+// 注意：机器人端队伍状态是内存态（无服务端全量查询协议，重启失忆），本台账只用于
+// 展示与手动试点核对，阶段 1 不参与编排判据（编排避让在阶段 3）。
+type TeamInfo struct {
+	Captain       string   `json:"captain"`
+	Members       []string `json:"members"`                   // 队员账号（不含队长）
+	MemberRoleIDs []int    `json:"member_role_ids,omitempty"` // team_ready 上报的已确认队员 role_id
+	Mode          string   `json:"mode"`                      // invite（队长邀请）/ apply（队员申请）
+	NextAction    string   `json:"next_action,omitempty"`     // 建队后动作（阶段 1 试点不带；阶段 2 才用）
+	State         string   `json:"state"`                     // pending（已下发未就绪）/ ready（队伍就绪）
+	Since         int64    `json:"since"`                     // 登记时间（unix 秒）
+	UpdatedAt     int64    `json:"updated_at"`
+}
+
+// TeamJobSet 登记一次组队任务（POST /api/team/setup 下发成功后调用；API 线程）。
+func (h *Handler) TeamJobSet(captain string, members []string, mode, nextAction string) {
+	now := time.Now().Unix()
+	info := &TeamInfo{Captain: captain, Members: append([]string{}, members...), Mode: mode,
+		NextAction: nextAction, State: "pending", Since: now, UpdatedAt: now}
+	h.teamMu.Lock()
+	if h.teamJobs == nil {
+		h.teamJobs = map[string]*TeamInfo{}
+	}
+	h.teamJobs[captain] = info
+	h.teamMu.Unlock()
+}
+
+// TeamMarkReady 队长 team_ready：job（pending）转正式队伍（ready）。
+// 无登记（如手工路径）也建最小台账（成员账号缺失，仅 role_id）。
+func (h *Handler) TeamMarkReady(captain string, memberRoleIDs []int) {
+	now := time.Now().Unix()
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	if h.teams == nil {
+		h.teams = map[string]*TeamInfo{}
+	}
+	info := h.teams[captain]
+	if info == nil {
+		info = h.teamJobs[captain]
+	}
+	if info == nil {
+		info = &TeamInfo{Captain: captain, Members: []string{}, Since: now}
+	}
+	info.MemberRoleIDs = append([]int{}, memberRoleIDs...)
+	info.State = "ready"
+	info.UpdatedAt = now
+	h.teams[captain] = info
+	delete(h.teamJobs, captain)
+}
+
+// TeamNoteLeave 处理"某人离队/解散"（team_disbanded 事件）：
+// 队长 → 整队（含 pending job）移除；队员 → 从所属队伍成员列表移除。
+// 返回 (被移除的队长账号, 队员所属的队长账号)，二者最多一个非空。
+func (h *Handler) TeamNoteLeave(account string) (removedTeam, memberOf string) {
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	if _, ok := h.teams[account]; ok {
+		delete(h.teams, account)
+		delete(h.teamJobs, account)
+		return account, ""
+	}
+	if _, ok := h.teamJobs[account]; ok {
+		delete(h.teamJobs, account)
+		return account, ""
+	}
+	for cap, info := range h.teams {
+		for i, m := range info.Members {
+			if m != account {
+				continue
+			}
+			rest := append([]string{}, info.Members[:i]...)
+			info.Members = append(rest, info.Members[i+1:]...)
+			info.UpdatedAt = time.Now().Unix()
+			return "", cap
+		}
+	}
+	return "", ""
+}
+
+// TeamRemove 按账号集合移除涉及队伍（账号可能是队长或队员），返回移除的队长账号（升序）。
+// 供 /api/team/disband 清理台账用（注意与 TeamNoteLeave 的"单事件"语义区分）。
+func (h *Handler) TeamRemove(accounts []string) []string {
+	set := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		if a != "" {
+			set[a] = true
+		}
+	}
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	var caps []string
+	for cap, info := range h.teams {
+		if teamTouched(cap, info, set) {
+			caps = append(caps, cap)
+			delete(h.teams, cap)
+		}
+	}
+	for cap, info := range h.teamJobs {
+		if teamTouched(cap, info, set) {
+			caps = append(caps, cap)
+			delete(h.teamJobs, cap)
+		}
+	}
+	sort.Strings(caps)
+	return caps
+}
+
+// TeamLedger 台账快照（HTTP 只读用）：已就绪队伍 + 待就绪任务，均按队长账号排序。
+func (h *Handler) TeamLedger() (teams []TeamInfo, jobs []TeamInfo) {
+	h.teamMu.Lock()
+	defer h.teamMu.Unlock()
+	teams = make([]TeamInfo, 0, len(h.teams))
+	for _, info := range h.teams {
+		teams = append(teams, cloneTeam(info))
+	}
+	jobs = make([]TeamInfo, 0, len(h.teamJobs))
+	for _, info := range h.teamJobs {
+		jobs = append(jobs, cloneTeam(info))
+	}
+	sort.Slice(teams, func(i, j int) bool { return teams[i].Captain < teams[j].Captain })
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].Captain < jobs[j].Captain })
+	return teams, jobs
+}
+
+func teamTouched(captain string, info *TeamInfo, set map[string]bool) bool {
+	if set[captain] {
+		return true
+	}
+	for _, m := range info.Members {
+		if set[m] {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneTeam(t *TeamInfo) TeamInfo {
+	out := *t
+	out.Members = append([]string{}, t.Members...)
+	out.MemberRoleIDs = append([]int{}, t.MemberRoleIDs...)
+	return out
+}
+
+// intListOf 把事件里的数组（[]any 数字，如 team_ready.members=队员 role_id 列表）转成 []int。
+func intListOf(v any) []int {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(raw))
+	for _, it := range raw {
+		switch t := it.(type) {
+		case float64:
+			out = append(out, int(t))
+		case int:
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------- 事件表
 
 // handlers 事件类型 → 处理函数（表驱动，与机器人端 g_handle_map 风格一致）。
@@ -128,6 +305,11 @@ func (h *Handler) handlers() map[string]func(map[string]any) {
 		"ghost_done":         h.onGhostDone,
 		"ghost_offline":      h.onGhostOffline,
 		"log":                h.onLog,
+		// 组队（2026-09-29 阶段 1：协议打通 —— 只记台账/日志，不参与编排）
+		"team_ready":      h.onTeamReady,
+		"team_disbanded":  h.onTeamDisbanded,
+		"team_rejoined":   h.onTeamRejoined,
+		"team_return_nav": h.onTeamReturnNav,
 	}
 }
 
@@ -896,6 +1078,68 @@ func isStuckCode(code string) bool {
 		return true
 	}
 	return strings.HasPrefix(code, "STUCK_")
+}
+
+// ---------------------------------------------------------------- 组队事件（2026-09-29 阶段 1）
+
+// onTeamReady 组队就绪事件（机器人端 team_captain.on_build_team / tick 超时确认触发）：
+//   - role=captain：members 为已确认队员的 role_id 列表 → 台账 pending → ready；
+//   - role=member/applicant：队员侧就绪（apply 模式下队长侧不产生 team_ready，属机器人端
+//     现状局限，见 internal/api/team.go 注释），只记日志。
+func (h *Handler) onTeamReady(ev map[string]any) {
+	account := str(ev, "account")
+	if account == "" {
+		return
+	}
+	role := str(ev, "role")
+	rids := intListOf(ev["members"])
+	if role == "captain" {
+		h.TeamMarkReady(account, rids)
+		h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": account,
+			"zone": zoneOf(ev),
+			"msg":  fmt.Sprintf("[组队] 队长就绪：%s（队员 %d 人 role_id=%v）", account, len(rids), rids)})
+		return
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": account,
+		"zone": zoneOf(ev), "msg": "[组队] 就绪（" + role + "），等队长侧 team_ready 落台账"})
+}
+
+// onTeamDisbanded 队伍解散/离队（S2C_CANCEL_TEAM）：队长 → 整队清台账；队员 → 从成员列表移除。
+func (h *Handler) onTeamDisbanded(ev map[string]any) {
+	account := str(ev, "account")
+	if account == "" {
+		return
+	}
+	removedTeam, memberOf := h.TeamNoteLeave(account)
+	msg := "[组队] 收到解散/离队：" + account
+	switch {
+	case removedTeam != "":
+		msg = "[组队] 队伍解散（队长 " + removedTeam + "）：台账已清（含未就绪任务）"
+	case memberOf != "":
+		msg = "[组队] 队员离队：" + account + "（队长 " + memberOf + " 的台账已更新；如需重组请人工核对）"
+	default:
+		msg += "（台账无记录）"
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "warn", "account": account,
+		"zone": zoneOf(ev), "msg": msg})
+}
+
+// onTeamRejoined 暂离归队成功（team_captain.on_member_come_back）：阶段 1 只记录。
+func (h *Handler) onTeamRejoined(ev map[string]any) {
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": str(ev, "account"),
+		"zone": zoneOf(ev), "msg": "[组队] 暂离归队成功：" + str(ev, "account")})
+}
+
+// onTeamReturnNav 归队导航请求（team_captain.on_come_back_too_far；机器人端 route_walk 模块
+// 缺失 → 导航分支空转，阶段 2 接通）：阶段 1 只记录目标坐标，便于试点观察暂离场景。
+func (h *Handler) onTeamReturnNav(ev map[string]any) {
+	target := ""
+	if v, ok := ev["target"].([]any); ok && len(v) >= 3 {
+		target = fmt.Sprintf("[%v,%v,%v]", v[0], v[1], v[2])
+	}
+	h.Store.LogEvent(map[string]any{"type": "log", "level": "info", "account": str(ev, "account"),
+		"zone": zoneOf(ev),
+		"msg":  "[组队] 归队导航请求" + target + "（route_walk 模块缺失，当前仅记录；阶段 2 接通）"})
 }
 
 func (h *Handler) onGhostDone(ev map[string]any) {
