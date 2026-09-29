@@ -448,9 +448,16 @@ def main():
         import re as _re
         for _m in _re.finditer(r"^(ROAM_\w+)\s*=\s*(\d+)", rw, _re.M):
             ns[_m.group(1)] = int(_m.group(2))
-        check("图内死点: ROAM_* 常量齐全(9 个)",
-              len([k for k in ns if k.startswith("ROAM_")]) == 9,
-              sorted(k for k in ns if k.startswith("ROAM_")))
+        # 2026-09-29 改"子集检查": 断言原 9 个关键常量齐全(不再卡死总数 —— 切换让路保护
+        #   新增 ROAM_SWITCH_TIMEOUT_MS 后总数变 10, 旧 `== 9` 误伤; 新常量由
+        #   switch_guard_selftest.py 覆盖)。
+        _roam_keys = set(k for k in ns if k.startswith("ROAM_"))
+        _roam_need = {"ROAM_PATH_CHECK_TRIES", "ROAM_SNAP_RADIUS", "ROAM_SNAP_MAX_DIST_PX",
+                      "ROAM_FAR_SNAP_COOLDOWN_MS", "ROAM_FAILS_TO_SWITCH", "ROAM_FAIL_GAP_MS",
+                      "ROAM_NO_PROGRESS_PX", "ROAM_PICK_RETRY_MS", "ROAM_NAV_FAILS_TO_STOP"}
+        check("图内死点: ROAM_* 关键常量齐全(9 个都得在; 总数 ≥9 即可)",
+              _roam_need <= _roam_keys,
+              sorted(_roam_keys))
 
         _frag_cws = _extract_class(rw, "CollectWalkState")
         check("提取 random_walk.CollectWalkState(D 段)", _frag_cws is not None)
