@@ -335,6 +335,47 @@ async function saveBooth() {
 }
 onMounted(loadBooth)
 
+// ---------------- 摆摊一键下发（2026-09-29：启动/停止）----------------
+// 启动 = 写机器人端计划文件（enabled=true，存在的副本都写）+ 号不在图 11 时自动送图
+// （复用游荡通道；到图后机器人端自动开摊，改文件即热生效，无需 reload）；
+// 停止 = 写 enabled=false；号离线（可能在离线挂摊中）**不会自动拉起**——需手动拉起收摊。
+// post() 自带 toast（后端 msg）；这里的状态行显示 hint 详情 + 号实时位置（与心跳同源）。
+const bsForm = reactive({ account: 'robot0001032@xy3.com' })
+const bsBusy = ref('')
+const bsResult = ref(null) // 最近一次 start/stop 回执（{ok, action, msg, hint, plan_written}）
+const bcPlan = computed(() => (bc.value && bc.value.plan) || null)
+const bsRobot = computed(() => {
+  const acc = String(bsForm.account || '').trim()
+  return (state.status.robots || []).find((r) => r.account === acc) || null
+})
+const bsPosText = computed(() => {
+  const r = bsRobot.value
+  if (!r) return '摆摊号：无心跳记录'
+  return `摆摊号：${r.online ? '在线' : '离线'} · ${mapLabel(r.mapid)} · 格 ${posLabel(r.pos)}`
+})
+async function startBooth() {
+  const acc = String(bsForm.account || '').trim()
+  if (!acc) { ElMessage.warning('请先填摆摊号'); return }
+  bsBusy.value = 'start'
+  try {
+    bsResult.value = await post('/api/booth/start', { account: acc })
+    await loadBooth() // 重读：当前计划状态即时刷新
+  } finally { bsBusy.value = '' }
+}
+async function stopBooth() {
+  const acc = String(bsForm.account || '').trim()
+  if (!acc) { ElMessage.warning('请先填摆摊号'); return }
+  const yes = await confirmBox(
+    '停止摆摊 = 机器人端计划置 enabled=false。\n号在离线挂摊中时，摊位要到拉起号才会收掉（不会自动拉起）。\n\n确定停止？',
+    '停止摆摊', '停止')
+  if (!yes) return
+  bsBusy.value = 'stop'
+  try {
+    bsResult.value = await post('/api/booth/stop', { account: acc })
+    await loadBooth()
+  } finally { bsBusy.value = '' }
+}
+
 // ---------------- 启动哪条链（下拉选，不再"点了也不知道启什么"）----------------
 // id === 'auto' = 不手选链，按账号意图自动分配（新手链/抓鬼），默认就是它
 const chains = reactive({ list: [], dir: '', err: '', id: localStorage.getItem('zy_chain_id') || 'auto' })
@@ -949,7 +990,7 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
       <div class="card-head">
         <span class="card-title">摆摊配置</span>
         <span class="spacer" />
-        <span class="muted">离线摆摊 · 单次挂多久</span>
+        <span class="muted">离线摆摊 · 单次挂多久 · 一键启停</span>
       </div>
     </template>
     <div class="param-row">
@@ -958,6 +999,32 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
         :step="30" :precision="0" class="num" />
       <span class="k">分钟（{{ bcRange.min }}~{{ bcRange.max }}；480 = 服务端 VIP0 单次上限 8h）</span>
       <el-button type="primary" size="small" :loading="bcSaving" @click="saveBooth">保存</el-button>
+    </div>
+    <div class="param-row">
+      <span class="k">摆摊号</span>
+      <el-input v-model="bsForm.account" size="small" style="width: 220px" placeholder="robot0001032@xy3.com" />
+      <el-button type="primary" size="small" :loading="bsBusy === 'start'" :disabled="!!bsBusy"
+        @click="startBooth">启动摆摊</el-button>
+      <el-button type="danger" size="small" :loading="bsBusy === 'stop'" :disabled="!!bsBusy"
+        @click="stopBooth">停止摆摊</el-button>
+      <span class="muted">{{ bsPosText }}</span>
+    </div>
+    <div class="sub">
+      一键下发：<b>启动</b>=写机器人端计划文件（enabled=true），号不在图 11 时自动送图——到图后自动开摊；
+      <b>停止</b>=写 enabled=false（号离线挂摊中需拉起号收摊，不会自动拉起）。
+    </div>
+    <div class="sub">
+      当前计划：
+      <template v-if="bcPlan">
+        <b>{{ bcPlan.enabled ? '已启用' : '已停用' }}</b>
+        <template v-if="bcPlan.account"> · {{ bcPlan.account }}</template>
+        <template v-if="bcPlan.mapid"> · {{ mapLabel(bcPlan.mapid) }}</template>
+        <template v-if="(bcPlan.cell || []).length"> · 摊点 {{ (bcPlan.cell || []).join(',') }}</template>
+      </template>
+      <template v-else><span class="muted">未发现计划文件（点「启动摆摊」会写入）</span></template>
+      <template v-if="bsResult">
+        <br>最近下发：<span :class="{ warnText: bsResult.ok !== true }">{{ bsResult.hint || bsResult.msg || '--' }}</span>
+      </template>
     </div>
     <div class="sub">
       只影响下一次挂摊：机器人端开摊时才读计划文件；当前已挂的摊需收摊重挂才能改。
