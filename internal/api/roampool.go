@@ -157,11 +157,19 @@ func (a *API) dailyReclaimKindOf(r state.Robot) (autotask.Kind, bool) {
 }
 
 // shareDailyReclaimReady 该号对某日常池的准入（口径与 shareDailyCandidateOf 的"号码自身"
-// 判据同源：等级/满额/余额；另加背包预检 + 重复派防护）—— 这里是**直发通道**，还要过
-// LaunchTask 的配额截断，故不含"让路（抓鬼）"这类分配类判据（那条由 dailyReclaimKindOf 把关）。
+// 判据同源：等级/满额/余额；另加背包预检 + 重复派防护 + **每玩法配额闸**）—— 这里是
+// **直发通道**，不含"让路（抓鬼）"这类分配类判据（那条由 dailyReclaimKindOf 把关）。
 func (a *API) shareDailyReclaimReady(kind autotask.Kind, r state.Robot, cfg autotask.Config) bool {
 	if a.shareDailyInFlightTodayOf(r.Account, r, kind) {
 		return false // 该玩法今天已派/在跑（未满）→ 不需要回收转投（防重复下发，也防刚下发的号被再派）
+	}
+	// 每玩法配额闸（2026-09-29 线上复核补）：该玩法"在跑+在途"已达目标 → 本轮不回收。
+	// 背景：服务侧 k.dailyDeficit 是**两玩法聚合**缺口，会出现"神捕缺 3、烽火已满"仍触发回收集合；
+	// 若此处不按 kind 复核配额，回收批会在 cutByPoolQuota 被**整批截断** → 每轮空转报
+	// "回收→日常池失败"（现场 14:32-14:39 每 30s 一条）。前置拦截后：配额满 = 该玩法无候选，
+	// 自然走 noop，不再空转刷失败日志/污染 pool.LastErr。
+	if a.poolQuota(kind, false) == 0 {
+		return false
 	}
 	// 跨日常让路（与 shareDailyCandidateOf 同口径）：已在跑/已派**另一个**玩法（未满）→
 	// 本通路也不抢（否则两个玩法各派一次，后派者顶掉前者）。
@@ -214,6 +222,7 @@ func (a *API) roampoolReclaimDaily(accounts []string) (int, error) {
 		return 0, errors.New("没有号满足日常池准入（等级/满额/余额/包满/熔断闸）")
 	}
 	total := 0
+	attempted := 0
 	for _, kind := range shareDailyFamilyKinds() { // shenbu → fenghuo 固定次序
 		accs := groups[kind]
 		if len(accs) == 0 {
@@ -222,10 +231,14 @@ func (a *API) roampoolReclaimDaily(accounts []string) (int, error) {
 		if cut := a.cutByPoolQuota(accs, kind, false); len(cut) > 0 {
 			a.Log.Printf("[ROAMPOOL] 回收→%s：池配额截断 %d 个（%v 本轮不派）", kind.Label(), len(cut), cut)
 			accs = accs[:len(accs)-len(cut)]
+			if len(accs) == 0 {
+				// 全被截断 = 池在"挑选→下发"窗口内刚好被填满（竞态；常规情形已被
+				// shareDailyReclaimReady 的每玩法配额闸前置拦截）。不派、记一条，不当故障刷屏。
+				a.Log.Printf("[ROAMPOOL] 回收→%s 跳过：池配额在截断时已满（本轮不派）", kind.Label())
+				continue
+			}
 		}
-		if len(accs) == 0 {
-			continue
-		}
+		attempted++
 		ok, msg := a.LaunchTask(kind, accs)
 		if !ok {
 			a.Log.Printf("[ROAMPOOL] 回收→%s 下发失败：%s", kind.Label(), msg)
@@ -235,7 +248,10 @@ func (a *API) roampoolReclaimDaily(accounts []string) (int, error) {
 		a.Log.Printf("[ROAMPOOL] 回收→%s %d 个游荡号已转投 share_daily_start：%v", kind.Label(), len(accs), accs)
 	}
 	if total == 0 {
-		return 0, errors.New("下发失败（机器人通道未连接/池闸全拦）")
+		if attempted == 0 {
+			return 0, errors.New("池配额已满（本轮无人可派）")
+		}
+		return 0, errors.New("下发失败（机器人通道未连接/号全被暂停）")
 	}
 	return total, nil
 }
