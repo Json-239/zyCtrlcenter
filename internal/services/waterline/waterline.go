@@ -501,7 +501,15 @@ func Busy(r state.Robot) bool {
 	if r.Fight || r.GhostActive() || r.Walking() {
 		return true
 	}
-	switch strings.ToUpper(strings.TrimSpace(r.State)) {
+	st := strings.ToUpper(strings.TrimSpace(r.State))
+	// 2026-09-29（神捕假补位止血）：分享日常（神捕/烽火）**活跃会话**的相位 —— ACCEPT（接取）/
+	// KILL（打鬼）/READY（轮间准备）不在下方通用白名单里 → 在跑号被当"没在忙"：候选每轮重派
+	// （消费配额、deficit 失真）、游荡/水位来打扰。用"有活跃日常会话"限定，避免 READY 这类
+	// 通用状态被一刀切标忙（普通 READY/IDLE 号仍按空闲处理）。
+	if (st == "ACCEPT" || st == "KILL" || st == "READY") && r.DailySessionActive() {
+		return true
+	}
+	switch st {
 	case "NAV", "CLICK", "DIALOG", "FIGHT", "SHOP", "ALLOC", "WAIT_NEXT", "SUBMIT", "ERROR":
 		return true
 	case "WAIT_TASK":

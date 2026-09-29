@@ -233,6 +233,24 @@ func (r Robot) DailyOf(shareKey string) (DailyEntry, bool) {
 	return DailyEntry{}, false
 }
 
+// DailySessionActive 是否有"未停未满"的分享日常会话（心跳 daily 块）。
+//
+// 用途（2026-09-29 假补位止血）：分享日常的 ACCEPT（接取）/KILL（打鬼）/READY（轮间准备）
+// 相位不在 waterline.Busy 的通用状态白名单里 —— 运行中的神捕/烽火号会被当"没在忙"：
+// 池候选反复重派（消费名额、deficit 失真）、游荡/水位可能来打扰。Busy 用本判据把
+// "有活跃日常会话"的号标忙（只影响"别打扰"方向）；STOPPED=已停会话不算，满额（DONE/到限）不算。
+func (r Robot) DailySessionActive() bool {
+	for _, e := range r.DailyEntries() {
+		if strings.EqualFold(e.State, "STOPPED") {
+			continue
+		}
+		if !DailyEntryFull(e) {
+			return true
+		}
+	}
+	return false
+}
+
 // DailyFull 该玩法今日是否已满/不可用（state=DONE 或 limit>0 且 done ≥ limit）。
 //
 // **无数据 = false（未知）**：本函数只表达"明确满了"；"未知"与"未满"的区分由调用方

@@ -35,6 +35,20 @@ export function isWalking(r) { return !!(r.walk && r.walk.enabled === true) || i
 // 既不算空闲（否则会被面板/批量操作误选去游荡），也不算发呆/未知。
 export function isTeamStandby(r) { return String(r.state || '').toUpperCase() === 'MEMBER' }
 
+// 分享日常会话是否"活跃"（未停未满）：心跳 daily 块 {share_key,done,limit,state}（兼容数组）。
+// 与 Go state.Robot.DailySessionActive 同口径（STOPPED 不算、DONE/到限不算）。
+export function dailySessionActive(r) {
+  const d = r && r.daily
+  const arr = Array.isArray(d) ? d : (d ? [d] : [])
+  return arr.some((e) => {
+    if (!e) return false
+    const s = String(e.state || '').toUpperCase()
+    if (s === 'STOPPED') return false
+    if (s === 'DONE' || (Number(e.limit) > 0 && Number(e.done) >= Number(e.limit))) return false
+    return true
+  })
+}
+
 // 忙碌 = 战斗 / 抓鬼 / 游荡(含孵化) / 推进中的任务态 / WAIT_TASK 且有点名中的任务。
 // 注意：ERROR 不在这里（由 isErr 单列「异常」）——比 Go 的 waterline.Busy 少一个 ERROR 项，
 // 只是因为前端展示把 ERROR 单列成「异常」桶；判断"忙不忙"的调用方要连同 isErr 一起看
@@ -44,6 +58,9 @@ export function isTeamStandby(r) { return String(r.state || '').toUpperCase() ==
 export function isBusy(r) {
   if (r.fight || isGhosting(r) || isWalking(r)) return true
   const s = String(r.state || '').toUpperCase()
+  // 2026-09-29 假补位止血（与 Go waterline.Busy 同步）：分享日常活跃会话的 ACCEPT/KILL/READY
+  // 相位算忙（否则在跑的神捕/烽火号会被当空闲/候选重复派；用 daily 活跃限定 READY 这类通用状态）。
+  if ((s === 'ACCEPT' || s === 'KILL' || s === 'READY') && dailySessionActive(r)) return true
   if (BUSY_STATES.includes(s)) return true
   if (s === 'WAIT_TASK') return Number(r.task_index) !== 0
   return false
