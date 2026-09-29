@@ -347,6 +347,19 @@ type Deps struct {
 	ReclaimEligible func(state.Robot) bool
 	// Deficit 任务池缺口 = 抓鬼池 deficit + 新手池 deficit（**正数=缺人**，负数=超编）。
 	Deficit func() int
+	// DailyDeficit 日常池缺口 = 神捕 + 烽火 deficit 之和（**正数=缺人**；2026-09-29 P0-2 修法 B）。
+	// 与 Deficit 独立：抓鬼缺口走"回收→停游荡→任务池自然接走"，日常缺口走 ReclaimDaily 直发。
+	// nil = 不启用日常回收（保持旧行为）。
+	DailyDeficit func() int
+	// ReclaimDailyEligible 日常回收资格闸（可选）：只回收"回收后日常池真能接走"的号
+	//（判据 = 日常池准入：等级/今日未满/余额闸/非熔断/抓鬼已满；见 api.roamDailyReclaimEligible）。
+	// nil = 不做资格过滤（只挑 Roaming 且非 Paused；仅供测试）。
+	ReclaimDailyEligible func(state.Robot) bool
+	// ReclaimDaily 回收游荡号**转投日常池**（神捕/烽火）：壳层按号选玩法并发 share_daily_start。
+	// 机器人端 share_daily_start 会主动停游荡（share_daily.py:1983-1989），所以不需要先发 stop；
+	// 下发成功由壳层记在途（防重复派）。返回实际下发成功的号数；失败返回 err。
+	// nil = 不启用日常回收。（2026-09-29 P0-2 修法 B，判据见 PickDailyReclaim。）
+	ReclaimDaily func(accounts []string) (int, error)
 	// Maps 可用游荡图（链数据里有寻路网格的图；白名单为空时用它）。
 	Maps func() []int
 	// TaskMaps 任务图"热读"集合（2026-09-24 降权）：链数据里的任务图（如抓鬼 ghost_maps）。
@@ -656,6 +669,23 @@ func PickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool) [
 // 与"游荡少去任务图"同向。其余口径与 PickReclaim 完全一致（领双置顶/并列按账号/资格闸）。
 func PickReclaimAs(robots []state.Robot, n int, eligible func(state.Robot) bool,
 	taskSet map[int]bool, bias int) []string {
+	return pickReclaim(robots, n, eligible, taskSet, bias, true)
+}
+
+// PickDailyReclaim 从**游荡中**的号里挑 n 个"回收后能立刻转投日常池（神捕/烽火）"的号
+// （2026-09-29 P0-2 修法 B，号源见 docs/04-测试/分析-20260929-大唐神捕任务链.md §六 P0-2-B）。
+//
+// 排序与资格闸口径 = PickReclaimAs（所在图有效负载高的先回收 / 并列按账号 / Paused 与 eligible
+// 闸照旧），唯一区别：**不套"今日领双置顶"** —— 双倍有时长，那些号留给抓鬼通道
+// （PickReclaimAs 会优先回收它们），不该被转投日常把加成耗掉。
+func PickDailyReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool,
+	taskSet map[int]bool, bias int) []string {
+	return pickReclaim(robots, n, eligible, taskSet, bias, false)
+}
+
+// pickReclaim 回收挑选的公共实现（prioritizeDouble = 抓鬼通道的"今日领双置顶"）。
+func pickReclaim(robots []state.Robot, n int, eligible func(state.Robot) bool,
+	taskSet map[int]bool, bias int, prioritizeDouble bool) []string {
 	if n <= 0 {
 		return nil
 	}
@@ -686,15 +716,15 @@ func PickReclaimAs(robots []state.Robot, n int, eligible func(state.Robot) bool,
 		if eligible != nil && !eligible(r) {
 			continue // 2026-09-22 P0：回收后进不了任务池的号不回收（详见函数头注释）
 		}
-		cands = append(cands, cand{account: r.Account, count: effLoad(r.MapID),
-			prio: r.DoubleClaimedToday()})
+		prio := prioritizeDouble && r.DoubleClaimedToday()
+		cands = append(cands, cand{account: r.Account, count: effLoad(r.MapID), prio: prio})
 	}
 	if len(cands) == 0 {
 		return nil
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].prio != cands[j].prio {
-			return cands[i].prio // 2026-09-23 今日领双 → 优先回收去抓鬼
+			return cands[i].prio // 2026-09-23 今日领双 → 优先回收去抓鬼（仅抓鬼通道）
 		}
 		if cands[i].count != cands[j].count {
 			return cands[i].count > cands[j].count // 人多的图先回收
@@ -851,6 +881,14 @@ func (k *Keeper) deficit() int {
 	return k.d.Deficit()
 }
 
+// dailyDeficit 日常池缺口（神捕+烽火；nil 回调 = 旧行为 0）。
+func (k *Keeper) dailyDeficit() int {
+	if k.d.DailyDeficit == nil {
+		return 0
+	}
+	return k.d.DailyDeficit()
+}
+
 // taskMapSet 本轮"任务图降权"集合（2026-09-24）：
 //   - 配置 task_maps 非空 → **完全按它**（人工指定，含替换兜底）；
 //   - 否则 = 内置兜底集合（defaultTaskMaps）∪ 壳层热读（Deps.TaskMaps，链数据里的任务图）。
@@ -969,6 +1007,8 @@ func (k *Keeper) Status() Status {
 //
 // 判决顺序（用户口径：任务链路优先，游荡吃余量）：
 //  1. 回收优先：任务池缺口 > 0 且 reclaim_on_deficit → 回收 min(缺口, max_step, 在游荡) 个游荡号，本轮结束；
+//     1b. 日常池回收（2026-09-29 P0-2 修法 B）：上一步没动作且 神捕+烽火 缺口 > 0 → 回收
+//     "日常池能接走"的游荡号并**直发 share_daily_start**（先抓鬼后日常；每轮 ≤ max_step）；
 //  2. 补位：否则在游荡（含在途占位）< target → 取 min(缺额, max_step, 空闲数) 个空闲号，按图均匀派出去。
 //
 // 2026-09-23 P1（派发节流降噪）：派出去的号记「在途」——TTL（inflight_ttl_sec，默认 120s）内没等到
@@ -996,28 +1036,59 @@ func (k *Keeper) Tick(now time.Time) bool {
 	k.mu.Unlock()
 
 	deficit := k.deficit()
+	ddef := k.dailyDeficit()
 	taskSet := k.taskMapSet(cfg) // 2026-09-24 降权：任务图集合（nil = 关闭/无任务图）
 	// ① 回收优先：任务池缺人 → 把游荡号还给任务池（本轮不再补位，名额让给任务池）
 	if deficit > 0 && cfg.ReclaimOnDeficit {
 		n := minInt(deficit, cfg.MaxStep, running)
 		picked := PickReclaimAs(robots, n, k.d.ReclaimEligible, taskSet, cfg.TaskMapBias)
-		if len(picked) == 0 {
-			k.noop(fmt.Sprintf("任务池缺口 %d，但没有可回收的游荡号（在游荡 %d）", deficit, running),
-				"noreclaim|d"+notch(deficit)+"|i"+notch(idleN), now)
-			k.markRound(false)
-			return false
+		if len(picked) > 0 {
+			sent, err := k.doStop(picked)
+			if err != nil {
+				k.fail("回收", err)
+				k.markRound(true) // 出错要按正常节奏重试
+				return false
+			}
+			k.noteAction(actionReclaim, len(sent),
+				fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少%s）：%s",
+					len(sent), deficit, taskBiasNote(taskSet, cfg.TaskMapBias, nil), strings.Join(sent, ",")), now)
+			k.markRound(true)
+			return true
 		}
-		sent, err := k.doStop(picked)
-		if err != nil {
-			k.fail("回收", err)
-			k.markRound(true) // 出错要按正常节奏重试
-			return false
+		// 抓鬼缺口没有可回收的号（都是满额/门槛外/熔断号）→ 不立即收工，继续看日常池（①b）。
+	}
+	// ①b 日常池缺口（2026-09-29 P0-2 修法 B）：把"回收后能立刻转投日常池"的游荡号回收转投
+	//     神捕/烽火（直发 share_daily_start；机器人端收到即停游荡，无需先发 stop）。
+	//
+	// 优先级：**先抓鬼后日常** —— ① 命中即返回；这里只在 ① 没动作时跑（抓鬼不缺人，或
+	// 缺口>0 但游荡里挑不出可回收的抓鬼号）。号源画像：抓鬼满额后转游荡的号（94% 满额号
+	// 在游荡；游荡池 running≈124 > target 100 有富余），壳层资格闸会保证"只回收日常池
+	// 真能接走的号"（否则回收→90s 后机器人 auto_roam 又派游荡的空转，同 PickReclaim 的
+	// 2026-09-22 P0 教训）。
+	if ddef > 0 && cfg.ReclaimOnDeficit && k.d.ReclaimDaily != nil {
+		n := minInt(ddef, cfg.MaxStep, running)
+		picked := PickDailyReclaim(robots, n, k.d.ReclaimDailyEligible, taskSet, cfg.TaskMapBias)
+		if len(picked) > 0 {
+			sent, err := k.d.ReclaimDaily(picked)
+			if err != nil {
+				k.fail("回收→日常池", err)
+				k.markRound(true) // 出错要按正常节奏重试
+				return false
+			}
+			k.noteAction(actionReclaim, sent,
+				fmt.Sprintf("回收 %d 个游荡号给日常池（神捕/烽火缺口 %d%s）：%s",
+					sent, ddef, taskBiasNote(taskSet, cfg.TaskMapBias, nil), strings.Join(picked, ",")), now)
+			k.markRound(true)
+			return true
 		}
-		k.noteAction(actionReclaim, len(sent),
-			fmt.Sprintf("回收 %d 个游荡号给任务池（缺口 %d，今日领双优先/其余按图人数从多到少%s）：%s",
-				len(sent), deficit, taskBiasNote(taskSet, cfg.TaskMapBias, nil), strings.Join(sent, ",")), now)
-		k.markRound(true)
-		return true
+	}
+	if cfg.ReclaimOnDeficit && (deficit > 0 || ddef > 0) {
+		// 两个回收目标都挑不出号 → 保持原口径：说明原因 + 本轮不补位（名额留给任务池）。
+		k.noop(fmt.Sprintf("任务池缺口 %d、日常池缺口 %d，但没有可回收的游荡号（在游荡 %d）",
+			deficit, ddef, running),
+			"noreclaim|d"+notch(deficit)+"|dd"+notch(ddef)+"|i"+notch(idleN), now)
+		k.markRound(false)
+		return false
 	}
 
 	// ② 补位：在游荡 + 在途 < 目标 → 优先空闲号；不够且任务池**超编**时，从"可中断的超编号"里补

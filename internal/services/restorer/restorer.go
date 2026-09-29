@@ -37,6 +37,11 @@ const (
 	// 都没在跑"，一轮全补会直接把池子灌爆（生产实测一轮补过 87 个，抓鬼超编到 218）。
 	// 与水位/游荡池的单轮 max_step=5 同口径。
 	DefaultMaxPerRound = 5
+	// SkipLogSec 跳过类日志的**按号节流**窗口（2026-09-29 P0-5）：Skip 闸 / needsRestore
+	// 跳过原来全静默 —— 现场"为什么 8 小时没人救"（robot0005054）无法从日志定位。
+	// 取 10 分钟：一个号空转 8 小时能留 ~48 条「持续被跳过」证据，又不会把日志刷爆
+	// （满池 ~230 个号 = 稳态 ≤23 条/分）。
+	SkipLogSec = 600
 )
 
 // Action 一次补发决策（由 Run 负责下发，Tick 只产出）。
@@ -146,6 +151,8 @@ type Runner struct {
 	d  Deps
 	mu sync.Mutex
 	st map[string]*Status
+	// skipLogAt 跳过类日志上次真正写出的时间（键 = 账号|kind；P0-5，见 SkipLogSec）。
+	skipLogAt map[string]time.Time
 }
 
 // New 创建恢复器（零值字段用默认值补齐）。
@@ -253,6 +260,7 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 			if skip, why := r.d.Skip(string(it.Kind), it.Account); skip {
 				st0 := r.statusFor(it.Account)
 				st0.LastMsg = "不补发：" + why
+				r.logSkipThrottled(it.Account, string(it.Kind), "闸门跳过："+why, now)
 				continue
 			}
 		}
@@ -273,6 +281,12 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 			if st.Attempts != 0 || st.LastMsg != "" {
 				st.Attempts, st.NextAt, st.LastMsg = 0, time.Time{}, ""
 			}
+			// P0-5：跳过要留痕（现场"空转 8 小时没人救"与"在跑不需要救"从日志上分不清）。
+			why := "状态无需补发（state=" + robot.State + "）"
+			if robot.Walking() {
+				why = "游荡中，不抢断（state=" + robot.State + "）"
+			}
+			r.logSkipThrottled(it.Account, string(it.Kind), why, now)
 			continue
 		}
 		if lim > 0 && len(out) >= lim {
@@ -445,6 +459,34 @@ func (r *Runner) statusFor(account string) *Status {
 		r.st[account] = st
 	}
 	return st
+}
+
+// logSkipThrottled 按"账号|意图"节流写一条跳过日志（P0-5，2026-09-29）：
+//
+//	[RESTORE-SKIP] <acc> <kind>：<原因>
+//
+// 为什么需要：恢复引擎的两种"不补发"原来都是静默的 —— Skip 闸只写 Status.LastMsg
+// （不落 ctrl 日志），needsRestore=false 直接 continue。现场 robot0005054 停 8 小时
+// 一条 RESTORE 记录都没有，"没人救"与"不需要救"从日志上分不出来（分析报告 §4.5）。
+//
+// 节流键含 kind：同一号意图被改判（如 ghost→fenghuo）时立刻给出一条新记录，便于
+// 跟踪意图迁移；同键则每 SkipLogSec（10 分钟）至多一条。
+func (r *Runner) logSkipThrottled(account, kind, why string, now time.Time) {
+	if r.d.Log == nil {
+		return
+	}
+	key := account + "\x00" + kind
+	r.mu.Lock()
+	if r.skipLogAt == nil {
+		r.skipLogAt = map[string]time.Time{}
+	}
+	if last, ok := r.skipLogAt[key]; ok && now.Sub(last) < SkipLogSec*time.Second {
+		r.mu.Unlock()
+		return
+	}
+	r.skipLogAt[key] = now
+	r.mu.Unlock()
+	r.d.Log("[RESTORE-SKIP] %s %s：%s", account, kind, why)
 }
 
 func (r *Runner) now() time.Time {

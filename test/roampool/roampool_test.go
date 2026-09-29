@@ -291,6 +291,13 @@ type fakeDeps struct {
 	taskMaps []int
 	now      time.Time // 假时钟（零值 = time.Now）；P1 在途/退避用例用它控制 Status 的判定时刻
 
+	// 2026-09-29 P0-2 修法 B：日常池（神捕/烽火）回收目标。
+	dailyDeficit   int                    // 日常池缺口（正=缺人）
+	dailyEligible  func(state.Robot) bool // 日常回收资格闸（nil = 全放行）
+	dailyErr       error                  // ReclaimDaily 故意失败
+	dailyReclaimed [][]string             // ReclaimDaily 收到的批次（按调用次序）
+	roamEligible   func(state.Robot) bool // 抓鬼回收资格闸（nil = 全放行；2026-09-22 P0 口径）
+
 	disp        []dispatchCall
 	stopped     [][]string
 	logs        []string
@@ -299,9 +306,19 @@ type fakeDeps struct {
 
 func (f *fakeDeps) deps() roampool.Deps {
 	return roampool.Deps{
-		Robots:  func() []state.Robot { return f.robots },
-		Deficit: func() int { return f.deficit },
-		Maps:    func() []int { return f.maps },
+		Robots:               func() []state.Robot { return f.robots },
+		Deficit:              func() int { return f.deficit },
+		DailyDeficit:         func() int { return f.dailyDeficit },
+		ReclaimEligible:      f.roamEligible,
+		ReclaimDailyEligible: f.dailyEligible,
+		ReclaimDaily: func(accounts []string) (int, error) {
+			if f.dailyErr != nil {
+				return 0, f.dailyErr
+			}
+			f.dailyReclaimed = append(f.dailyReclaimed, append([]string(nil), accounts...))
+			return len(accounts), nil
+		},
+		Maps: func() []int { return f.maps },
 		TaskMaps: func() []int { // 任务图热读（2026-09-24 降权）；nil = 只用内置兜底集合
 			return f.taskMaps
 		},

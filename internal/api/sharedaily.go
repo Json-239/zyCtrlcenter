@@ -130,6 +130,14 @@ func (a *API) dailyInflightCountOf(kind autotask.Kind) int {
 //
 // 判据保守：条目存在且未满就算在跑（宁可少派，不重复下发）。老版机器人没有 daily 块
 // → 恒 false（等 TTL 过期，不误判）；"满额"由 DailyFull 单独表达（候选侧据此跳过）。
+//
+// 与机器人端口径的对齐（2026-09-29，#5 评估结论 = **不改逻辑**）：
+// 机器人端 __request_stop 修复（清 enabled/STOPPED 残留）后，心跳 daily 块只在
+// enabled=true 时上报（client.py:713-725）→ STOPPED 残留条目**不再出现**，本判据
+// 天然与 autotask 的 running 判据（显式排除 STOPPED，autotask.go:929-931）收敛一致。
+// 在混合版本窗口（机器人端未全部重启）内本判据会把 STOPPED 条目算"在跑"——方向是
+// **保守**（在途记账更谨慎、少派不重复派），且候选/池在跑数另有 isTasking/autotaskOnlineCount
+// 把关，不会造成重复派发或漏派；故这里不提前收紧，避免与机器人端修复叠加出双口径。
 func dailyRunningOf(r state.Robot, shareKey string) bool {
 	if _, ok := r.DailyOf(shareKey); !ok {
 		return false
@@ -364,12 +372,39 @@ func (a *API) clearShareDailyAssignedOf(kind autotask.Kind, reason string) int {
 	return n
 }
 
+// dailyBagFullSlots 日常派发的"背包近似满"阈值（心跳 bag 摘要条目数）。
+//
+// 口径说明（2026-09-29 P0-2，诚实标注近似性）：心跳**没有**空格/容量字段 —— bag 是物品
+// 摘要列表（≤60 条，client.py → daily_ghost.__get_bag_summary），且每号容量不同（包裹栏
+// 扩容包决定：现场"包满停止"发生在 29~58 条不等）。这个判据只拦"条目数明显高位"的号：
+// 现场观测——普通在线号 22~36 条，抓鬼满额后长期游荡囤货的号 48~58 条；阈值取 50
+// （≈观测峰值-8，留余量）。**宁可漏拦不误伤**（漏拦的由机器人端 BAG_FULL 停止分支兜）；
+// 精确口径应等机器人端补报"空格数/容量"（已列入建议项）。
+const dailyBagFullSlots = 50
+
+// dailyBagTooFull 分享日常派发前的背包预检（2026-09-29 P0-2）：
+// 心跳 bag 条目数 ≥ dailyBagFullSlots 视为"接近满包" → 候选剔除/回收资格剔除，不派
+// share_daily —— 否则采购被拒"背包空格不足"、接取被拒"包裹已满"，连拒后
+// HANDIN_STUCK 停止（现场 6/9 号死因；见 docs/04-测试/分析-20260929-烽火大唐任务链.md §4.2）。
+//
+// 形状兼容同 bagItems（[]any{map...}；兼容直接构造成的 []map[string]any）；无数据不拦。
+func dailyBagTooFull(r state.Robot) bool {
+	switch items := r.Bag.(type) {
+	case []any:
+		return len(items) >= dailyBagFullSlots
+	case []map[string]any:
+		return len(items) >= dailyBagFullSlots
+	}
+	return false
+}
+
 // shareDailyCandidateOf 该号能否进"某日常玩法"（shenbu/fenghuo）的候选。
 //
 // 判据（2026-09-23 shenbu 口径，2026-09-24 参数化复用给 fenghuo，两者完全相同）：
 //   - 等级 ≥ 门槛（cfg.MinLevel → 该玩法全局配置 → 默认 40；等级未知(0) 一律不进）；
 //   - 今日该玩法**未满**（心跳 done≥limit / 独立满额表；含"机器人已不再上报 daily"的兜底）；
 //   - 余额闸不拦（cfg.BalanceGate>0 且余额已知且不足 → 不进：传送费不够，派了又停）；
+//   - 背包预检：心跳 bag 近似满（dailyBagTooFull）→ 不进（派下去必死在采购/交付，P0-2）；
 //   - **没在跑别的链**：只收"该玩法意图 / 无意图 / **抓鬼已满**"的号（满额号抓鬼池已不派它）；
 //     另有"续跑"例外：当天有该玩法心跳记录或持久台账且未满的号不再让路（用户口径 2026-09-24
 //     「启动/轮转 = 恢复当前任务」——机器人进程重启后心跳丢失靠台账兜底）。
@@ -386,6 +421,9 @@ func (a *API) shareDailyCandidateOf(kind autotask.Kind, acc string, r state.Robo
 	}
 	if a.shareDailyMoneyShort(r, cfg.BalanceGate) {
 		return autotask.Candidate{}, false // 余额闸（策略配置 balance_gate；余额未知不拦）
+	}
+	if dailyBagTooFull(r) {
+		return autotask.Candidate{}, false // 背包预检（P0-2）：近满包不派，换号
 	}
 	key := a.shareDailyKeyOf(kind)
 	if key == "" {

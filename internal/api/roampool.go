@@ -32,13 +32,18 @@ func (a *API) RoampoolDeps() roampool.Deps {
 		Robots: a.roampoolRobots,
 		// 2026-09-22 P0：回收资格闸 —— 只回收"回收后真能进任务池"的号（否则回收-重派空转）
 		ReclaimEligible: a.roamReclaimEligible,
-		Deficit:         a.roampoolDeficit,
-		Maps:            a.roampoolMaps,
-		TaskMaps:        a.roampoolTaskMaps,
-		Dispatch:        a.roampoolDispatch,
-		Stop:            a.roampoolStop,
-		Now:             time.Now, // P1：Status 算"在途/退避"用
-		Log:             func(format string, args ...any) { a.Log.Printf(format, args...) },
+		// 2026-09-29 P0-2 修法 B：日常池（神捕/烽火）纳入回收目标 ——
+		// 池缺员时把"抓鬼满额转游荡"的富余号回收转投 share_daily_start。
+		DailyDeficit:         a.roampoolDailyDeficit,
+		ReclaimDailyEligible: a.roamDailyReclaimEligible,
+		ReclaimDaily:         a.roampoolReclaimDaily,
+		Deficit:              a.roampoolDeficit,
+		Maps:                 a.roampoolMaps,
+		TaskMaps:             a.roampoolTaskMaps,
+		Dispatch:             a.roampoolDispatch,
+		Stop:                 a.roampoolStop,
+		Now:                  time.Now, // P1：Status 算"在途/退避"用
+		Log:                  func(format string, args ...any) { a.Log.Printf(format, args...) },
 	}
 }
 
@@ -73,6 +78,166 @@ func (a *API) roamReclaimEligible(r state.Robot) bool {
 		return false
 	}
 	return true
+}
+
+// ---------------------------------------------------------------- 日常池回收（2026-09-29 P0-2 修法 B）
+
+// roampoolDailyDeficit 日常池缺口 = 神捕 + 烽火 deficit 之和（正=缺人）。
+//
+// 口径与 roampoolDeficit（抓鬼/新手）同款：
+//   - 未启用 / 没配目标（Target<=0）的池不参与（停用的池不会要人）；
+//   - deficit = Target - 在跑 - 在途（在途 = 直派/补发的记账，防"上一批还在路上又回收一批"）。
+//
+// 与 /api/autotask 面板的 pools.<kind>.deficit（不含在途）略有差异：这里保守多减在途，
+// 只用于"是否值得回收"的粗判；真正下发时的配额截断在 roampoolReclaimDaily（cutByPoolQuota）。
+func (a *API) roampoolDailyDeficit() int {
+	if a.AutoTask == nil {
+		return 0
+	}
+	states := a.AutoTask.States()
+	sum := 0
+	for _, k := range shareDailyFamilyKinds() {
+		st, ok := states[k]
+		if !ok || !st.Enabled || st.Target <= 0 {
+			continue
+		}
+		inflight := a.dailyInflightCountOf(k) + a.restoreInflightCountByKind(k)
+		if d := st.Target - st.Online - inflight; d > 0 {
+			sum += d
+		}
+	}
+	return sum
+}
+
+// roamDailyReclaimEligible 日常池回收资格（2026-09-29 P0-2 修法 B）：
+// 只回收"回收后神捕/烽火真能接走"的游荡号 —— 否则回收→90s 后机器人 auto_roam 又派游荡，
+// 白损耗（与 2026-09-22 抓鬼回收资格闸 roamReclaimEligible 同一教训：单号 20+ 次往返）。
+//
+// 判据（合取）：
+//   - 非人工暂停 / 非当日熔断——回收了也没人会派（restorer 与候选都跳过）；
+//   - **抓鬼已满**（GhostDoneToday / 心跳 done≥limit）：号源画像 = "抓鬼满额→转游荡"的号
+//     （现场 94% 满额号在游荡；游荡池 running≈124 > target 100 有富余）。没满的号留给
+//     抓鬼通道（roamReclaimEligible）与抓鬼候选，本通路不抢；
+//   - 对某个**已启用**的日常池满足准入：等级 ≥ 门槛（默认 40）、今日未满、余额闸不拦、
+//     心跳背包未近似满（dailyBagTooFull）。
+//
+// 调用场景：roampool keeper 的 Tick（独立 goroutine，**不在** autotask Runner 持锁回调里，
+// 可安全读 States()）。逐号一次 States() 读取（≤~124 游荡号/轮、60s 一轮）开销可忽略。
+func (a *API) roamDailyReclaimEligible(r state.Robot) bool {
+	_, ok := a.dailyReclaimKindOf(r)
+	return ok
+}
+
+// dailyReclaimKindOf 该号此刻"回收转投日常池"的目标玩法（第一个就绪的：shenbu → fenghuo，
+// 与 decideIntent / 台账兜底的固定次序一致）；没有 → ("", false)。
+func (a *API) dailyReclaimKindOf(r state.Robot) (autotask.Kind, bool) {
+	if a.St == nil || a.AutoTask == nil {
+		return "", false
+	}
+	if a.St.IsPaused(r.Account) || a.St.IsRestoreCapped(r.Account) {
+		return "", false
+	}
+	if !a.St.GhostDoneToday(r.Account) && !ghostDailyFull(r) {
+		return "", false // 抓鬼没满 → 留给抓鬼（本通路不抢）
+	}
+	states := a.AutoTask.States()
+	for _, kind := range shareDailyFamilyKinds() {
+		if !a.shareDailyPoolEnabled(kind) {
+			continue // 池停用 = 不拉新（口径同 shareDailyPoolEnabled）
+		}
+		st, ok := states[kind]
+		if !ok || st.Target <= 0 {
+			continue
+		}
+		if a.shareDailyReclaimReady(kind, r, st.Config) {
+			return kind, true
+		}
+	}
+	return "", false
+}
+
+// shareDailyReclaimReady 该号对某日常池的准入（口径与 shareDailyCandidateOf 的"号码自身"
+// 判据同源：等级/满额/余额；另加背包预检 + 重复派防护）—— 这里是**直发通道**，还要过
+// LaunchTask 的配额截断，故不含"让路（抓鬼）"这类分配类判据（那条由 dailyReclaimKindOf 把关）。
+func (a *API) shareDailyReclaimReady(kind autotask.Kind, r state.Robot, cfg autotask.Config) bool {
+	if a.shareDailyInFlightTodayOf(r.Account, r, kind) {
+		return false // 该玩法今天已派/在跑（未满）→ 不需要回收转投（防重复下发，也防刚下发的号被再派）
+	}
+	// 跨日常让路（与 shareDailyCandidateOf 同口径）：已在跑/已派**另一个**玩法（未满）→
+	// 本通路也不抢（否则两个玩法各派一次，后派者顶掉前者）。
+	for _, other := range shareDailyFamilyKinds() {
+		if other != kind && a.shareDailyInFlightTodayOf(r.Account, r, other) {
+			return false
+		}
+	}
+	if a.shareDailyFullTodayOf(r.Account, r, kind) {
+		return false // 今日该玩法已满/不可用（心跳 + 独立满额表双闸）
+	}
+	if a.shareDailyMoneyShort(r, cfg.BalanceGate) {
+		return false // 余额闸（余额未知不拦）
+	}
+	level, _ := a.accountLevel(r.Account)
+	if r.Level > 0 {
+		level = r.Level // 心跳等级优先（accountLevel 可能读到池里旧记录）
+	}
+	if level < a.shareDailyMinLevelOf(kind, cfg) {
+		return false
+	}
+	if dailyBagTooFull(r) {
+		return false // 背包预检（2026-09-29 P0-2）：近满包派下去必死在采购/交付
+	}
+	return true
+}
+
+// roampoolReclaimDaily keeper 的 ReclaimDaily 注入实现：把选中的游荡号回收**转投日常池**。
+//
+// 流程：逐号选玩法（shenbu 优先）→ 按玩法分组 → 配额截断（cutByPoolQuota，池停用=全截）→
+// LaunchTask 下发 share_daily_start（与手动「启动」同口径：带链载荷/share_key/daily_limit/done，
+// 并记在途防重复派）。机器人端收到 share_daily_start 会主动停游荡（share_daily.py:1983-1989），
+// 所以**不需要先发 stop_roam**（少一条命令、也避免两条命令竞争）。
+func (a *API) roampoolReclaimDaily(accounts []string) (int, error) {
+	if a.St == nil || len(accounts) == 0 {
+		return 0, errors.New("没有可回收的号")
+	}
+	groups := map[autotask.Kind][]string{}
+	for _, acc := range accounts {
+		r, ok := a.St.Get(acc)
+		if !ok {
+			continue
+		}
+		// 复核对齐 keeper 侧的资格闸（同一 Tick 内结果一致；防调用方直接注入）
+		if k, ready := a.dailyReclaimKindOf(r); ready {
+			groups[k] = append(groups[k], acc)
+		}
+	}
+	if len(groups) == 0 {
+		return 0, errors.New("没有号满足日常池准入（等级/满额/余额/包满/熔断闸）")
+	}
+	total := 0
+	for _, kind := range shareDailyFamilyKinds() { // shenbu → fenghuo 固定次序
+		accs := groups[kind]
+		if len(accs) == 0 {
+			continue
+		}
+		if cut := a.cutByPoolQuota(accs, kind, false); len(cut) > 0 {
+			a.Log.Printf("[ROAMPOOL] 回收→%s：池配额截断 %d 个（%v 本轮不派）", kind.Label(), len(cut), cut)
+			accs = accs[:len(accs)-len(cut)]
+		}
+		if len(accs) == 0 {
+			continue
+		}
+		ok, msg := a.LaunchTask(kind, accs)
+		if !ok {
+			a.Log.Printf("[ROAMPOOL] 回收→%s 下发失败：%s", kind.Label(), msg)
+			continue
+		}
+		total += len(accs)
+		a.Log.Printf("[ROAMPOOL] 回收→%s %d 个游荡号已转投 share_daily_start：%v", kind.Label(), len(accs), accs)
+	}
+	if total == 0 {
+		return 0, errors.New("下发失败（机器人通道未连接/池闸全拦）")
+	}
+	return total, nil
 }
 
 // roampoolRobots 当前区的机器人快照（别的区的号不参与：游荡池只对当前区生效）。

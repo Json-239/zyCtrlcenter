@@ -858,7 +858,20 @@ func (h *Handler) markShareDailyFullFromStop(account string, ev map[string]any) 
 
 func isStuckCode(code string) bool {
 	switch code {
-	case "GHOST_DIALOG_STUCK", "TASK_STUCK":
+	case "GHOST_DIALOG_STUCK", "TASK_STUCK",
+		// 2026-09-29 P0-4：分享日常（神捕/烽火）"交付连拒 13 次后停止"——机器人端
+		// share_daily.py __request_stop(g,"HANDIN_STUCK") 发 code=SHARE_DAILY_HANDIN_STUCK
+		//（SHARE_DAILY_ 前缀见 share_daily.py:3932）。旧白名单只认抓鬼码 → 该号不进
+		// StuckCount、不触发 reghost → 交付被拒后**全天无任何恢复路径**（现场 robot0005054
+		// 02:12 停止后空转 8 小时，见 docs/04-测试/分析-20260929-烽火大唐任务链.md §4.3）。
+		//
+		// 选择"收录进恢复链"（reghost→重登→按意图重派）而不是只做 ErrRepeat 封禁：
+		// 该码根因（服务端不标可交/包满/催交付口径）修复前，重登+重派是唯一可达的自愈路径；
+		// churn 面由既有三道闸兜住，不会变成无限重登循环：
+		//   ① reghost 当日卡死 ≥ ChurnLimit(3) → 熔断到次日（reghost.go:156）；
+		//   ② 熔断后 restorer 补发/候选/roampool 回收全部跳过（IsRestoreCapped）；
+		//   ③ restorer 的跳过日志（P0-5）按号 10 分钟节流，可观测不刷屏。
+		"SHARE_DAILY_HANDIN_STUCK":
 		return true
 	}
 	return strings.HasPrefix(code, "STUCK_")
