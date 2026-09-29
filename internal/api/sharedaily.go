@@ -372,23 +372,37 @@ func (a *API) clearShareDailyAssignedOf(kind autotask.Kind, reason string) int {
 	return n
 }
 
-// dailyBagFullSlots 日常派发的"背包近似满"阈值（心跳 bag 摘要条目数）。
+// dailyBagFullSlots 日常派发的"背包近似满"阈值（心跳 bag 摘要条目数，**次级兜底闸**）。
 //
-// 口径说明（2026-09-29 P0-2，诚实标注近似性）：心跳**没有**空格/容量字段 —— bag 是物品
-// 摘要列表（≤60 条，client.py → daily_ghost.__get_bag_summary），且每号容量不同（包裹栏
-// 扩容包决定：现场"包满停止"发生在 29~58 条不等）。这个判据只拦"条目数明显高位"的号：
-// 现场观测——普通在线号 22~36 条，抓鬼满额后长期游荡囤货的号 48~58 条；阈值取 50
-// （≈观测峰值-8，留余量）。**宁可漏拦不误伤**（漏拦的由机器人端 BAG_FULL 停止分支兜）；
-// 精确口径应等机器人端补报"空格数/容量"（已列入建议项）。
+// 口径说明（2026-09-29 P0-2，诚实标注近似性）：心跳 bag 是物品摘要列表（≤60 条，
+// client.py → daily_ghost.__get_bag_summary），且**每号容量不同**（包裹栏扩容包决定：
+// 现场"包满停止"发生在 29~58 条不等；服务端真实空格/容量无协议下发 —— pool-fix-bot
+// 2026-09-29 查证：BagItemPocket.__max_volume 私有、get_free_count 无 S2C）。条目数≠格数
+// （多格/扩容/任务物品都会偏）——所以本闸只拦"条目数明显高位"的号（现场观测：普通号
+// 22~36 条，长期游荡囤货号 48~58 条；阈值取 50 ≈ 观测峰值-8）。宁漏不误伤。
+// 主信号是 dailyBagFullAgeWindowMS 的"包满被拒"权威信号；本闸是它缺席/过期时的兜底。
 const dailyBagFullSlots = 50
 
-// dailyBagTooFull 分享日常派发前的背包预检（2026-09-29 P0-2）：
-// 心跳 bag 条目数 ≥ dailyBagFullSlots 视为"接近满包" → 候选剔除/回收资格剔除，不派
-// share_daily —— 否则采购被拒"背包空格不足"、接取被拒"包裹已满"，连拒后
-// HANDIN_STUCK 停止（现场 6/9 号死因；见 docs/04-测试/分析-20260929-烽火大唐任务链.md §4.2）。
+// dailyBagFullAgeWindowMS "包满被拒"权威信号的有效窗口（2026-09-29 拍板：双证据并集）。
+// 机器人心跳上报 bag_full_age_ms（最近一次"包裹满"类权威拒绝距今毫秒，服务端通知为源）；
+// age ∈ (0, 窗口] → 视为"近包满"避让（候选剔除/回收跳过）；超窗自愈放行（stop 后 age
+// 随时间增长自然过期，无需机器人端清零）。0/缺失 = 未知/从未 → 不拦（旧心跳不误拦）。
+const dailyBagFullAgeWindowMS = 30 * 60 * 1000
+
+// dailyBagTooFull 分享日常派发前的背包预检（2026-09-29 P0-2，**双证据并集**）：
+//
+//	① 权威信号：心跳 bag_full_age_ms ∈ (0, 30min]（最近被服务端以"包裹满"拒绝过）→ 近满包；
+//	② 兜底近似：心跳 bag 条目数 ≥ dailyBagFullSlots（见上，字段缺席/过期时仍拦囤积号）。
+//
+// 任一命中即避让（候选剔除 / roampool 回收资格剔除，换号派）——否则采购被拒"背包空格不足"、
+// 接取被拒"包裹已满"，连拒后 HANDIN_STUCK 停止（现场 6/9 号死因；见
+// docs/04-测试/分析-20260929-烽火大唐任务链.md §4.2）。
 //
 // 形状兼容同 bagItems（[]any{map...}；兼容直接构造成的 []map[string]any）；无数据不拦。
 func dailyBagTooFull(r state.Robot) bool {
+	if r.BagFullAgeMS > 0 && r.BagFullAgeMS <= dailyBagFullAgeWindowMS {
+		return true // ① 权威信号：窗口内被"包满"拒过（机器人端已尽力清理，仍先避让换号）
+	}
 	switch items := r.Bag.(type) {
 	case []any:
 		return len(items) >= dailyBagFullSlots

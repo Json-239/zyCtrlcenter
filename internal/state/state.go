@@ -93,9 +93,17 @@ type Robot struct {
 	HP         []int  `json:"hp,omitempty"` // [当前, 上限]（机器人上报就是二元数组）
 	MP         []int  `json:"mp,omitempty"` // [当前, 上限]
 	Bag        any    `json:"bag,omitempty"`
-	Equip      any    `json:"equip,omitempty"`
-	Summons    any    `json:"summons,omitempty"`
-	Booth      any    `json:"booth,omitempty"`
+	// BagFullAgeMS 最近一次"包裹满"类**权威拒绝**距今的毫秒数（机器人端心跳上报，
+	// 2026-09-29 契约）：源 = 服务端"包满"通知（528/549/839/63 等）的时间戳，与
+	// m_share_daily.bag_full_ms 同源；**不要求会话 enabled**（因包满而停止的号也要能报出，
+	// 否则"停了别马上再派"的信号正好丢失）。
+	//
+	// 0 / 字段缺失 = 未知/从未（判据侧一律不拦；旧版机器人不带 → 天然兼容）。
+	// 消费方：分享日常候选 / roampool 回收资格（api.dailyBagTooFull 双证据之一，窗口 30 分钟）。
+	BagFullAgeMS int64 `json:"bag_full_age_ms,omitempty"`
+	Equip        any   `json:"equip,omitempty"`
+	Summons      any   `json:"summons,omitempty"`
+	Booth        any   `json:"booth,omitempty"`
 	// Walk 游荡状态（机器人上报原样透传）：{enabled,mapid,state}。
 	// 2026-09-22 试跑实测：号刚被派去半月岛，恢复引擎就把它当"没任务"补发 ghost_start
 	// （游荡内部会互相排斥地停掉抓鬼），游荡被打断 → 加这个字段让恢复/自动任务让路。

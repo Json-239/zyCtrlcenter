@@ -611,6 +611,15 @@ func (h *Handler) onStatusReply(ev map[string]any) {
 			if v, ok := st["bag"]; ok {
 				r.Bag = v
 			}
+			// 背包"包满"权威信号（2026-09-29 契约，与 pool-fix-bot 对齐口径）：
+			// bag_full_age_ms = 最近一次"包裹满"类通知距今毫秒（不要求会话 enabled——
+			// 因包满停止的号也要能报出）。**不带 = 未知/从未 → 清 0**（旧版机器人 / 机器人
+			// 重启后不再报 → 不误拦）；消费方见 api.dailyBagTooFull（0/缺失一律不拦）。
+			if v, ok := st["bag_full_age_ms"]; ok {
+				r.BagFullAgeMS = int64(toInt(v))
+			} else {
+				r.BagFullAgeMS = 0
+			}
 			if v, ok := st["equip"]; ok {
 				r.Equip = v
 			}
