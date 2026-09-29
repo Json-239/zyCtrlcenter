@@ -165,6 +165,8 @@ func main() {
 
 	// 恢复引擎的"派发前最后一道闸"：抓鬼等级门槛（api 层实现，晚绑定 —— restorer 先构造）
 	var skipHook func(kind, account string) (bool, string)
+	// 恢复引擎的"离线已派号定向补拉"（2026-09-29 神捕闸门修复④）：同为晚绑定（api 后构造）
+	var onlineHook func(accounts []string) (int, error)
 
 	// ---- 链载荷（抓鬼必须带导航数据下发；两处共用一份缓存）----
 	payloads := api.NewPayloads(cfg)
@@ -192,7 +194,14 @@ func main() {
 		GhostDailyLimit: func() int { return payloads.GhostDailyLimit() },
 		// 分享日常家族（shenbu / fenghuo）：补发参数按意图 kind 取（share_key + daily_limit）。
 		ShareDaily: payloads.ShareDailyParams,
-		Log:        log.Printf,
+		// ④ 离线已派号定向补拉（晚绑定到 webAPI.OnlineForRestore；见 Deps.Online 注释）。
+		Online: func(accs []string) (int, error) {
+			if onlineHook == nil {
+				return 0, errors.New("补拉能力未装配")
+			}
+			return onlineHook(accs)
+		},
+		Log: log.Printf,
 	})
 	go restore.Run(ctx)
 
@@ -223,6 +232,7 @@ func main() {
 	// 2026-09-29 神捕闸门修复②：心跳有效等级回写账号池 zone-level（池内陈旧等级的根治）
 	ev.SetLevelSync(webAPI.SyncPoolLevel)
 	skipHook = webAPI.GhostSkipFunc()
+	onlineHook = webAPI.OnlineForRestore // ④ 恢复引擎"离线已派号定向补拉"→ 壳层批量上线通路（晚绑定完成）
 	go webAPI.AutoTask.Run(ctx)
 	go webAPI.Reghost.Run(ctx)
 	webAPI.LoadAutoTask() // 恢复上次的定时任务参数（保持数/间隔/启用状态；2026-09-21 落盘）

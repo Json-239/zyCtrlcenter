@@ -37,6 +37,9 @@ const (
 	// 都没在跑"，一轮全补会直接把池子灌爆（生产实测一轮补过 87 个，抓鬼超编到 218）。
 	// 与水位/游荡池的单轮 max_step=5 同口径。
 	DefaultMaxPerRound = 5
+	// onlineCoolSec "离线已派号定向补拉"的按号冷却（2026-09-29 神捕闸门修复④）：
+	// 10 分钟一次 —— 与 SkipLogSec 同量级；补拉本身由机器人端 add 幂等去重，冷却只防刷。
+	onlineCoolSec = 600
 	// SkipLogSec 跳过类日志的**按号节流**窗口（2026-09-29 P0-5）：Skip 闸 / needsRestore
 	// 跳过原来全静默 —— 现场"为什么 8 小时没人救"（robot0005054）无法从日志定位。
 	// 取 10 分钟：一个号空转 8 小时能留 ~48 条「持续被跳过」证据，又不会把日志刷爆
@@ -135,6 +138,13 @@ type Deps struct {
 	// 入参 = 补发意图 kind（Group.Kind），返回该玩法的 (share_key, daily_limit)。
 	// 与 GhostDailyLimit 同款 —— 补发 share_daily_start 必须带玩法键与日限，否则机器人端无从归属。
 	ShareDaily func(kind string) (shareKey string, dailyLimit int)
+	// Online "离线已派号定向补拉"（2026-09-29 神捕闸门修复④；nil = 保持旧行为：离线仅日志）：
+	// 对"已派（意图命中）∧ 离线 ∧ 未暂停"的**日常玩法**号调用一次批量上线
+	// （壳层复用 sendOnlineChunks：robot_manage add，密码只从池里取）。返回 (发出数, error)。
+	// Runner 侧按号 onlineCoolSec 冷却，避免每 5s 轮询重复补拉。
+	// 为什么只限日常玩法：抓鬼/新手链有各自池子的候选+上线通路（池预算/轮换），
+	// 而"已派神捕但掉线"的号没有其他拥有人（restorer 是唯一带该语义的路径）。
+	Online func(accounts []string) (int, error)
 
 	RetrySec    int
 	MaxAttempts int
@@ -153,6 +163,8 @@ type Runner struct {
 	st map[string]*Status
 	// skipLogAt 跳过类日志上次真正写出的时间（键 = 账号|kind；P0-5，见 SkipLogSec）。
 	skipLogAt map[string]time.Time
+	// onlineAt "离线定向补拉"上次触发时间（键 = 账号；2026-09-29 修复④，冷却 onlineCoolSec）。
+	onlineAt map[string]time.Time
 }
 
 // New 创建恢复器（零值字段用默认值补齐）。
@@ -274,6 +286,38 @@ func (r *Runner) TickForce(now time.Time, force bool) []Action {
 		}
 		robot, ok := r.d.Robot(it.Account)
 		if !ok || !robot.Online {
+			// ④ 2026-09-29（神捕闸门修复④）：离线**不再静默跳过** —— 旧实现 continue 无声，
+			// "已派神捕但掉线"的号（无其他拥有人：水位只在低于目标时拉、池候选/补拉够不着）
+			// 重启后永远无人补拉（现场 5165/5167/5176/5240）。
+			// 处置：日常玩法（shenbu/fenghuo）∧ 未暂停 → 按号冷却定向补拉上线（复用池通路）；
+			// 其余情况也至少落一条 [RESTORE-SKIP] 留痕。
+			if ok && !robot.Online && !robot.Paused && (it.Kind == intent.KindShenbu || it.Kind == intent.KindFenghuo) {
+				if r.d.Online != nil {
+					if r.onlineDue(it.Account, now) {
+						n, err := r.d.Online([]string{it.Account})
+						if err != nil || n == 0 {
+							why := "离线（已派未满）：定向补拉失败"
+							if err != nil {
+								why += "：" + err.Error()
+							}
+							r.logSkipThrottled(it.Account, string(it.Kind), why, now)
+						} else {
+							r.logSkipThrottled(it.Account, string(it.Kind),
+								"离线（已派未满）→ 已定向补拉上线，等心跳后再补发任务", now)
+						}
+					} else {
+						r.logSkipThrottled(it.Account, string(it.Kind), "离线（已派未满）：补拉冷却中", now)
+					}
+				} else {
+					r.logSkipThrottled(it.Account, string(it.Kind), "离线：跳过（未装配自动补拉）", now)
+				}
+			} else if ok && robot.Paused {
+				r.logSkipThrottled(it.Account, string(it.Kind), "离线且人工暂停：不自动补拉", now)
+			} else if ok {
+				r.logSkipThrottled(it.Account, string(it.Kind), "离线：跳过（该玩法由池子/水位补拉）", now)
+			} else {
+				r.logSkipThrottled(it.Account, string(it.Kind), "无状态记录：跳过（等心跳/上线）", now)
+			}
 			continue
 		}
 		if !needsRestore(robot, it.Kind) {
@@ -471,6 +515,20 @@ func (r *Runner) statusFor(account string) *Status {
 //
 // 节流键含 kind：同一号意图被改判（如 ghost→fenghuo）时立刻给出一条新记录，便于
 // 跟踪意图迁移；同键则每 SkipLogSec（10 分钟）至多一条。
+// onlineDue 该号是否到了"离线定向补拉"的冷却窗口（触发即记录本次时间；见 onlineCoolSec）。
+func (r *Runner) onlineDue(account string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.onlineAt == nil {
+		r.onlineAt = map[string]time.Time{}
+	}
+	if last, ok := r.onlineAt[account]; ok && now.Sub(last) < onlineCoolSec*time.Second {
+		return false
+	}
+	r.onlineAt[account] = now
+	return true
+}
+
 func (r *Runner) logSkipThrottled(account, kind, why string, now time.Time) {
 	if r.d.Log == nil {
 		return

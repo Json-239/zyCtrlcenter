@@ -964,6 +964,25 @@ func (a *API) onlineForAuto(accs []string) (int, error) {
 	return len(sentAccounts), nil
 }
 
+// OnlineForRestore restorer 的"离线已派号定向补拉"（2026-09-29 神捕闸门修复④；
+// main 注入 restorer.Deps.Online）：与批量上线共用 sendOnlineChunks（robot_manage add，
+// 密码只从池里取、无密码跳过）；独立 tag/事件便于审计。返回 (发出数, error)。
+func (a *API) OnlineForRestore(accs []string) (int, error) {
+	if len(accs) == 0 {
+		return 0, errors.New("没有可补拉的号")
+	}
+	sent, chunks, noPwd := a.sendOnlineChunks(accs, a.gameAddrOf(""), 5, 300, "restore_online")
+	if len(sent) == 0 {
+		return 0, errors.New("没有可上线的号（池里没密码或通道未连接）")
+	}
+	if a.Store != nil {
+		a.Store.LogEvent(map[string]any{"type": "api", "action": "restore_online",
+			"zone": a.currentZoneKey(), "requested": len(accs), "sent": len(sent),
+			"chunks": chunks, "no_pwd": len(noPwd)})
+	}
+	return len(sent), nil
+}
+
 // registerForAuto 自动注册：按配置前缀/序号/后缀生成名字 → **后台**注册并入池，
 // 立即返回计划名单（引擎只关心"下一轮有号可挑"，不等注册完成）。
 func (a *API) registerForAuto(count int) ([]string, error) {
