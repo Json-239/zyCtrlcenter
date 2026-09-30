@@ -111,7 +111,8 @@ def _install_stubs():
 
     def _stop(ro, reason=""):
         _SE["stop"].append(reason)
-        _SE["status"] = {"active": False, "result": "failed", "reason": reason, "owner": "",
+        # 对齐真实 shop_errand.stop: 置 failed 后**立即 release**(锁清) → status 恢复空
+        _SE["status"] = {"active": False, "result": None, "reason": "", "owner": "",
                          "item": None, "count": None}
 
     se.start = _start
@@ -140,6 +141,12 @@ def _install_stubs():
     dg.__get_bag_summary = lambda ro: [{"name": "金创药", "count": 5, "pos": 8192}]
     sys.modules.setdefault("daily_ghost", dg)
 
+    # quest_state stub（P1 __report_stuck 提取执行用）
+    qs = types.ModuleType("quest_state")
+    for _k in ("ST_IDLE", "ST_NAV", "ST_ERROR", "ST_DONE", "ST_WAIT_NEXT"):
+        setattr(qs, _k, _k.replace("ST_", ""))
+    sys.modules.setdefault("quest_state", qs)
+
     # random_walk / robot_path 等被 stop_collect_walk / 其它路径惰性 import 的模块
     rw = types.ModuleType("random_walk")
     sys.modules.setdefault("random_walk", rw)
@@ -164,9 +171,16 @@ class FakeQuest(object):
         self.active = False
         self.state = "IDLE"
         self.active_task_index = 0
+        self.last_error = None
 
     def error_fields(self):
         return ("", 0)
+
+    def mark_error(self, code, msg=""):
+        self.last_error = (code, msg)
+
+    def set_state(self, st):
+        self.state = st
 
 
 class FakeRobot(object):
@@ -395,6 +409,76 @@ check("④W3 10 分钟节流到点 → 再发一条", len(_warns3) == 2, "warns=
 r.m_bag_cache = {102007: [11111, 5]}
 A._check_heal_starve(r, st, _t0 + 18 * 60 * 1000)
 check("④W4 有药恢复 → starve 计时清零", int(st.get("heal_starve_since", 0) or 0) == 0)
+
+# ================================================================
+# P1(2026-09-30): 收尾与 tick 解耦 —— heal_buy_abort 外部收尾入口
+# ================================================================
+# H15 在途会话 → abort: 释放锁 + 清标记 + 落退避
+r = new_robot(hp=1000, jc_count=0)
+st = A.get_state(r)
+reset_se()
+st["heal_buy_active"] = True
+st["heal_buy_start_ms"] = now_ms() - 30 * 1000
+st["heal_buy_item"] = 102007
+_t = A.heal_buy_abort(r, "stuck: 任务 0 换图推送迟迟未到")
+check("①P1-H15 在途会话 → abort: stop(释放锁)+清标记+落退避(第1次)",
+      _t is True and st["heal_buy_active"] is False and st["heal_buy_fails"] == 1
+      and any("heal_buy aborted" in (x or "") for x in _SE["stop"]),
+      "stop=%s fails=%s" % (_SE["stop"][:2], st.get("heal_buy_fails")))
+# H16 幂等: 二连调无副作用
+_cd_before = A._heal_buy_cooldown_ms(st)
+_t2 = A.heal_buy_abort(r, "again")
+check("①P1-H16 幂等: 二次调用 False 且 stop 不重复/fails 不翻倍",
+      _t2 is False and len(_SE["stop"]) == 1 and A._heal_buy_cooldown_ms(st) == _cd_before,
+      "stop_n=%d" % len(_SE["stop"]))
+# H17 不碰他人(抓鬼会话不置本标记)
+r = new_robot(hp=1000, jc_count=0)
+st = A.get_state(r)
+reset_se()
+_t3 = A.heal_buy_abort(r, "x")
+check("①P1-H17 无本模块会话(如抓鬼买药) → 不碰(False, stop 未调)",
+      _t3 is False and len(_SE["stop"]) == 0)
+# H18 端到端: quest_engine.__report_stuck 出口必触达 abort(提取真执行)
+_qe_src = _read_src(os.path.join(SCRIPT_DIR, "quest_engine.py"))
+_mr = re.search(r"(def __report_stuck\(robot_object, quest, reason\):.*?)\n(?=\n\n|\ndef |\nclass )",
+                _qe_src, re.S)
+if _mr:
+    r = new_robot(hp=1000, jc_count=0)
+    st = A.get_state(r)
+    st["heal_buy_active"] = True
+    r.m_quest = FakeQuest()
+    reset_se()
+    _ns2 = {"__emit": lambda ro, ev: None, "quest_state": sys.modules["quest_state"]}
+    exec(compile(_mr.group(1), "<qe_report_stuck>", "exec"), _ns2)
+    _ns2["__report_stuck"](r, r.m_quest, "换图推送迟迟未到, 无法走向跳转点")
+    check("①P1-H18 端到端: __report_stuck 出口 → heal_buy_abort 被触达(锁释放)",
+          any("heal_buy aborted" in (x or "") for x in _SE["stop"])
+          and st["heal_buy_active"] is False,
+          "stops=%s" % _SE["stop"][:2])
+else:
+    check("①P1-H18 提取 __report_stuck", False, "未定位")
+# H19 abort 后冷却外可再次触发(锁已释放, 号可恢复)
+r = new_robot(hp=1000, jc_count=0)
+st = A.get_state(r)
+reset_se()
+st["heal_buy_active"] = True
+A.heal_buy_abort(r, "stuck")
+st["last_buy_heal_ms"] = now_ms() - 3600 * 1000   # 冷却外
+_t4 = A._heal_buy_tick(r, st, now_ms())
+check("①P1-H19 abort 后冷却外可再次触发(锁已释放, 号可恢复)",
+      _t4 is True and len(_SE["start"]) == 1, "start=%s stop=%s" % (_SE["start"][:1], _SE["stop"][:1]))
+# S4 坏版灵敏度: 修复前(healbuyfix 备份)无 heal_buy_abort / __report_stuck 无钩子
+_bak2 = os.path.join(SCRIPT_DIR, "auto_summon.py.bak_20260930_healbuyfix")
+if os.path.isfile(_bak2):
+    _bad2 = _load_module("auto_summon_bad2", _bak2)
+    check("①P1-S4a 坏版灵敏度: 修复前无 heal_buy_abort（H15 必 FAIL）",
+          not hasattr(_bad2, "heal_buy_abort"))
+    _qb2 = os.path.join(SCRIPT_DIR, "quest_engine.py.bak_20260930_healbuyfix")
+    _qb_src = _read_src(_qb2) if os.path.isfile(_qb2) else ""
+    check("①P1-S4b 坏版灵敏度: 修复前 __report_stuck 无 heal_buy_abort 钩子（H18 必 FAIL）",
+          "heal_buy_abort" not in _qb_src and "heal_buy_abort" in _qe_src)
+else:
+    check("①P1-S4 坏版备份存在（灵敏度）", False, _bak2)
 
 # ================================================================
 # ② quest_engine.__emit_state 补 hp/mp/bag
