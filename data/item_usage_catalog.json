@@ -29,7 +29,10 @@
     {"key": "egg_guardian", "label": "元气蛋/守护蛋（图10 打怪孵化）"},
     {"key": "discard", "label": "丢弃（追捕令/低等级装备）"},
     {"key": "sell", "label": "卖出（仅摆摊上架）"},
-    {"key": "quest_recycle", "label": "任务上交"}
+    {"key": "quest_recycle", "label": "任务上交"},
+    {"key": "exp", "label": "经验/货币类道具（经验丹/宝箱/宝钞等）"},
+    {"key": "misc", "label": "杂项（功能道具）"},
+    {"key": "skill_book", "label": "守护技能书/满历练书"}
   ],
   "items": [
     {
