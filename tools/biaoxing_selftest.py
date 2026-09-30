@@ -129,6 +129,10 @@ def main():
        all(k in src for k in ("BIAOXING_KEY = ", "BIAOXING_DEPOSIT_MONEY = 10000",
                               "BIAOXING_TIME_LIMIT_MS = 30 * 60 * 1000",
                               "BIAOXING_MAIN_TASKS = ", "BIAOXING_BONUS_TASK = 20011999")))
+    ok("S:试点放行开关(预检内读 robot_biaoxing_skip_precheck + warn 文案)",
+       "robot_biaoxing_skip_precheck" in src and "预检已放行" in src
+       and ("robot_biaoxing_skip_precheck" in
+            (_extract_func(src, "biaoxing_accept_precheck") or "")))
     ok("S:构成函数齐全(__is_biaoxing/accept_precheck/note_fight_end/finish/drop/tick_note)",
        all(("def %s(" % f) in src for f in (
            "__is_biaoxing", "biaoxing_accept_precheck", "biaoxing_note_fight_end",
@@ -268,6 +272,10 @@ def main():
         ok("CTRL:__is_biaoxing 空/异常兜底 False",
            is_bx(_G()) is False and is_bx(None) is False)
 
+    # 试点开关：config 桩（可编程 robot_biaoxing_skip_precheck）
+    cfg_sw = types.ModuleType("config")
+    _prev_cfg = sys.modules.get("config")
+    sys.modules["config"] = cfg_sw
     if precheck is not None:
         ro = types.SimpleNamespace(m_money=5000)
         code, why = precheck(ro)
@@ -281,6 +289,24 @@ def main():
         ok("D:预检 恰好 1 金 → 过", precheck(ro) == ("", ""))
         ro = types.SimpleNamespace(m_money=123456)
         ok("D:预检 充裕 → 过", precheck(ro) == ("", ""))
+        # 2026-09-30 试点开关三态
+        cfg_sw.robot_biaoxing_skip_precheck = True
+        logs[:] = []
+        code, why = precheck(types.SimpleNamespace(m_money=5000))
+        ok("D:试点开关=True → 放行(现金 5000 也过)+warn 留痕",
+           code == "" and why == "" and any("预检已放行" in m for _l, m in logs), (code, logs))
+        cfg_sw.robot_biaoxing_skip_precheck = False
+        logs[:] = []
+        ok("D:试点开关=False → 恢复拦截(BALANCE_LOW)且不记放行日志",
+           precheck(types.SimpleNamespace(m_money=5000))[0] == "BALANCE_LOW"
+           and not any("预检已放行" in m for _l, m in logs))
+        delattr(cfg_sw, "robot_biaoxing_skip_precheck")
+        ok("D:开关属性缺省(未配置) → 按 False 拦截",
+           precheck(types.SimpleNamespace(m_money=5000))[0] == "BALANCE_LOW")
+    if _prev_cfg is not None:
+        sys.modules["config"] = _prev_cfg
+    else:
+        sys.modules.pop("config", None)
 
     if n_fight is not None:
         g1 = types.SimpleNamespace(bx_last_fight_end_ms=0)
