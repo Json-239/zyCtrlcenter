@@ -24,6 +24,7 @@
 
 只读：仅读文件 + 抽取函数体在本进程 exec 驱动（不启动机器人、不改任何文件）。
 """
+import json
 import os
 import re
 import sys
@@ -479,6 +480,101 @@ def main():
                                         has_pending=False)
             ok("CTRL:活动说明不误点（含'镖行天下'但不含任务名）",
                idx14 is None and kind14 == "", (idx14, kind14))
+
+    # ================================================================ done 计数修正 A+B
+    print("== 6) done 计数修正 A+B（2026-09-30，报告 62a7b62）==")
+    ok("S:修正A 落盘带 key 字段",
+       '"key": str(getattr(g, "share_key", "") or "")' in src)
+    ok("S:修正A 启动跨 key 不继承 _cur（count_key 守卫）",
+       'if str(getattr(g, "count_key", "") or "") != share_key:' in src
+       and "g.count_key = share_key" in src)
+    ok("S:修正B settle arm 闸（__settle_arm_keys 定义 + __on_task_finish 调用）",
+       "def __settle_arm_keys(" in src and "if not _arm or int(ti) in _arm:" in src
+       and "__settle_arm_keys(g)" in (_extract_func(src, "__on_task_finish") or ""))
+
+    import tempfile
+    ns6 = {}
+    if cfg is None:
+        ok("D:计数修正驱动需要 config 实例", False, "section2 cfg=None")
+    else:
+        ns6["get_config"] = lambda force_reload=False: cfg
+        for fn in ("__ct_state_path", "__today_key", "__load_local_count",
+                   "__save_local_count", "__main_count_roots", "__settle_arm_keys"):
+            frag = _extract_func(src, fn)
+            if frag:
+                try:
+                    exec(compile(frag, "<f6>", "exec"), ns6)
+                except Exception as e:  # noqa
+                    ok("D:exec %s" % fn, False, repr(e))
+            else:
+                ok("D:提取 %s" % fn, False)
+        tmpdir = tempfile.mkdtemp(prefix="bx_cnt_")
+        os.environ["ZCC_SHARE_DAILY_STATE_DIR"] = tmpdir
+        ro6 = types.SimpleNamespace(m_account=["robotTEST"])
+        try:
+            _t = ns6["__today_key"]()
+        except Exception:
+            _t = ""
+        KA, KB = "share_daily_镖局嘱托", "share_daily_镖行天下"
+        cnt_path = os.path.join(tmpdir, "share_daily_robotTEST.json")
+        # 1) 同 key 恢复 / 跨 key 不恢复 / 无 key 旧格式不恢复 / 非今日不恢复
+        try:
+            with open(cnt_path, "w", encoding="utf-8") as f:
+                json.dump({"date": _t, "done": 3, "key": KA}, f)
+            a = ns6["__load_local_count"](ro6, KA)
+            b = ns6["__load_local_count"](ro6, KB)
+            c = ns6["__load_local_count"](ro6, None)
+            ok("D:本地计数 同 key 恢复=3 / 跨 key=0 / 无参=3(兼容)",
+               a == 3 and b == 0 and c == 3, (a, b, c))
+        except Exception as e:  # noqa
+            ok("D:本地计数 同 key 恢复=3 / 跨 key=0 / 无参=3(兼容)", False, repr(e))
+        try:
+            with open(cnt_path, "w", encoding="utf-8") as f:
+                json.dump({"date": _t, "done": 2}, f)
+            ok("D:旧格式(无 key)不恢复 → 0", ns6["__load_local_count"](ro6, KA) == 0)
+        except Exception as e:  # noqa
+            ok("D:旧格式(无 key)不恢复 → 0", False, repr(e))
+        try:
+            with open(cnt_path, "w", encoding="utf-8") as f:
+                json.dump({"date": "19700101", "done": 5, "key": KA}, f)
+            ok("D:非今日不恢复 → 0", ns6["__load_local_count"](ro6, KA) == 0)
+        except Exception as e:  # noqa
+            ok("D:非今日不恢复 → 0", False, repr(e))
+        # 2) save 带 key
+        try:
+            g6 = types.SimpleNamespace(done_count=2, share_key=KA)
+            _saved = ns6["__save_local_count"](ro6, g6)
+            _content = json.load(open(cnt_path, encoding="utf-8"))
+            ok("D:save 落盘含 key/done/date",
+               _saved is True and _content == {"date": _t, "done": 2, "key": KA}, _content)
+        except Exception as e:  # noqa
+            ok("D:save 落盘含 key/done/date", False, repr(e))
+        # 3) settle arm 键集
+        try:
+            gA = types.SimpleNamespace(
+                chain={"share_daily": {"count_roots": [2001101, 2001110]},
+                       "task_order": [{"task_index": 2001101}, {"task_index": 2001113}]},
+                share_key="share_daily_镖行天下")
+            kA = ns6["__settle_arm_keys"](gA)
+            ok("D:arm 键=主roots∪链尾；入口 2001107 不在（伪结算闸）",
+               kA == set([2001101, 2001110, 2001113]), kA)
+            gB = types.SimpleNamespace(chain={"task_order": [{"task_index": 111}, {"task_index": 222}]},
+                                       share_key=KA)
+            kB = ns6["__settle_arm_keys"](gB)
+            ok("D:无 count_roots → 本地推导 roots∪链尾", kB == set([111, 222]), kB)
+            gC = types.SimpleNamespace(chain={}, share_key=KA)
+            ok("D:无链数据 → 空集(调用方回退全 arm 旧行为)",
+               ns6["__settle_arm_keys"](gC) == set())
+        except Exception as e:  # noqa
+            ok("D:arm 键=主roots∪链尾；入口 2001107 不在（伪结算闸）", False, repr(e))
+            ok("D:无 count_roots → 本地推导 roots∪链尾", False, repr(e))
+            ok("D:无链数据 → 空集(调用方回退全 arm 旧行为)", False, repr(e))
+        os.environ.pop("ZCC_SHARE_DAILY_STATE_DIR", None)
+        try:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
     # ================================================================ 结果
     def _grp(prefix, items=None):

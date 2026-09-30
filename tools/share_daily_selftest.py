@@ -514,17 +514,29 @@ check("S5b 旧日期记录不认", getattr(S, "__load_local_count")(r) == 0)
 with open(_p, "w", encoding="utf-8") as _f:
     _f.write("{broken")
 check("S5b 损坏文件按无记录", getattr(S, "__load_local_count")(r) == 0)
-# 启动时本地计数恢复（无服务端记录场景）：预写今日 1 → start 后 done=1
+# 启动时本地计数恢复（无服务端记录场景）：预写今日 1（同 key）→ start 后 done=1
+# 2026-09-30 done 计数修正 A：落盘带 "key" 字段，恢复仅限同 key。
 with open(_p, "w", encoding="utf-8") as _f:
-    _json.dump({"date": time.strftime("%Y%m%d"), "done": 1}, _f)
+    _json.dump({"date": time.strftime("%Y%m%d"), "done": 1, "key": "share_daily_大唐神捕"}, _f)
 r = fresh_robot()
 g = S.ShareDailyState()
 r.m_share_daily = g
 _rep = S.dispatch_cmd(r, {"cmd": "share_daily_start", "share_key": "share_daily_大唐神捕",
                           "daily_limit": 10,
                           "chain": {"task_order": [{"task_index": 2028301}, {"task_index": 2028302}]}})
-check("S5b 启动时恢复本地计数（重启不丢：1 保持为 1）",
+check("S5b 启动时恢复本地计数（同 key 重启不丢：1 保持为 1）",
       g.done_count == 1, "done=%s rep=%s" % (g.done_count, str(_rep)[:60]))
+# 2026-09-30 done 计数修正 A 反例：跨 key 不继承（他 key 的落盘不得恢复进本 key）
+with open(_p, "w", encoding="utf-8") as _f:
+    _json.dump({"date": time.strftime("%Y%m%d"), "done": 2, "key": "share_daily_镖局嘱托"}, _f)
+r = fresh_robot()
+g = S.ShareDailyState()
+r.m_share_daily = g
+_rep = S.dispatch_cmd(r, {"cmd": "share_daily_start", "share_key": "share_daily_大唐神捕",
+                          "daily_limit": 10,
+                          "chain": {"task_order": [{"task_index": 2028301}, {"task_index": 2028302}]}})
+check("S5b 跨 key 不恢复（他 key done=2 → 本 key 启动 done=0）",
+      g.done_count == 0, "done=%s rep=%s" % (g.done_count, str(_rep)[:60]))
 # 2026-09-24 回归：下一轮"秒接"不再吞计数 —— 结算等待只认"本轮收尾（链尾）在身"；
 # 在身=下一轮主任务 → 本轮照常结算（现场 5275 第 2 轮被吞）。
 os.environ["ZCC_SHARE_DAILY_STATE_DIR"] = _tmpdir
