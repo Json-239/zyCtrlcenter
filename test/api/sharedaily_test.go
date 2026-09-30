@@ -342,7 +342,8 @@ func TestDailyOverviewStateEnums(t *testing.T) {
 }
 
 // queue 固定次序（gp-2 约定，中控侧保序、前端不排序）：ghost → newbie → shenbu → fenghuo → biaoxing，
-// 与心跳数组给的顺序无关（同权重 stable）。
+// 未知排最后；与心跳数组给的顺序无关（同权重 stable）。混入未知 kind 以区分 biaoxing(4) 与未知(9)——
+// 无未知元素时 rank=4 与 rank=9 单调等价，用例会失去区分度（复核 P3-1）。
 func TestDailyOverviewQueueOrder(t *testing.T) {
 	env := newTestEnv(t, "")
 	env.ev.HandleEvent(map[string]any{"type": "status_reply", "server": "s:1",
@@ -350,6 +351,7 @@ func TestDailyOverviewQueueOrder(t *testing.T) {
 			"state": "IDLE", "task_index": 0,
 			"daily": []any{
 				map[string]any{"share_key": "share_daily_宫廷10", "done": 2, "limit": 20, "state": "KILL"},
+				map[string]any{"share_key": "share_daily_unknown_zzz", "done": 0, "limit": 5, "state": "READY"},
 				map[string]any{"share_key": "share_daily_镖行天下", "done": 0, "limit": 40, "state": "READY"},
 				map[string]any{"share_key": "share_daily_大唐神捕", "done": 1, "limit": 10, "state": "KILL"},
 			}}},
@@ -362,15 +364,20 @@ func TestDailyOverviewQueueOrder(t *testing.T) {
 	}
 	row, _ := rows[0].(map[string]any)
 	q := asSlice(row["queue"])
-	if len(q) != 3 {
-		t.Fatalf("应有三条进度: %v", row["queue"])
+	if len(q) != 4 {
+		t.Fatalf("应有四条进度: %v", row["queue"])
 	}
 	k0, _ := q[0].(map[string]any)
 	k1, _ := q[1].(map[string]any)
 	k2, _ := q[2].(map[string]any)
-	if k0["kind"] != "shenbu" || k1["kind"] != "fenghuo" || k2["kind"] != "biaoxing" {
-		t.Fatalf("queue 应按 ghost→newbie→shenbu→fenghuo→biaoxing 固定次序（与心跳数组顺序无关），实际 %v → %v → %v",
-			k0["kind"], k1["kind"], k2["kind"])
+	k3, _ := q[3].(map[string]any)
+	// 未知 kind 的 share_key 认不出来 → kind 空串，排最后（rank 9）
+	if k0["kind"] != "shenbu" || k1["kind"] != "fenghuo" || k2["kind"] != "biaoxing" || k3["kind"] != "" {
+		t.Fatalf("queue 应按 ghost→newbie→shenbu→fenghuo→biaoxing→未知 固定次序（与心跳数组顺序无关），实际 %v → %v → %v → %v",
+			k0["kind"], k1["kind"], k2["kind"], k3["kind"])
+	}
+	if k3["share_key"] != "share_daily_unknown_zzz" {
+		t.Fatalf("未知条目应排最后且保留原 share_key: %v", k3["share_key"])
 	}
 }
 
