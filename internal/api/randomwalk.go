@@ -89,10 +89,11 @@ func (a *API) handleRandomWalk(w http.ResponseWriter, r *http.Request) {
 				"msg": "mapid 必填（数字图号；或 \"random\"=随机图。例：6=半月岛、10=大唐东野林）"})
 			return
 		}
-		// 2026-09-22 游荡排除图（用户口径）：显式选到幽冥界(24) 直接拒绝（不动号上任务）
+		// 2026-09-22 游荡排除图（用户口径）：显式选到排除图（24 幽冥界/25 轮回司/45 瑶池回廊/牢房）
+		// 直接拒绝（不动号上任务）。2026-09-30 文案改通用（原写死"幽冥界为抓鬼专属"，对 25/45 误导）。
 		if containsInt(a.Cfg.RoamExcludeMaps, mapid) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false,
-				"msg": fmt.Sprintf("目标图 %d 不在游荡范围（幽冥界为抓鬼专属）", mapid)})
+				"msg": fmt.Sprintf("目标图 %d 不在游荡范围（在游荡排除表内：抓鬼专属/跳转点连通域残缺等，见配置 CTRL_ROAM_EXCLUDE_MAPS）", mapid)})
 			return
 		}
 		if len(mapsList) > 0 && !containsInt(mapsList, mapid) {

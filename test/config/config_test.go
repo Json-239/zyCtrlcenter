@@ -253,6 +253,26 @@ func TestRoamExcludeMapsIncludesMap25(t *testing.T) {
 	}
 }
 
+// 游荡排除图（2026-09-30 追加瑶池回廊 45，用户批准）：默认排除表含 45；世界图白名单不含 45（同 25 口径）。
+func TestRoamExcludeMapsIncludesMap45(t *testing.T) {
+	def := config.Default()
+	if !intListHas(def.RoamExcludeMaps, 45) {
+		t.Fatalf("默认游荡排除表应含瑶池回廊 45，实际 %v", def.RoamExcludeMaps)
+	}
+	if intListHas(def.RoamWorldMaps, 45) {
+		t.Fatalf("世界图白名单不应含已排除的 45，实际 %v", def.RoamWorldMaps)
+	}
+	// 既有排除图不被破坏；45 的相邻世界图（44/46）应保留
+	for _, m := range []int{24, 25, 653, 654, 655} {
+		if !intListHas(def.RoamExcludeMaps, m) {
+			t.Fatalf("既有排除图 %d 丢失: %v", m, def.RoamExcludeMaps)
+		}
+	}
+	if !intListHas(def.RoamWorldMaps, 44) || !intListHas(def.RoamWorldMaps, 46) {
+		t.Fatalf("45 相邻世界图（44/46）应保留: %v", def.RoamWorldMaps)
+	}
+}
+
 // intListHas 整数切片是否包含 n（测试小工具）。
 func intListHas(list []int, n int) bool {
 	for _, v := range list {
