@@ -35,7 +35,8 @@
   ⑤ 源码形状: 随机图/白名单/限时确实接进了 random_walk; mount_egg 启动游荡固定传 dense;
      **wild 档注册 + __note_roam_fight 统计补口 + tick 战斗分支调用 + 沿标记复位**;
      default/dense 参数精确值(防"顺手改档"回归)。
-  ⑥ 野外游荡白名单(2026-09-24): config.robot_roam_wild_maps 精确值(20 张 100% 怪区世界图)、
+  ⑥ 野外游荡白名单(2026-09-24): config.robot_roam_wild_maps 精确值(19 张 100% 怪区世界图;
+     2026-09-30 用户批准删瑶池回廊 45 → 20→19)、
      ⊆ 世界图白名单、与排除图无交集; random_walk 的 mode=wild 缺省补口存在; 死代码
      HATCH_MAPS 已清理; wild+maps 组合(随机图抽签落在清单内)。
 
@@ -388,7 +389,7 @@ def main():
 
     # ---- ⑦ 野外游荡白名单(config.robot_roam_wild_maps) + wild/maps 组合(2026-09-24) ----
     #   背景: mode=wild 只管节奏, 选图要靠 maps; 机器人端新增"wild+随机图+未给 maps
-    #   → 缺省用 config.robot_roam_wild_maps(20 张 100% 怪区世界图)"的补口。
+    #   → 缺省用 config.robot_roam_wild_maps(19 张 100% 怪区世界图; 2026-09-30 删 45)"的补口。
     cfg_path = os.path.join(script_dir, "config.py")
     cfg_src = open(cfg_path, encoding="utf-8", errors="replace").read() if os.path.exists(cfg_path) else ""
     wild = _extract_list(cfg_src, "robot_roam_wild_maps")
@@ -396,8 +397,8 @@ def main():
     excl = _extract_list(cfg_src, "robot_roam_exclude_maps")
     check("config 定义 robot_roam_wild_maps 且非空(野外游荡可派)", bool(wild), wild)
     if wild:
-        check("wild 清单精确值(20 张 100% 怪区世界图; 防顺手改)",
-              wild == [6, 8, 10, 15, 16, 20, 21, 26, 27, 31, 32, 34, 38, 39, 42, 43, 44, 45, 46, 49],
+        check("wild 清单精确值(19 张 100% 怪区世界图; 2026-09-30 删 45; 防顺手改)",
+              wild == [6, 8, 10, 15, 16, 20, 21, 26, 27, 31, 32, 34, 38, 39, 42, 43, 44, 46, 49],
               wild)
         check("wild 清单 ⊆ 世界图白名单(robot_roam_world_maps)",
               bool(world) and set(wild) <= set(world),
