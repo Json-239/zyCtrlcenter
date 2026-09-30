@@ -172,6 +172,9 @@ def main():
        (_extract_func(src, "__on_task_finish") or ""))
     ok("S:__on_task_drop 归因调用", "biaoxing_note_drop(" in
        (_extract_func(src, "__on_task_drop") or ""))
+    ok("S:note_drop 判负归因盲点分支(删除时 FIGHT 态/战斗中 → 战败)",
+       "STATE_FIGHT" in (_extract_func(src, "biaoxing_note_drop") or "")
+       and "m_fight_state" in (_extract_func(src, "biaoxing_note_drop") or ""))
     ok("S:tick 战斗结束标记 + 限时观测", "biaoxing_note_fight_end(" in src
        and "biaoxing_tick_note(" in (_extract_func(src, "tick") or ""))
 
@@ -251,7 +254,7 @@ def main():
     # ================================================================ 构件行为
     print("== 3) P2 构件行为 ==")
     ns = {}
-    for m in re.finditer(r"^(BIAOXING_\w+)\s*=\s*(.+?)(?:\s*#.*)?$", src, re.M):
+    for m in re.finditer(r"^((?:BIAOXING_\w+|STATE_FIGHT))\s*=\s*(.+?)(?:\s*#.*)?$", src, re.M):
         try:
             ns[m.group(1)] = eval(m.group(2), {}, {})
         except Exception:
@@ -380,6 +383,29 @@ def main():
         ok("D:掉任务归因=超时/回收",
            n_drop(None, g4, 2001101, 500000000) is True
            and any("超时" in m for _l, m in logs), logs)
+        # 2026-09-30 判负归因盲点修（g12 §2.10 观察 7-b）：删除时仍在战斗 → 归因战败
+        logs[:] = []
+        g9 = types.SimpleNamespace(bx_task_start_ms=1, bx_timeout_warned=True,
+                                   bx_last_fight_end_ms=0, state="FIGHT")
+        ok("D:[归因修]删除时仍在 FIGHT 态(无战斗结束标记) → 归因战败",
+           n_drop(None, g9, 2001105, 500000000) is True
+           and any("打劫战败" in m and "删除时仍在战斗" in m for _l, m in logs)
+           and g9.bx_task_start_ms == 0, logs)
+        logs[:] = []
+        g10 = types.SimpleNamespace(bx_task_start_ms=1, bx_timeout_warned=False,
+                                    bx_last_fight_end_ms=0, state="READY")
+        ro10 = types.SimpleNamespace(m_fight_state=True)
+        ok("D:[归因修]战斗态未落定(m_fight_state 仍真) → 归因战败",
+           n_drop(ro10, g10, 2001105, 500000000) is True
+           and any("打劫战败" in m and "删除时仍在战斗" in m for _l, m in logs), logs)
+        logs[:] = []
+        g11 = types.SimpleNamespace(bx_task_start_ms=1, bx_timeout_warned=False,
+                                    bx_last_fight_end_ms=0, state="READY")
+        ro11 = types.SimpleNamespace(m_fight_state=False)
+        ok("CTRL:非战斗态且无标记 → 仍超时口径（不误扩）",
+           n_drop(ro11, g11, 2001105, 500000000) is True
+           and any("超时" in m for _l, m in logs)
+           and not any("打劫战败" in m for _l, m in logs), logs)
 
     if n_tick is not None:
         logs[:] = []
