@@ -784,7 +784,7 @@ func (a *API) shareDailyKeys() []string {
 }
 
 // shareDailyKindRank queue 条目的固定显示次序（gp-2 2026-09-23 约定）：
-// ghost → newbie → shenbu → fenghuo，未知/空排最后（与"跑满一条转下一条"的直觉一致）。
+// ghost → newbie → shenbu → fenghuo → biaoxing，未知/空排最后（与"跑满一条转下一条"的直觉一致）。
 func shareDailyKindRank(item any) int {
 	m, _ := item.(map[string]any)
 	kind, _ := m["kind"].(string)
@@ -797,6 +797,8 @@ func shareDailyKindRank(item any) int {
 		return 2
 	case string(autotask.KindFenghuo):
 		return 3
+	case string(autotask.KindBiaoxing):
+		return 4
 	}
 	return 9
 }

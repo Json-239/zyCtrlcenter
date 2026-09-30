@@ -116,6 +116,42 @@ func TestBiaoxingManualStartMissingChain(t *testing.T) {
 	}
 }
 
+// restorer 补发载荷（复核 P2-1）：For("biaoxing") 必须与 shenbu/fenghuo 同构——
+// 批量启用（CTRL_BIAOXING=1）后恢复引擎补发的 share_daily_start 靠它带 task_order/导航；
+// 缺 case 时载荷=nil，补发的命令不带 chain，机器人拿不到链（首期手动直发不经此路）。
+func TestBiaoxingPayloadFor(t *testing.T) {
+	env := newTestEnv(t, "")
+	testsupport.InstallBiaoxingNav(t, env.cfg.ChainDir)
+
+	got, err := env.api.Payloads.For("biaoxing", "")
+	if err != nil {
+		t.Fatalf("For(biaoxing) 报错: %v", err)
+	}
+	if got == nil {
+		t.Fatal("For(biaoxing) 必须返回链载荷（缺 case 时 restorer 补发不带链）")
+	}
+	c, ok := got.(*chainlib.Chain)
+	if !ok {
+		t.Fatalf("载荷类型应为 *chainlib.Chain: %T", got)
+	}
+	if c.ChainID != "biaoxing_nav" {
+		t.Fatalf("应组装 biaoxing_nav: %q", c.ChainID)
+	}
+	if len(c.TaskOrder) != 3 { // mini 夹具 3 条（2001101/2001105/2001107）
+		t.Fatalf("应含专属声明 task_order（mini=3）: %d", len(c.TaskOrder))
+	}
+	for _, id := range []string{"630", "651"} { // 专属网格覆盖必须随载荷下发
+		if _, ok := c.MapGrids[id]; !ok {
+			t.Fatalf("载荷缺 map_grids[%s]", id)
+		}
+	}
+	// 大小写/前后空白与 shenbu/fenghuo 同口径归一（switch 内 ToLower/TrimSpace）
+	got2, err := env.api.Payloads.For(" BIAOXING ", "")
+	if err != nil || got2 == nil {
+		t.Fatalf("大写/空白应同口径命中: err=%v nil=%v", err, got2 == nil)
+	}
+}
+
 // validateBiaoxingChain 校验镖行天下生产链数据：12 主变体全列 + 抵押品入口 + thrower 董江 + 630/651 备点覆盖。
 // 返回问题清单（空 = 通过）。放在测试里当"坏版灵敏度"的判据。
 func validateBiaoxingChain(c *chainlib.Chain) []string {

@@ -137,7 +137,7 @@ const overviewRows = computed(() => {
   const rows = overview.value?.rows
   return Array.isArray(rows) ? rows : []
 })
-const KEY_CN = { ghost: '抓鬼', zhuaogui: '抓鬼', newbie: '新手链', shenbu: '神捕', fenghuo: '烽火' }
+const KEY_CN = { ghost: '抓鬼', zhuaogui: '抓鬼', newbie: '新手链', shenbu: '神捕', fenghuo: '烽火', biaoxing: '镖行天下' }
 // queue 项标识：优先 kind（定稿口径），兼容旧版/心跳原样透传的 share_key（如 share_daily_大唐神捕）
 function qKey(q) { return q.kind || q.share_key || '' }
 function keyCN(k) {
@@ -146,6 +146,7 @@ function keyCN(k) {
   const s = String(k)
   if (s.includes('大唐神捕') || s.includes('神捕')) return '神捕'
   if (s.includes('宫廷') || s.includes('烽火')) return '烽火'
+  if (s.includes('镖行天下') || s.includes('镖局')) return '镖行天下'
   if (s.includes('捉鬼') || s.includes('抓鬼')) return '抓鬼'
   return s
 }

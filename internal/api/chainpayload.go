@@ -275,6 +275,7 @@ func (p *Payloads) Ghost() (*chainlib.Chain, error) {
 //   - ghost → 抓鬼导航数据（不给就是原地不动，所以必须给）；
 //   - shenbu → 大唐神捕链载荷（基座 + shenbu_nav 声明组装；不给机器人拿不到 task_order 与导航）；
 //   - fenghuo → 烽火大唐链载荷（基座 + fenghuo_nav 声明组装；同上）；
+//   - biaoxing → 镖行天下链载荷（基座 + biaoxing_nav 声明组装；同上）；
 //   - 其它 kind → nil：新手链/捉鬼链的补发只带 chain_id，机器人端有链缓存与网格缓存
 //     （quest_engine 的 g_chain_cache / g_chain_grid_cache），避免每条补发都塞 2MB。
 func (p *Payloads) For(kind, chainID string) (any, error) {
@@ -285,6 +286,8 @@ func (p *Payloads) For(kind, chainID string) (any, error) {
 		return p.ShareDaily()
 	case "fenghuo":
 		return p.ShareDailyOf(p.FenghuoChainID())
+	case "biaoxing":
+		return p.ShareDailyOf(p.BiaoxingChainID())
 	}
 	return nil, nil
 }
