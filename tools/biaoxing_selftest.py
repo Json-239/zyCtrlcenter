@@ -139,6 +139,9 @@ def main():
        "bx_accepted" in (_extract_func(src, "biaoxing_note_fight_end") or ""))
     ok("S:接票成功置 bx_accepted（on_notice ADD_TASK 段）",
        "g.bx_accepted = True" in src)
+    ok("S:无匹配分支全量 dump（格式串 + helper 定义/调用）",
+       "接取对话无本 run 选项: n=%d" in src and "def __fmt_accept_options(" in src
+       and "__fmt_accept_options(option_list)" in (_extract_func(src, "__on_show_dialog") or ""))
     ok("S:构成函数齐全(__is_biaoxing/accept_precheck/note_fight_end/finish/drop/tick_note)",
        all(("def %s(" % f) in src for f in (
            "__is_biaoxing", "biaoxing_accept_precheck", "biaoxing_note_fight_end",
@@ -249,7 +252,8 @@ def main():
        sorted(k for k in ns if k.startswith("BIAOXING")))
 
     for fn in ("__is_biaoxing", "biaoxing_accept_precheck", "biaoxing_note_fight_end",
-               "biaoxing_note_finish", "biaoxing_note_drop", "biaoxing_tick_note"):
+               "biaoxing_note_finish", "biaoxing_note_drop", "biaoxing_tick_note",
+               "__fmt_accept_options"):
         frag = _extract_func(src, fn)
         ok("D:提取 %s" % fn, frag is not None)
         if frag:
@@ -384,6 +388,22 @@ def main():
         ok("D:恢复兜底：有在身任务 → bx_accepted 置位（重登/重派场景）",
            g8.bx_accepted is True)
 
+    fmt = ns.get("__fmt_accept_options")
+    if fmt is not None:
+        s1 = fmt([("尝试一次运镖。", 0), ("我还有别的事情", 0)])
+        ok("D:dump 基本形态 (i,close,text)",
+           "(0,0,'尝试一次运镖。')" in s1 and "(1,0,'我还有别的事情')" in s1, s1)
+        s2 = fmt([("关闭", 1)])
+        ok("D:dump 可见 close 标记", "(0,1,'关闭')" in s2, s2)
+        s3 = fmt([("尝试一次 运镖\u3000。", 0)])
+        ok("D:dump 保空白/全角原样(repr 转义可见)",
+           "尝试一次 运镖" in s3 and "\\u3000" in s3, s3)
+        s4 = fmt([("x" * 100, 0)])
+        ok("D:dump 单项截断≤48", ("x" * 48) in s4 and ("x" * 49) not in s4)
+        s5 = fmt([None, ("t",), ()])
+        ok("D:dump 畸形项不崩", isinstance(s5, str) and "'t'" in s5, s5)
+        ok("D:dump 空列表 → 空串", fmt([]) == "")
+
     # ================================================================ 对话严格选择（规格回归）
     print("== 4) 对话严格选择（既有函数 + 镖行天下对话样例）==")
     ns_d = {}
@@ -431,6 +451,10 @@ def main():
                idx7 == 0, (idx7, kind7))
         ok("CTRL:前置交付『领取报酬』通用命中",
            pick_generic([("领取报酬", 0)], "", K2W) == 0)
+        if pick_accept is not None:
+            idx8, kind8 = pick_accept([("请尝试一次运镖啊", 0)], K2W, has_pending=False)
+            ok("CTRL:选择器口径=子串匹配（'尝试一次运镖' 命中 '请尝试一次运镖啊'）",
+               idx8 == 0, (idx8, kind8))
 
     # ================================================================ 结果
     def _grp(prefix, items=None):
