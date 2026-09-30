@@ -77,6 +77,10 @@ func (a *API) waterlineRobots() []state.Robot {
 		if key != "" && r.Zone != "" && r.Zone != key {
 			continue // 只对当前区生效
 		}
+		// 2026-09-30 私人池：不参与压号/停游荡/队列保鲜（决策口径；在线显示不受影响）。
+		if a.IsPersonal(r.Account) {
+			continue
+		}
 		out = append(out, r)
 	}
 	return out
@@ -94,6 +98,10 @@ func (a *API) waterlineLocalCount() int {
 			continue
 		}
 		if key != "" && r.Zone != "" && r.Zone != key {
+			continue
+		}
+		// 2026-09-30 私人池：不参与本地在线读数（目标判定不吃私号；显示按 robots 行另算）。
+		if a.IsPersonal(r.Account) {
 			continue
 		}
 		n++
@@ -116,6 +124,10 @@ func (a *API) waterlineCandidates() []waterline.Candidate {
 	out := make([]waterline.Candidate, 0, 64)
 	for _, pa := range a.Accounts.List(accounts.Filter{}) {
 		acc := pa.Name
+		// 2026-09-30 私人池：不进补号候选（不参与自动上线/目标管理）。
+		if a.IsPersonal(acc) {
+			continue
+		}
 		r, hasLive := live[acc]
 		usable := false
 		if z := pa.Zone(gameAddr); z != nil && z.Usable {

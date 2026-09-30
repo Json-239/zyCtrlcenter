@@ -56,6 +56,10 @@
 //	POST /api/team/dispatch   给**队长**派任务（ghost_start role=captain；就绪后调用；可选鉴权，见 team.go）
 //	POST /api/team/disband    解散队伍（accounts 或 all:true；队长 team_disband + 队员 team_clear 兜底，可选鉴权）
 //	GET  /api/team/status     组队台账（teams/jobs/robots 摘要，只读）
+//	GET  /api/personal        私人池名单（只读，见 personal.go）
+//	POST /api/personal/add    移入私人池（accounts/names；入池后不参与一切自动编排；可选鉴权）
+//	POST /api/personal/remove 移出私人池（可选鉴权）
+//	POST /api/personal/task   私号手动任务（task: ghost|shenbu|fenghuo|newbie，action: start|stop；可选鉴权）
 //	GET  /ws                  实时事件推送（WebSocket）
 package api
 
@@ -154,12 +158,14 @@ type API struct {
 	// 见 handlers_accounts.go SyncPoolLevel——变更合并进池内存，poolLevelSaveDelay 后整池落盘一次）。
 	poolSyncMu    sync.Mutex
 	poolSyncTimer *time.Timer
+	// personal 私人池注册表（2026-09-30 Wave 1；见 personal.go——标记文件 data/personal_pool.json）。
+	personal *personalPool
 }
 
 // New 创建 API。
 func New(d Deps) *API {
 	return &API{Deps: d, hatch: newHatchSessions(), daily: newDailySessions(),
-		throttle: NewCreateThrottle(createRateConfigOf(d.Cfg))}
+		throttle: NewCreateThrottle(createRateConfigOf(d.Cfg)), personal: newPersonalPool("")}
 }
 
 // chainPayloads 取载荷提供者（未显式注入时按 Cfg 懒建，测试/嵌入式用法不必装配）。
@@ -250,6 +256,10 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/team/dispatch", a.requireToken(a.handleTeamDispatch))
 	mux.HandleFunc("POST /api/team/disband", a.requireToken(a.handleTeamDisband))
 	mux.HandleFunc("GET /api/team/status", a.handleTeamStatus)
+	mux.HandleFunc("GET /api/personal", a.handlePersonalGet)
+	mux.HandleFunc("POST /api/personal/add", a.requireToken(a.handlePersonalAdd))
+	mux.HandleFunc("POST /api/personal/remove", a.requireToken(a.handlePersonalRemove))
+	mux.HandleFunc("POST /api/personal/task", a.requireToken(a.handlePersonalTask))
 	mux.HandleFunc("/ws", a.handleWS)
 }
 

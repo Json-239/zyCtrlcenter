@@ -223,6 +223,12 @@ func main() {
 		Restorer: restore,
 		Payloads: payloads,
 	})
+	// 2026-09-30 私人池 Wave 1：注册表加载（data/personal_pool.json；独立文件不受导入工具重建影响）。
+	if n, err := webAPI.LoadPersonalPool(filepath.Join(cfg.DataDir, "personal_pool.json")); err != nil {
+		log.Printf("[私人池] 注册表加载失败（忽略；按空表处理）: %v", err)
+	} else if n > 0 {
+		log.Printf("[私人池] 已载入 %d 个私号（不参与自动编排，任务手动发起）", n)
+	}
 	// ---- 定时自动任务 + 卡死自动重登恢复（依赖 api 的候选/上线/注册/下发实现）----
 	webAPI.AutoTask = autotask.New(webAPI.AutoTaskDeps())
 	webAPI.Reghost = reghost.New(webAPI.ReghostDeps())
@@ -231,6 +237,9 @@ func main() {
 	ev.SetRestartAutoAdd(webAPI.OnRobotRestartHello)
 	// 2026-09-29 神捕闸门修复②：心跳有效等级回写账号池 zone-level（池内陈旧等级的根治）
 	ev.SetLevelSync(webAPI.SyncPoolLevel)
+	// 2026-09-30 私人池 Wave 1：私号判据注入 event（意图作废 + 自动下机豁免）+ hello 后重推名单
+	ev.SetPersonalPool(webAPI.IsPersonal)
+	ev.SetPersonalPush(func() { webAPI.PushPersonalPool() })
 	skipHook = webAPI.GhostSkipFunc()
 	onlineHook = webAPI.OnlineForRestore // ④ 恢复引擎"离线已派号定向补拉"→ 壳层批量上线通路（晚绑定完成）
 	go webAPI.AutoTask.Run(ctx)

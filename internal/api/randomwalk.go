@@ -241,6 +241,13 @@ func (a *API) DispatchRoamEx(req RoamReq) RoamResult {
 		}
 		online = keep
 	}
+	// 2026-09-30 私人池：私号不派游荡（"游荡不做"；自动游荡已由池视野排除，这里兜人工/批量入口）。
+	if keep, skippedP := a.dropPersonalAccounts(online, "游荡"); len(skippedP) > 0 {
+		for _, acc := range skippedP {
+			failed = append(failed, map[string]any{"account": acc, "msg": "私人池（不参与游荡）"})
+		}
+		online = keep
+	}
 	res.Failed = failed
 	if len(online) == 0 {
 		res.Msg = "没有可下发的号：" + failedText(failed)

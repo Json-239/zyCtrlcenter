@@ -165,12 +165,25 @@ func (a *API) handleAccountsAdd(w http.ResponseWriter, r *http.Request) {
 	pwd := toStr(body["password"])
 	zone := toStr(body["zone"])
 	note := toStr(body["note"])
+	// 2026-09-30 私人池：添加时勾选"私人池"→ 入池后自动入私人注册表（不参与自动编排）。
+	personal := toBool(body["personal"], false)
 	added, existed := a.Accounts.Add(names, pwd, zone, note)
+	if personal && len(names) > 0 {
+		pAdd, pExisted := a.personal.Add(names)
+		if pAdd > 0 {
+			a.PushPersonalPool()
+		}
+		_ = pExisted
+	}
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "accounts_add",
-		"accounts": names, "added": len(added), "existed": len(existed), "zone": zone})
+		"accounts": names, "added": len(added), "existed": len(existed), "zone": zone, "personal": personal})
+	msg := "已加池 " + itoa(len(added)) + " 个（已存在 " + itoa(len(existed)) + " 个）"
+	if personal {
+		msg += "；已加入私人池（不参与自动编排，任务请用私人池卡手动发起）"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "added": added, "existed": existed, "pool": a.Accounts.Count(),
-		"msg": "已加池 " + itoa(len(added)) + " 个（已存在 " + itoa(len(existed)) + " 个）",
+		"personal": personal, "msg": msg,
 	})
 }
 
@@ -183,6 +196,10 @@ func (a *API) handleAccountsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := a.Accounts.Remove(names)
+	// 2026-09-30 私人池：删号同步清标记（防悬垂；有变更才推送）。
+	if pRemoved := a.personal.Remove(names); pRemoved > 0 {
+		a.PushPersonalPool()
+	}
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "accounts_remove",
 		"accounts": names, "removed": n})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n,
@@ -251,8 +268,17 @@ func (a *API) batchOnline(w http.ResponseWriter, accounts []string, gameAddr, zo
 		}
 	}
 	skipped := []string{}
-	if len(accounts) == 0 { // 自动选号
-		accounts = a.Accounts.Pick(gameAddr, limit, onlyUsable, online)
+	if len(accounts) == 0 { // 自动选号（2026-09-30 私人池：默认选号不含私号——它们由用户手动上/下线；
+		// 显式给号不受限，面板对私号点"上线"走的正是显式路径）
+		picked := a.Accounts.Pick(gameAddr, limit, onlyUsable, online)
+		accounts = make([]string, 0, len(picked))
+		for _, n := range picked {
+			if a.IsPersonal(n) {
+				skipped = append(skipped, n)
+				continue
+			}
+			accounts = append(accounts, n)
+		}
 	} else { // 显式给号：过滤掉已在线
 		kept := make([]string, 0, len(accounts))
 		for _, n := range accounts {
@@ -385,6 +411,10 @@ func (a *API) batchOnlineBudgetOf() batchOnlineBudget {
 		key := a.currentZoneKey()
 		for _, r := range a.St.Snapshot() {
 			if !r.Online {
+				continue
+			}
+			// 2026-09-30 私人池：私号不占池容量额度（在线"显示但不参与"口径）。
+			if a.IsPersonal(r.Account) {
 				continue
 			}
 			if key != "" && r.Zone != "" && r.Zone != key {
@@ -526,6 +556,11 @@ func (a *API) sendOfflineChunks(accounts []string, chunk, interval int, tag stri
 //
 // 口径与意图判定（internal/services/intent）同源：**只按等级/毕业状态**，不看"能不能派出去"。
 func (a *API) poolOf(acc string) string {
+	// 2026-09-30 私人池：显式标记优先于等级推导（personal 覆盖 newbie/ghost/unknown；
+	// poolUsable/面板分区/统计随之自动排除，无需各自再加）。
+	if a.IsPersonal(acc) {
+		return "personal"
+	}
 	level, _ := a.accountLevel(acc)
 	chainDone := false
 	if a.St != nil {
@@ -556,6 +591,7 @@ func (a *API) poolOf(acc string) string {
 	}
 	return "newbie"
 }
+
 // poolLevelSaveDelay 心跳等级回写池内存后的合并落盘延迟（2026-09-29 修复②）：
 // 变更先只写池内存，隔一段窗口整池 Save 一次——部署/重启后全体号"首心跳同步"的突发
 // （可达数百条变更）被合并成少量落盘，避免每号一次整池重写。

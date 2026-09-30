@@ -87,6 +87,13 @@ func (a *API) handleTeamSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	all := append([]string{captain}, members...)
+	// 2026-09-30 私人池：私号不参与组队（建队/入队都拒；如需组队先移出私人池）。
+	for _, acc := range all {
+		if a.IsPersonal(acc) {
+			fail("私人池账号不参与组队："+acc+"（如需组队请先移出私人池）", nil)
+			return
+		}
+	}
 	if _, failedAcc := a.onlineAccounts(all); len(failedAcc) > 0 {
 		fail("有账号不在线（试点口径：先等工作单元完成、全员在线再建队）："+failedText(failedAcc),
 			map[string]any{"failed": failedAcc})

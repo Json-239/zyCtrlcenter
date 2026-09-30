@@ -273,6 +273,10 @@ func (a *API) roampoolRobots() []state.Robot {
 		if role, _ := a.teamRoleOf(r.Account); role != "" {
 			continue
 		}
+		// 2026-09-30 私人池：私号不进游荡池视野（不挑选/不回收/不计余量）。
+		if a.IsPersonal(r.Account) {
+			continue
+		}
 		out = append(out, r)
 	}
 	return out

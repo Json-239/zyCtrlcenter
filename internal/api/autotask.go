@@ -70,10 +70,16 @@ func (a *API) ReghostDeps() reghost.Deps {
 			return ok && r.Online
 		},
 		Remove: func(acc string) bool {
+			if a.IsPersonal(acc) {
+				return false // 2026-09-30 私人池：不自动 remove（下机手动）
+			}
 			return a.Events != nil && a.Events.SendCmd(
 				map[string]any{"cmd": "robot_manage", "action": "remove", "accounts": []string{acc}}, "reghost_remove")
 		},
 		Add: func(acc string) bool {
+			if a.IsPersonal(acc) {
+				return false // 2026-09-30 私人池：不自动 add（上线手动）
+			}
 			pwd, ok := a.passwordFor(acc)
 			if !ok {
 				return false
@@ -83,6 +89,9 @@ func (a *API) ReghostDeps() reghost.Deps {
 					"accounts": []any{[]string{acc, pwd}}}, "reghost_add")
 		},
 		Launch: func(acc string) bool {
+			if a.IsPersonal(acc) {
+				return false // 2026-09-30 私人池：重登恢复不补发（任务由用户手动发起）
+			}
 			// 2026-09-24（RESTORE 误补发事故修复）：重登恢复**不再一律按 ghost/newbie 二分**——
 			//   - 意图 = shenbu/fenghuo（分享日常）→ 按该玩法补发 share_daily_start（恢复当前任务）；
 			//   - 意图 = ghost/未知/其它 → 若该号当天有"已派/在跑且未满"的日常 →
@@ -208,6 +217,11 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 	return func(kind, account string) (bool, string) {
 		if a.St != nil && a.St.IsPaused(account) {
 			return true, "人工暂停（面板点过「停止」；再点「启动/立即补发/上线」即解除）"
+		}
+		// 2026-09-30 私人池 Wave 1：私号不自动补发 —— 本闸在恢复循环最前，同时挡住
+		// d5bc942 的"离线已派号定向补拉"分支（restorer 先过 Skip 再看离线补拉）。
+		if a.IsPersonal(account) {
+			return true, "私人池：不参与自动编排（手动任务请用私人池卡）"
 		}
 		// 2026-09-23 卡死熔断闸：当日卡死触顶的号 → 不再自动补发（**对所有 kind**，
 		// 与人工暂停同层）。独立熔断表不受 robot 行删除影响；跨日自动失效，
@@ -662,6 +676,11 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 	out := make([]autotask.Candidate, 0, 32)
 	for _, pa := range a.Accounts.List(accounts.Filter{}) {
 		acc := pa.Name
+		// 2026-09-30 私人池 Wave 1（候选循环首部一行）：私号不进任何池的候选
+		//（ghost/newbie/shenbu/fenghuo/hatch 及其"上线步"全覆盖；手动任务走 /api/personal/task）。
+		if a.IsPersonal(acc) {
+			continue
+		}
 		if a.St != nil && a.St.IsRemoved(acc) {
 			continue // 用户明确移除过的号不再自动拉起
 		}
@@ -1090,18 +1109,19 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 			return false, "全部为队内号（组队编排接管；队长派任务用 /api/team/dispatch）"
 		}
 	}
+	// 2026-09-30 私人池 Wave 1：私号不参与任何自动派发（池候选/补发/回收各闸之上再兜一层——
+	// LaunchTask 是自动侧最后下发口；私号任务只能走 /api/personal/task）。
+	if keep, skippedP := a.dropPersonalAccounts(accs, kind.Label()); len(skippedP) > 0 {
+		accs = keep
+		if len(accs) == 0 {
+			return false, "全部为私人池账号（不参与自动编排；手动任务请用私人池卡）"
+		}
+	}
 	switch kind {
 	case autotask.KindNewbie:
-		chainID := a.Cfg.DefaultChainID
-		cmd := map[string]any{"cmd": "start_chain", "chain_id": chainID, "accounts": accs}
-		chain, err := chainlib.Build(chainID, a.Cfg.ChainDir)
-		if err == nil {
-			cmd["chain"] = chain
-			if chain.ChainID != "" {
-				cmd["chain_id"] = chain.ChainID
-			}
-		} else if !errors.Is(err, chainlib.ErrNotFound) {
-			return false, "链数据解析失败: " + err.Error()
+		cmd, err := a.newbieStartCmdOf(accs)
+		if err != nil {
+			return false, err.Error()
 		}
 		if !a.Events.SendCmd(cmd, "autotask_start_chain") {
 			return false, "下发失败：机器人通道未连接"
@@ -1130,6 +1150,23 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		return a.launchShareDailyOf(kind, accs)
 	}
 	return false, "未知策略: " + string(kind)
+}
+
+// newbieStartCmdOf 构造"新手链启动"命令（LaunchTask 与私人池手动任务共用；2026-09-30 抽出）。
+// 链数据缺失（ErrNotFound）容忍：仍下发 start_chain（老行为）；其它解析错误硬失败。
+func (a *API) newbieStartCmdOf(accs []string) (map[string]any, error) {
+	chainID := a.Cfg.DefaultChainID
+	cmd := map[string]any{"cmd": "start_chain", "chain_id": chainID, "accounts": accs}
+	chain, err := chainlib.Build(chainID, a.Cfg.ChainDir)
+	if err == nil {
+		cmd["chain"] = chain
+		if chain.ChainID != "" {
+			cmd["chain_id"] = chain.ChainID
+		}
+	} else if !errors.Is(err, chainlib.ErrNotFound) {
+		return nil, errors.New("链数据解析失败: " + err.Error())
+	}
+	return cmd, nil
 }
 
 // ghostStartCmdOf 组装抓鬼启动命令（单一构造点，避免各派发路径漂移）：

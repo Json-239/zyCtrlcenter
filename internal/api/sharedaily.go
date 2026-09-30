@@ -16,6 +16,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -258,6 +259,25 @@ func (a *API) shareDailyMoneyShort(r state.Robot, gate int) bool {
 		fund = r.Money // 储备金未同步（0）→ 回退银两口径
 	}
 	return fund > 0 && fund < int64(gate)
+}
+
+// shareDailyStartCmdOf 构造"分享日常启动"命令（私人池手动任务与 startAuto 同构；
+// 2026-09-30：抽出来供 /api/personal/task 直发复用，startAuto 保留原批处理路径不动，
+// 避免动既有验收口径）。声明文件缺失/解析失败 = 硬错误（不发空命令）。
+func (a *API) shareDailyStartCmdOf(kind autotask.Kind, accs []string) (map[string]any, error) {
+	nav, err := a.chainPayloads().ShareDailyOf(a.shareDailyChainIDOf(kind))
+	if err != nil {
+		return nil, errors.New(kind.Label() + "链数据不可用: " + err.Error())
+	}
+	cmd := map[string]any{"cmd": "share_daily_start", "share_key": a.shareDailyKeyOf(kind),
+		"chain": nav, "daily_limit": a.shareDailyLimitOf(kind), "accounts": accs}
+	if nav != nil && nav.ChainID != "" {
+		cmd["chain_id"] = nav.ChainID
+	}
+	if done := a.shareDailyDoneMapOf(accs, kind); len(done) > 0 {
+		cmd["done"] = done
+	}
+	return cmd, nil
 }
 
 // shareDailyFullTodayOf 该号今日该玩法是否已满/不可用：

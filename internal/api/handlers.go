@@ -512,6 +512,12 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		keep, skipped := a.dropTeamAccounts(targets, "启动(自动分配)")
 		targets, teamSkipped = keep, skipped
 	}
+	// 2026-09-30 私人池：私号不参与"启动(自动分配)"（手动任务走私人池卡）；保留一行说明（不静默）。
+	var personalSkipped []string
+	if len(targets) > 0 {
+		keep, skippedP := a.dropPersonalAccounts(targets, "启动(自动分配)")
+		targets, personalSkipped = keep, skippedP
+	}
 
 	// 意图表里还没有这个号时（刚 add、还没报等级），回退用**账号池里的当前条件**判一次：
 	// ≥31 级或链已完成 → 抓鬼；<31 → 新手链。这样"启动自动分配"永远按当前条件分配**一条**，
@@ -559,6 +565,10 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 	for _, acc := range teamSkipped {
 		assignments = append(assignments, map[string]any{"account": acc, "command": "",
 			"reason": "队内号（组队编排接管；队长派任务用 /api/team/dispatch）"})
+	}
+	for _, acc := range personalSkipped {
+		assignments = append(assignments, map[string]any{"account": acc, "command": "",
+			"reason": "私人池（不参与自动分配；手动任务请用私人池卡）"})
 	}
 
 	// 2026-09-23 P0：池配额截断 —— "启动(自动分配)"不再无上限直派。
@@ -1123,10 +1133,16 @@ func (a *API) OnRobotRestartHello(cleared []string) {
 		a.Log.Printf("[RESTART-ADD] 跳过自动补号（CTRL_RESTART_AUTO_ADD=off）：%d 个刚离线的号交给水位器/池补", len(cleared))
 		return
 	}
-	// 过滤人工暂停/已移除（这两类不自动拉起；语义同批量上线/候选闸）
+	// 过滤人工暂停/已移除（这两类不自动拉起；语义同批量上线/候选闸）；
+	// 2026-09-30 私人池：私号也不补（中控不为私号保持在线；重启后等用户手动上线）。
 	accs := make([]string, 0, len(cleared))
 	skipped := 0
+	personalSkipped := 0
 	for _, acc := range cleared {
+		if a.IsPersonal(acc) {
+			personalSkipped++
+			continue
+		}
 		if a.St != nil && (a.St.IsPaused(acc) || a.St.IsRemoved(acc)) {
 			skipped++
 			continue
@@ -1134,7 +1150,7 @@ func (a *API) OnRobotRestartHello(cleared []string) {
 		accs = append(accs, acc)
 	}
 	if len(accs) == 0 {
-		a.Log.Printf("[RESTART-ADD] 无可补号（%d 个全部为暂停/已移除）", skipped)
+		a.Log.Printf("[RESTART-ADD] 无可补号（%d 个全部为暂停/已移除，%d 个私人池豁免）", skipped, personalSkipped)
 		return
 	}
 	// 冷却（重启风暴/通道抖动防抖）
@@ -1153,8 +1169,8 @@ func (a *API) OnRobotRestartHello(cleared []string) {
 	go func() {
 		time.Sleep(restartAutoAddDelay)
 		sent, chunks, noPwd := a.sendOnlineChunks(accs, a.gameAddrOf(""), 10, 300, "restart_auto_add")
-		a.Log.Printf("[RESTART-ADD] 重启自动补号：%d/%d 个已下发（%d 批，跳过无密码 %d；暂停/已移除 %d）",
-			len(sent), len(accs), chunks, len(noPwd), skipped)
+		a.Log.Printf("[RESTART-ADD] 重启自动补号：%d/%d 个已下发（%d 批，跳过无密码 %d；暂停/已移除 %d，私人池 %d）",
+			len(sent), len(accs), chunks, len(noPwd), skipped, personalSkipped)
 		if a.Store != nil {
 			a.Store.LogEvent(map[string]any{"type": "api", "action": "restart_auto_add",
 				"zone": a.currentZoneKey(), "requested": len(accs), "sent": len(sent),

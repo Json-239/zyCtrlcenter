@@ -53,6 +53,11 @@ type Handler struct {
 	// levelSync 心跳"有效等级"回写账号池（可空，由 main 注入；2026-09-29 神捕闸门修复②：
 	// 池内 zone-level 只在建号/验证写入 → 陈旧；壳层 api.SyncPoolLevel 负责变化判定+合并落盘）。
 	levelSync func(account, zone string, level int)
+	// personalOf 私人池判据（可空，由 main 注入；2026-09-30 Wave 1）：私号不产生自动意图、
+	// 不自动下机（自动编排隔离的两处 event 侧闸）。
+	personalOf func(account string) bool
+	// personalPush 私号名单重推（可空；hello 后调用——机器人重启/重连后恢复标记，先例 PushSkillConfig）。
+	personalPush func()
 
 	mu             sync.Mutex
 	posBatch       map[string]map[string]any
@@ -110,6 +115,17 @@ func (h *Handler) SetRestartAutoAdd(fn func(cleared []string)) { h.restartAutoAd
 
 // SetLevelSync 注入"心跳有效等级回写账号池"回调（main 装配；nil = 不回写）。
 func (h *Handler) SetLevelSync(fn func(account, zone string, level int)) { h.levelSync = fn }
+
+// SetPersonalPool 注入私人池判据（main 装配 webAPI.IsPersonal；nil = 无私人池）。
+func (h *Handler) SetPersonalPool(fn func(account string) bool) { h.personalOf = fn }
+
+// SetPersonalPush 注入"私号名单重推"回调（main 装配 webAPI.PushPersonalPool；hello 后调用）。
+func (h *Handler) SetPersonalPush(fn func()) { h.personalPush = fn }
+
+// isPersonal 私人池判据（nil 安全；未注入 = 无私人池）。
+func (h *Handler) isPersonal(account string) bool {
+	return h.personalOf != nil && account != "" && h.personalOf(account)
+}
 
 func (h *Handler) SetBroadcast(fn func(map[string]any)) {
 	h.broadcast = fn
@@ -637,6 +653,10 @@ func (h *Handler) onHello(ev map[string]any) {
 	}
 	// 2026-09-23 技能策略配置：机器人（重）连上即补发一份（重启不丢）
 	h.PushSkillConfig()
+	// 2026-09-30 私人池：机器人（重）连/重启后重推私号名单（机器人侧标记随热更/重启丢失时的自愈）。
+	if h.personalPush != nil {
+		h.personalPush()
+	}
 }
 
 func (h *Handler) onRobotOnline(ev map[string]any) {
@@ -674,6 +694,11 @@ func (h *Handler) onRobotOnline(ev map[string]any) {
 // 2026-09-24 烽火大唐同款（同一次判定里带两个玩法的信息，shenbu 优先）；
 // 老版机器人没有 daily → "未知" → 回落旧判据（≥31 全判抓鬼），行为不变。
 func (h *Handler) decideIntent(account string, level int, chainDone bool, zone, source string) {
+	// 2026-09-30 私人池 Wave 1：私号不产生自动意图 —— 意图表是所有自动编排（候选/恢复/重登/
+	// 轮回总览队列）的入口，这里作废等于把私号从自动链上整体摘除。
+	if h.isPersonal(account) {
+		return
+	}
 	if h.Intents == nil {
 		return
 	}
@@ -1498,6 +1523,11 @@ func (h *Handler) autoRemove() bool {
 
 // removeAccount 下机：标记移除（心跳不复活）+ 删行 + 通知机器人端移除。
 func (h *Handler) removeAccount(account, reason string) {
+	// 2026-09-30 私人池 Wave 1：私号不自动下机（满额/完成/坏号都不动——上下线由用户手动）。
+	if h.isPersonal(account) {
+		h.Log.Printf("[私人池] %s 跳过自动下机（%s）", account, reason)
+		return
+	}
 	if h.St.IsRemoved(account) {
 		return
 	}
