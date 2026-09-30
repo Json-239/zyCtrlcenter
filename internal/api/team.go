@@ -252,7 +252,9 @@ func (a *API) handleTeamDisband(w http.ResponseWriter, r *http.Request) {
 // handleTeamDispatch POST /api/team/dispatch
 //
 // 请求：{captain, daily_limit?}；行为：校验队长在线 + 队伍就绪 → 给**队长单号**下发
-// `ghost_start role=captain`（带导航载荷/daily_limit/done），**队员一条命令都不发**（待命）。
+// `ghost_start role=captain`（带导航载荷/daily_limit/done），并给**在线队员**补发
+// `ghost_start role=member`（2026-09-30 修3：这是机器人端"队员待命"分支的唯一触发器；
+// 载荷与队长同链；**不写任何在途/配额台账**——与"手动/待命"语义一致）。
 //
 // 为什么是独立接口而不是 setup 加 dispatch:true（阶段 2 评估）：
 //   - 时序：setup 立即返回，而派发要等 team_ready（集结完成）——"先完成手头工作单元→建队
@@ -285,10 +287,12 @@ func (a *API) handleTeamDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	// 就绪判据：台账 ready 队优先；兼容手工路径（心跳 team.role=captain 且 setup_done）。
 	ready := false
+	var members []string
 	teams, _ := a.Events.TeamLedger()
 	for _, t := range teams {
 		if t.Captain == captain {
 			ready = true
+			members = append([]string{}, t.Members...)
 			break
 		}
 	}
@@ -313,14 +317,50 @@ func (a *API) handleTeamDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.markGhostDispatch([]string{captain}) // 在途记账（与手动/池派发同口径，防重复下发）
+
+	// 修3（2026-09-30）：队员待命 —— 给**在线队员**补发 ghost_start(role=member)。
+	// 背景：机器人端待命分支（daily_ghost.py: `m_team=member` 时 ghost_start 归一为待命）此前
+	// 没有任何中控路径触发；不给队员发，队员会各自 solo 自跑、永不集结。
+	// 口径：只对台账成员（ready 队）发；只发在线号（离线等先上线再重派）；**不写台账**；
+	// 载荷与队长同链（成员机器人端静态待命，不接任务，链仅用于协议形状一致）。
+	var memberSent, memberOffline []string
+	if len(members) > 0 {
+		onlineMembers := make([]string, 0, len(members))
+		for _, m := range members {
+			if rbM, okM := a.St.Get(m); okM && rbM.Online {
+				onlineMembers = append(onlineMembers, m)
+			} else {
+				memberOffline = append(memberOffline, m)
+			}
+		}
+		if len(onlineMembers) > 0 {
+			if mcmd, errM := a.ghostStartCmdOf(onlineMembers, "member", limit); errM != nil {
+				a.Log.Printf("[组队] 队员待命补发失败（载荷不可用）：%v", errM)
+			} else if a.Events.SendCmd(mcmd, "team_dispatch_ghost_start_member") {
+				memberSent = onlineMembers
+			} else {
+				a.Log.Printf("[组队] 队员待命补发下发失败（通道未连接）：%v", onlineMembers)
+			}
+		}
+	}
 	if a.Store != nil {
 		a.Store.LogEvent(map[string]any{"type": "api", "action": "team_dispatch",
 			"zone": a.currentZoneKey(), "captain": captain, "daily_limit": limit,
-			"chain_id": cmd["chain_id"]})
+			"chain_id": cmd["chain_id"], "members_sent": memberSent, "members_offline": memberOffline})
+	}
+	msg := "已给队长下发抓鬼（role=captain）：" + captain
+	if len(memberSent) > 0 {
+		msg += fmt.Sprintf("；队员待命指令已发 %d 个（role=member）", len(memberSent))
+	}
+	if len(memberOffline) > 0 {
+		msg += fmt.Sprintf("；%d 个队员离线未发（上线后重新 dispatch）", len(memberOffline))
+	}
+	if len(memberSent) == 0 && len(memberOffline) == 0 {
+		msg += "；无台账队员（手工路径），队员待命指令未发"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "captain": captain,
 		"daily_limit": limit, "chain_id": cmd["chain_id"],
-		"msg": "已给队长下发抓鬼（role=captain）：" + captain + "；队员保持待命，不单独派任务"})
+		"members_sent": memberSent, "members_offline": memberOffline, "msg": msg})
 }
 
 // teamRoleOf 该账号的"组队角色"（中控判断派发避让用）：台账（下发/事件）∪ 心跳（机器人事实）。
@@ -441,6 +481,13 @@ func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 			if role, cap, ok := a.Events.TeamRoleOf(acc); ok {
 				item["ledger_role"] = role // 中控台账（下发/事件来源；含 pending job）
 				item["ledger_captain"] = cap
+				// 修4（2026-09-30）：台账说是队员、但心跳**没有任何队伍态**（team=None：重登丢态/
+				// 静默离队）→ "需重新入队"告警可见化（字段 + 按号节流审计日志，不再被埋）。
+				if role == "member" && rb.TeamBlock() == nil {
+					item["need_rejoin"] = true
+					item["rejoin_reason"] = "心跳无队伍态（重登丢态/静默离队）但台账仍是队员 → 需重新入队（对队长重新 dispatch）"
+					a.logNeedRejoin(acc, cap)
+				}
 			}
 			if ts := rb.TeamTokenUseTS(); ts > 0 {
 				item["token_use_ts"] = ts // 助战令最近使用（机器人本地 ms；1 令=60min 口径，计划 §3.4/D14）
@@ -471,6 +518,26 @@ func (a *API) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "teams": teams, "jobs": jobs, "robots": robots})
+}
+
+// logNeedRejoin "需重新入队"审计日志（按号 10 分钟节流——GET /api/team/status 每次拉取都会扫到）。
+func (a *API) logNeedRejoin(account, captain string) {
+	if a.Store == nil {
+		return
+	}
+	a.rejoinMu.Lock()
+	if a.rejoinLoggedAt == nil {
+		a.rejoinLoggedAt = map[string]time.Time{}
+	}
+	if last, ok := a.rejoinLoggedAt[account]; ok && time.Since(last) < 10*time.Minute {
+		a.rejoinMu.Unlock()
+		return
+	}
+	a.rejoinLoggedAt[account] = time.Now()
+	a.rejoinMu.Unlock()
+	a.Store.LogEvent(map[string]any{"type": "log", "level": "warn", "account": account,
+		"zone": a.currentZoneKey(),
+		"msg":  "[组队] 队员心跳丢失队伍态（台账队长 " + captain + "）→ 需重新入队（对队长重新 dispatch）"})
 }
 
 // ---------------------------------------------------------------- 工具

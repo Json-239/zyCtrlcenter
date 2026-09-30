@@ -160,6 +160,10 @@ type API struct {
 	poolSyncTimer *time.Timer
 	// personal 私人池注册表（2026-09-30 Wave 1；见 personal.go——标记文件 data/personal_pool.json）。
 	personal *personalPool
+	// rejoinMu / rejoinLoggedAt 组队"需重新入队"告警按号节流（2026-09-30 修4；
+	// /api/team/status 每次拉取都会扫到，10 分钟/号防审计刷屏）。
+	rejoinMu       sync.Mutex
+	rejoinLoggedAt map[string]time.Time
 }
 
 // New 创建 API。
