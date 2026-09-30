@@ -4,9 +4,9 @@
 规格：`docs/04-测试/计划-20260930-镖行天下.md` + `分析-20260930-镖行天下任务链.md`。
 本批（机器人端首期，40-59 档）：
   ① `share_daily_cfg.csv` 新增两行：
-     - `share_daily_镖行天下`（keywords=运镖任务|领取报酬、chain_task=2001107（抵押品子链归属）、
+     - `share_daily_镖行天下`（keywords=镖行天下【初出茅庐】|运镖任务|领取报酬、chain_task=2001107、
        shop=四店前缀路由（24 件抵押品全覆盖）、accept_ticket=2001101（隐藏票））；
-     - `share_daily_镖局嘱托`（P0-1 前置补做 5001607：keywords=尝试一次运镖|领取报酬、
+     - `share_daily_镖局嘱托`（P0-1 前置补做 5001607：keywords=镖局老板的嘱托|尝试一次运镖|领取报酬、
        accept_ticket=5001607；由中控按 key 派发、daily_limit=1 收尾）；
   ② `share_daily.py` 新增 P2 构件：接票预检（现金 ≥1 金）/ 前置 5001607 检测（专用码）/
      30min 限时观测 / 打劫战斗善后归因 / 交付与加成日志；
@@ -176,7 +176,7 @@ def main():
         def g(k):
             return parts[k].strip() if len(parts) > k else ""
         ok("S:csv 行字段(keywords/chain_task/shop/accept_ticket)",
-           g(1) == "运镖任务|领取报酬" and g(8) == "2001107" and g(10) == "2001101"
+           g(1) == "镖行天下【初出茅庐】|运镖任务|领取报酬" and g(8) == "2001107" and g(10) == "2001101"
            and g(9) == "13021:101|108@金币;13007:210;13006:220;13011:102",
            (g(1), g(8), g(9), g(10)))
     ok("S:csv 前置补做行(镖局嘱托, P0-1)", row2 is not None)
@@ -185,7 +185,7 @@ def main():
         def g2(k):
             return p2[k].strip() if len(p2) > k else ""
         ok("S:镖局嘱托行字段(keywords/accept_ticket=5001607/无shop)",
-           g2(1) == "尝试一次运镖|领取报酬" and g2(10) == "5001607" and g2(9) == "",
+           g2(1) == "镖局老板的嘱托|尝试一次运镖|领取报酬" and g2(10) == "5001607" and g2(9) == "",
            (g2(1), g2(9), g2(10)))
 
     # ================================================================ config 解析
@@ -205,7 +205,7 @@ def main():
     if cfg is not None:
         K = "share_daily_镖行天下"
         ok("D:load 成功且含 biaoxing 行", cfg.loaded and K in cfg.keys_order)
-        ok("D:keywords 拆分", cfg.get_keywords(K) == ["运镖任务", "领取报酬"],
+        ok("D:keywords 拆分", cfg.get_keywords(K) == ["镖行天下【初出茅庐】", "运镖任务", "领取报酬"],
            cfg.get_keywords(K))
         ok("D:accept_ticket=2001101", cfg.get_accept_ticket(K) == 2001101)
         ok("D:chain_task 含 2001107（保 share_key 不漂移）",
@@ -222,7 +222,8 @@ def main():
         # P0-1 前置补做行（镖局嘱托）
         K2 = "share_daily_镖局嘱托"
         ok("D:镖局嘱托 keywords 拆分",
-           cfg.get_keywords(K2) == ["尝试一次运镖", "领取报酬"], cfg.get_keywords(K2))
+           cfg.get_keywords(K2) == ["镖局老板的嘱托", "尝试一次运镖", "领取报酬"],
+           cfg.get_keywords(K2))
         ok("D:镖局嘱托 accept_ticket=5001607", cfg.get_accept_ticket(K2) == 5001607)
         ok("CTRL:镖局嘱托无 shop 配置（find_shop_npc=0）",
            cfg.find_shop_npc(K2, 101008) == 0)
@@ -418,7 +419,7 @@ def main():
     ns_d["ACCEPT_OPTION_KEYWORDS"] = ("接受", "领取", "接取")
     pick_accept = ns_d.get("pick_accept_dialog_option")
     pick_generic = ns_d.get("pick_dialog_option_index")
-    KWS = ["运镖任务", "领取报酬"]
+    KWS = ["镖行天下【初出茅庐】", "运镖任务", "领取报酬"]
 
     if pick_accept is not None:
         dl = [("领取运镖任务", 0), ("我还有别的事情", 0)]
@@ -443,18 +444,41 @@ def main():
         ok("CTRL:无命中 → 退回第一个非关闭(旧行为)",
            pick_generic(dl6, "", KWS) == 0)
         # P0-1 前置补做（镖局嘱托）对话样例
-        K2W = ["尝试一次运镖", "领取报酬"]
+        K2W = ["镖局老板的嘱托", "尝试一次运镖", "领取报酬"]
         if pick_accept is not None:
             dl7 = [("尝试一次运镖。", 0), ("我还有别的事情", 0)]
             idx7, kind7 = pick_accept(dl7, K2W, has_pending=False)
-            ok("CTRL:前置票对话 → 选『尝试一次运镖。』(kind=%s)" % kind7,
+            ok("D:前置票第二段（kws[0] 不中 → fallback 命中『尝试一次运镖。』, kind=%s）" % kind7,
                idx7 == 0, (idx7, kind7))
         ok("CTRL:前置交付『领取报酬』通用命中",
            pick_generic([("领取报酬", 0)], "", K2W) == 0)
         if pick_accept is not None:
             idx8, kind8 = pick_accept([("请尝试一次运镖啊", 0)], K2W, has_pending=False)
-            ok("CTRL:选择器口径=子串匹配（'尝试一次运镖' 命中 '请尝试一次运镖啊'）",
+            ok("D:kws[1:] fallback 亦为子串匹配（'尝试一次运镖' 命中 '请尝试一次运镖啊'）",
                idx8 == 0, (idx8, kind8))
+            # 2026-09-30 两轮扫描语义（kw 外层=关键词优先；修复"仅 kws[0]"命不中第二段）
+            idx9, kind9 = pick_accept([("尝试一次运镖。", 0), ("我还有别的事情", 0)], K2W,
+                                      has_pending=False)
+            ok("D:嘱托第二段 fallback（kws[0] 全不中 → kws[1:] 命中）", idx9 == 0, (idx9, kind9))
+            idx10, kind10 = pick_accept([("#i904#镖行天下【初出茅庐】", 0),
+                                         ("【镖行天下】活动说明", 0), ("离开", 1)], KWS,
+                                        has_pending=False)
+            ok("CTRL:主行线上列表式对照 → 选任务名行（kws[0] 直命中，双版本同过）", idx10 == 0, (idx10, kind10))
+            idx11, kind11 = pick_accept([("回复秦琼", 0), ("#iBM#烽火大唐", 0)],
+                                        ["烽火大唐", "回复秦琼"], has_pending=False)
+            ok("CTRL:混排负例（交付词在前+列表行在后）→ 返回列表行（kw 外层扫描保障）",
+               idx11 == 1, (idx11, kind11))
+            idx12, kind12 = pick_accept([("#iBM#烽火大唐", 0), ("回复秦琼", 0)],
+                                        ["烽火大唐", "回复秦琼"], has_pending=False)
+            ok("CTRL:混排正序 → 列表行", idx12 == 0, (idx12, kind12))
+            idx13, kind13 = pick_accept([("#i904#镖局老板的嘱托", 0),
+                                         ("【镖行天下】活动说明", 0), ("离开", 1)], K2W,
+                                        has_pending=False)
+            ok("CTRL:嘱托线上原文对照 → 选行0", idx13 == 0, (idx13, kind13))
+            idx14, kind14 = pick_accept([("【镖行天下】活动说明", 0), ("离开", 1)], K2W,
+                                        has_pending=False)
+            ok("CTRL:活动说明不误点（含'镖行天下'但不含任务名）",
+               idx14 is None and kind14 == "", (idx14, kind14))
 
     # ================================================================ 结果
     def _grp(prefix, items=None):
