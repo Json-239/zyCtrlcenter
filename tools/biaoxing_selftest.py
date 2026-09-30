@@ -133,13 +133,19 @@ def main():
        "robot_biaoxing_skip_precheck" in src and "预检已放行" in src
        and ("robot_biaoxing_skip_precheck" in
             (_extract_func(src, "biaoxing_accept_precheck") or "")))
+    ok("S:放行 warn 去重位 bx_precheck_warned（预检函数内读 m_share_daily 标记）",
+       "bx_precheck_warned" in (_extract_func(src, "biaoxing_accept_precheck") or ""))
+    ok("S:战斗归因门 bx_accepted（note_fight_end 首查）",
+       "bx_accepted" in (_extract_func(src, "biaoxing_note_fight_end") or ""))
+    ok("S:接票成功置 bx_accepted（on_notice ADD_TASK 段）",
+       "g.bx_accepted = True" in src)
     ok("S:构成函数齐全(__is_biaoxing/accept_precheck/note_fight_end/finish/drop/tick_note)",
        all(("def %s(" % f) in src for f in (
            "__is_biaoxing", "biaoxing_accept_precheck", "biaoxing_note_fight_end",
            "biaoxing_note_finish", "biaoxing_note_drop", "biaoxing_tick_note")))
-    ok("S:状态字段(5 个 bx_ 观测位)", all(("self.%s" % f) in src for f in (
+    ok("S:状态字段(7 个 bx_ 观测位)", all(("self.%s" % f) in src for f in (
         "bx_accept_logged", "bx_need_prereq", "bx_task_start_ms", "bx_timeout_warned",
-        "bx_last_fight_end_ms")))
+        "bx_last_fight_end_ms", "bx_accepted", "bx_precheck_warned")))
     ok("S:__cmd_start 复位观测位", "g.bx_accept_logged = False" in src
        and "g.bx_last_fight_end_ms = 0" in src)
     ok("S:__on_accept 接票预检调用", "biaoxing_accept_precheck(robot_object)" in
@@ -289,12 +295,23 @@ def main():
         ok("D:预检 恰好 1 金 → 过", precheck(ro) == ("", ""))
         ro = types.SimpleNamespace(m_money=123456)
         ok("D:预检 充裕 → 过", precheck(ro) == ("", ""))
-        # 2026-09-30 试点开关三态
+        # 2026-09-30 试点开关三态 + 放行 warn 去重（每 run 一条，防 tick 级刷屏）
         cfg_sw.robot_biaoxing_skip_precheck = True
         logs[:] = []
-        code, why = precheck(types.SimpleNamespace(m_money=5000))
+        gsw = types.SimpleNamespace(bx_precheck_warned=False)
+        ro_sw = types.SimpleNamespace(m_money=5000, m_share_daily=gsw)
+        code, why = precheck(ro_sw)
         ok("D:试点开关=True → 放行(现金 5000 也过)+warn 留痕",
-           code == "" and why == "" and any("预检已放行" in m for _l, m in logs), (code, logs))
+           code == "" and why == "" and any("预检已放行" in m for _l, m in logs)
+           and gsw.bx_precheck_warned is True, (code, logs))
+        logs[:] = []
+        code2, _w2 = precheck(ro_sw)   # 同 run 高频再调 → 不再记
+        ok("D:放行 warn 去重（同 run 第二次不再刷）",
+           code2 == "" and not any("预检已放行" in m for _l, m in logs), logs)
+        logs[:] = []
+        precheck(types.SimpleNamespace(m_money=5000))   # 无 m_share_daily → 不崩、不刷
+        ok("D:预检无 m_share_daily 兜底（放行且不记日志）",
+           not any("预检已放行" in m for _l, m in logs), logs)
         cfg_sw.robot_biaoxing_skip_precheck = False
         logs[:] = []
         ok("D:试点开关=False → 恢复拦截(BALANCE_LOW)且不记放行日志",
@@ -309,8 +326,17 @@ def main():
         sys.modules.pop("config", None)
 
     if n_fight is not None:
-        g1 = types.SimpleNamespace(bx_last_fight_end_ms=0)
-        ok("D:战斗结束落标记", n_fight(None, g1, 12345) is True and g1.bx_last_fight_end_ms == 12345)
+        # 2026-09-30 归因门：未接票（残留抓鬼战）不归因；已接票正常
+        logs[:] = []
+        g0 = types.SimpleNamespace(bx_last_fight_end_ms=0, bx_accepted=False)
+        ok("D:未接票战斗结束 → 不归因不落标记不记日志",
+           n_fight(None, g0, 12345) is False and g0.bx_last_fight_end_ms == 0
+           and not logs, logs)
+        logs[:] = []
+        g1 = types.SimpleNamespace(bx_last_fight_end_ms=0, bx_accepted=True)
+        ok("D:已接票战斗结束 → 落标记+日志",
+           n_fight(None, g1, 12345) is True and g1.bx_last_fight_end_ms == 12345
+           and any("打劫战斗结束" in m for _l, m in logs), logs)
 
     if n_finish is not None:
         logs[:] = []
@@ -352,6 +378,11 @@ def main():
            n_tick(None, g6, 1000000000 + 1000) is False)
         g7 = types.SimpleNamespace(bx_task_start_ms=1, bx_timeout_warned=False, task_index=0)
         ok("D:无在身任务 → 不告警", n_tick(None, g7, 1000000000 + 90000000) is False)
+        g8 = types.SimpleNamespace(bx_accepted=False, bx_task_start_ms=0,
+                                   bx_timeout_warned=False, task_index=2001101)
+        n_tick(None, g8, 1000000000)
+        ok("D:恢复兜底：有在身任务 → bx_accepted 置位（重登/重派场景）",
+           g8.bx_accepted is True)
 
     # ================================================================ 对话严格选择（规格回归）
     print("== 4) 对话严格选择（既有函数 + 镖行天下对话样例）==")
