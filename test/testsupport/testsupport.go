@@ -143,6 +143,8 @@ func InstallBiaoxingNav(t *testing.T, chainDir string) {
 	t.Helper()
 	InstallChainFixture(t, chainDir, "newbie_full", "chains/newbie_full.mini.json")
 	InstallChainFixture(t, chainDir, "biaoxing_nav", "chains/biaoxing_nav.mini.json")
+	// 前置补做小链（5001607；/api/daily/start 的 share_key+chain_id 直发通道用它）
+	InstallChainFixture(t, chainDir, "biaoxing_prereq_nav", "chains/biaoxing_prereq_nav.mini.json")
 }
 
 // InstallGhostNav 装齐"抓鬼导航"需要的**两份**链数据：基座（newbie_full：坐标/网格/路由）

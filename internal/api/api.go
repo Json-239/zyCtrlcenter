@@ -40,7 +40,8 @@
 //	POST /api/autotask/stop   停止某套定时任务（可选鉴权）
 //	POST /api/autotask/run    立即跑一轮（可选鉴权）
 //	GET  /api/daily/overview  分享日常轮转总览（号 × 日常 × 进度；轮转顺序 P2 再填）
-//	POST /api/daily/start     分享日常手动直发（kind=biaoxing|shenbu|fenghuo；不走自动配额/台账；可选鉴权）
+//	POST /api/daily/start     分享日常手动直发（kind=biaoxing|shenbu|fenghuo，或 share_key+chain_id 任意键；
+//	                          不走自动配额/台账；可选鉴权）
 //	POST /api/random_walk     下发游荡（目标图/随机图 + 白名单 + 档位 + 限时；可选鉴权）
 //	POST /api/random_walk/stop    停止游荡（可选鉴权）
 //	GET  /api/roampool        游荡池 keeper 状态（在游荡/空闲/任务池缺口/最近动作）

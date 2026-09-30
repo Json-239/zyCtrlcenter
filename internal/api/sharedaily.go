@@ -292,6 +292,25 @@ func (a *API) shareDailyStartCmdOf(kind autotask.Kind, accs []string) (map[strin
 	return cmd, nil
 }
 
+// shareDailyStartCmdOfRaw "任意 share_daily 键"的启动命令构造（2026-09-30 前置补做通道）：
+// 与 shareDailyStartCmdOf 同构，但 share_key/chain_id 由调用方给定（不限于 autotask kind 枚举）——
+// 用于一次性/临时链（如 5001607 镖局嘱托：share_key=share_daily_镖局嘱托 + chain_id=biaoxing_prereq_nav）。
+// 默认 daily_limit=1（一次性语义；调用方可用 daily_limit 覆盖）。声明文件缺失 = 硬失败。
+func (a *API) shareDailyStartCmdOfRaw(shareKey, chainID string, accs []string) (map[string]any, error) {
+	nav, err := a.chainPayloads().ShareDailyOf(chainID)
+	if err != nil {
+		return nil, errors.New(chainID + " 链数据不可用: " + err.Error())
+	}
+	cmd := map[string]any{"cmd": "share_daily_start", "share_key": shareKey,
+		"chain": nav, "daily_limit": 1, "accounts": accs}
+	if nav != nil && nav.ChainID != "" {
+		cmd["chain_id"] = nav.ChainID
+	} else {
+		cmd["chain_id"] = chainID
+	}
+	return cmd, nil
+}
+
 // shareDailyFullTodayOf 该号今日该玩法是否已满/不可用：
 //   - ① 心跳 daily 明确满额（done≥limit / state=DONE）；或
 //   - ② 独立满额表命中 —— 机器人满额后会 request_stop，心跳 daily 随之变 None
@@ -905,12 +924,6 @@ func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 //	（试点语义；批量阶段的队列位次/并发/配额待试点回执后拍板）。声明文件缺失 = 硬失败（一条不发）。
 func (a *API) handleDailyStart(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
-	k, ok := shareDailyKindFromString(toStr(body["kind"]))
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false,
-			"msg": "kind 必须是分享日常家族：biaoxing / shenbu / fenghuo"})
-		return
-	}
 	accs := normAccounts(bodyAccounts(body))
 	if len(accs) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "accounts 为空"})
@@ -920,7 +933,26 @@ func (a *API) handleDailyStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "事件通道不可用（命令下发不了）"})
 		return
 	}
-	cmd, err := a.shareDailyStartCmdOf(k, accs)
+	k, hasKind := shareDailyKindFromString(toStr(body["kind"]))
+	shareKeyReq := strings.TrimSpace(toStr(body["share_key"]))
+	chainIDReq := strings.TrimSpace(toStr(body["chain_id"]))
+	var cmd map[string]any
+	var label string
+	var err error
+	switch {
+	case hasKind:
+		cmd, err = a.shareDailyStartCmdOf(k, accs)
+		label = k.Label()
+	case shareKeyReq != "" && chainIDReq != "":
+		// 任意 share_daily 键直发（2026-09-30 前置补做通道：一次性/临时链，如 5001607 嘱托；
+		// 默认 daily_limit=1，可用 body.daily_limit 覆盖）
+		cmd, err = a.shareDailyStartCmdOfRaw(shareKeyReq, chainIDReq, accs)
+		label = shareKeyReq
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false,
+			"msg": "kind（biaoxing / shenbu / fenghuo）或 share_key+chain_id 必须给一组"})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
 		return
@@ -930,15 +962,23 @@ func (a *API) handleDailyStart(w http.ResponseWriter, r *http.Request) {
 	}
 	sent := a.Events.SendCmd(cmd, "daily_start_manual")
 	if a.Store != nil {
+		kindStr := ""
+		if hasKind {
+			kindStr = string(k)
+		}
 		a.Store.LogEvent(map[string]any{"type": "api", "action": "daily_start_manual",
-			"zone": a.currentZoneKey(), "kind": string(k), "accounts": accs, "sent": sent,
+			"zone": a.currentZoneKey(), "kind": kindStr, "accounts": accs, "sent": sent,
 			"chain_id": cmd["chain_id"], "share_key": cmd["share_key"]})
 	}
-	msg := "已手动下发" + k.Label() + "：" + strings.Join(accs, "、")
+	msg := "已手动下发" + label + "：" + strings.Join(accs, "、")
 	if !sent {
 		msg = "下发失败：机器人控制通道未连接"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": sent, "kind": string(k),
+	kindStr := ""
+	if hasKind {
+		kindStr = string(k)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": sent, "kind": kindStr,
 		"command": "share_daily_start", "accounts": accs, "sent": sent,
 		"chain_id": cmd["chain_id"], "share_key": cmd["share_key"],
 		"daily_limit": cmd["daily_limit"], "msg": msg})

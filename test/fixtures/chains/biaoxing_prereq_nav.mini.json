@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本仓 data/chains/biaoxing_prereq_nav.json 原样搬运（声明型；NPC/网格/路由由基座 newbie_full 提供）",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/biaoxing_prereq_nav.json"
+  },
+  "chain": {
+    "chain_id": "biaoxing_prereq_nav",
+    "name": "镖局老板的嘱托（镖行天下前置补做；一次性）",
+    "start_task": 5001607,
+    "grid_cell": 16,
+    "task_order": [
+      {
+        "task_index": 5001607,
+        "name": "镖局老板的嘱托（董江→老村长送信）",
+        "thrower_npc": "13063",
+        "thrower_name": "董江",
+        "catcher_npc": "10101",
+        "catcher_name": "老村长",
+        "next": []
+      }
+    ],
+    "share_daily": {
+      "count_roots": [
+        5001607
+      ]
+    }
+  }
+}
