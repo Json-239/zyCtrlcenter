@@ -33,7 +33,50 @@ except Exception:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_LOGDIR = os.path.join(ROOT, "data", "bot_logs")
+# diag 轮转件（钱包事件行 MATCH_ROLE_MONEY；runs 无钱包字段 → 钱包维度补全源）
+DIAG_DIR = "F:/ZyBin/xm/2d-xiyou-server/robot/deploy/single_robot_zy/script"
+DIAG_FILES = ("diag.log.2", "diag.log.1", "diag.log")  # 旧→新（顺序即时间序）
 BIAOXING_KEYS = ("share_daily_镖行天下", "share_daily_镖局嘱托")  # 主 key + 嘱托 key
+_WALLET_RE = re.compile(r"MATCH_ROLE_MONEY account=(\S+?)\s+(\{[^}]*\})")
+
+
+def load_diag_wallet(account, diag_dir=DIAG_DIR):
+    """从 diag 轮转件提取该账号钱包事件行（MATCH_ROLE_MONEY）。
+
+    diag 行无 ts → 用"该号前一条带 ts 的事件"作 approx_ts（追加序=时间序，误差=消息间隔）。
+    只读；文件缺失自动跳过。返回 [{approx_ts, file, line, field, value}]。
+    """
+    events = []
+    acc_b = account.encode()
+    for name in DIAG_FILES:
+        path = os.path.join(diag_dir, name)
+        if not os.path.exists(path):
+            continue
+        last_ts = 0
+        try:
+            with open(path, "rb") as f:
+                for lineno, raw in enumerate(f, 1):
+                    if acc_b not in raw:
+                        continue
+                    line = raw.decode("utf-8", "replace")
+                    if "'ts':" in line or '"ts":' in line:
+                        m = re.search(r"['\"]ts['\"]\s*:\s*(\d+)", line)
+                        if m:
+                            try:
+                                last_ts = int(m.group(1))
+                            except Exception:
+                                pass
+                    if "MATCH_ROLE_MONEY" not in line:
+                        continue
+                    m = _WALLET_RE.search(line)
+                    if not m or m.group(1) != account:
+                        continue
+                    for fm in re.finditer(r"['\"](\w+)['\"]\s*:\s*(-?\d+)", m.group(2)):
+                        events.append({"approx_ts": last_ts, "file": name, "line": lineno,
+                                       "field": fm.group(1), "value": int(fm.group(2))})
+        except Exception:
+            continue
+    return events
 
 
 def norm_account(a):
@@ -67,10 +110,11 @@ def load_events(path):
     return out
 
 
-def analyze(account, date_str, main_only=True):
+def analyze(account, date_str, main_only=True, diag=True):
     """返回该账号当日的轮次档案（dict）。main_only=False 时也分析嘱托轮。"""
     path = os.path.join(DEFAULT_LOGDIR, account, "runs_%s.log" % date_str)
     evs = load_events(path)
+    wallet = load_diag_wallet(account) if diag else []
     rounds = []
     cur = None
     prev_done_state = None
@@ -188,13 +232,27 @@ def analyze(account, date_str, main_only=True):
         if tasks and post:
             r["first_fight_after_accept_s"] = post[0]["end_ts"] - min(a["ts"] for a in r["accepts"])
         r["drops_n"] = len(r.get("drops") or [])
+        # b'. 钱包事件（diag，approx_ts 落轮区间）→ 折叠为每字段的变化序列
+        _wl = [w for w in wallet
+               if w["approx_ts"] and r["start_ts"] <= w["approx_ts"] <= (r["end_ts"] or 10 ** 18)]
+        r["wallet_events_n"] = len(_wl)
+        per, order = {}, []
+        for w in _wl:
+            f, v = w["field"], w["value"]
+            if f not in per:
+                per[f] = [v]
+                order.append(f)
+            elif per[f][-1] != v:
+                per[f].append(v)
+        r["wallet_seq"] = [[f, per[f]] for f in order]
     return {"account": account, "date": date_str, "runs_log": path, "rounds": rounds,
-            "events_total": len(evs)}
+            "events_total": len(evs), "wallet_total": len(wallet)}
 
 
 def print_md(rep):
     print("# 镖行天下主票实验取证 —— %s（%s）" % (rep["account"], rep["date"]))
-    print("- 数据源：`%s`（%d 条事件）" % (rep["runs_log"], rep["events_total"]))
+    print("- 数据源：`%s`（%d 条事件）；diag 钱包事件 %d 条（MATCH_ROLE_MONEY，approx_ts）" % (
+        rep["runs_log"], rep["events_total"], rep.get("wallet_total", 0)))
     print("- 轮数：%d\n" % len(rep["rounds"]))
     for i, r in enumerate(rep["rounds"], 1):
         print("## 轮 %d [%s] %s → %s" % (i, r["version"], fmt_ts(r["start_ts"]), fmt_ts(r["end_ts"])))
@@ -220,6 +278,10 @@ def print_md(rep):
         if r.get("time_used_s") is not None:
             print("- 限时：接票→末次 FINISH 用时 %ss（30min 余量 %ss）" % (
                 r["time_used_s"], r["time_margin_s"]))
+        for f, seq in (r.get("wallet_seq") or []):
+            show = seq[:9]
+            tail = " …(%d 步)" % (len(seq) - 9) if len(seq) > 9 else ""
+            print("- 钱包(%s): %s%s" % (f, " → ".join(str(x) for x in show), tail))
         if r["done_finish_gap"]:
             print("- **done 计数疑点**（FINISH 后 done 未增）：%s" % r["done_finish_gap"])
         for w in r["wallet_lines"][:6]:
@@ -232,10 +294,11 @@ def main():
     ap.add_argument("--accounts", default="5240", help="逗号分隔（短号或全称）")
     ap.add_argument("--date", default=_dt.date.today().strftime("%Y%m%d"))
     ap.add_argument("--json", default="", help="落盘 JSON 路径（可选）")
+    ap.add_argument("--no-diag", action="store_true", help="跳过 diag 钱包源（默认读）")
     a = ap.parse_args()
     reports = []
     for acc in [x for x in a.accounts.split(",") if x.strip()]:
-        rep = analyze(norm_account(acc), a.date)
+        rep = analyze(norm_account(acc), a.date, diag=(not a.no_diag))
         reports.append(rep)
         print_md(rep)
     if a.json:
