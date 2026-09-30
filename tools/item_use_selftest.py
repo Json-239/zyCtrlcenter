@@ -114,7 +114,10 @@ def main():
           and "bag_ops" in src[max(0, _egg_i - 300):_egg_i],
           "未匹配到 egg_kind(_idx) is not None → continue(在收集循环内、to_use.append 之前)")
     # 敏感度: 删掉蛋跳过条件后, 同款检查必须失败(证明本条真的盯着该分支)
+    # 2026-09-29 适配: tidy 的 bag_ops 引用从循环内 `_bo_egg` 改为循环外 `_bo`
+    #   (三问题修复), 两种写法都替换, 保证任何一版都能被敏感度抓出。
     _mut = src.replace("_bo_egg.egg_kind(_idx) is not None", "False")
+    _mut = _mut.replace("_bo.egg_kind(_idx) is not None", "False")
     check("反例-删掉蛋跳过条件则存在性检查失败(敏感度)",
           _mut.find(_egg_cond) < 0)
 
