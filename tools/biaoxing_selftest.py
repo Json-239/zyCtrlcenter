@@ -124,6 +124,17 @@ def main():
     csv_raw = open(csv_path, "rb").read()
     csv_text = csv_raw.decode("utf-8-sig")
 
+    def _read_soft(basename):
+        """软读（打劫选靶批用；旧基线备份里可能不存在该文件 → 返回空串）。"""
+        p = os.path.join(script_dir, basename + bak_suffix)
+        if not os.path.exists(p):
+            return ""
+        return open(p, encoding="utf-8", errors="replace").read()
+
+    src_ft = _read_soft("fight_tester.py")
+    src_mh = _read_soft("msghandle.py")
+    src_rb = _read_soft("robot.py")
+
     # ================================================================ 静态
     print("== 1) 静态接线 ==")
     ok("S:常量块(BIAOXING_KEY/DEPOSIT/TIME_LIMIT/MAIN_TASKS/BONUS)",
@@ -575,6 +586,66 @@ def main():
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
+
+    # ================================================================ 打劫选靶修正
+    print("== 7) 打劫选靶修正（山贼大王 30599 优先；2026-09-30）==")
+    ok("S:fight_tester 有 _pick_fight_target 且接线",
+       "def _pick_fight_target(" in src_ft
+       and "target_index = _pick_fight_target(robot_object)" in src_ft)
+    ok("S:msghandle 有 __track_enemy_view 且两入口接线+阵容清空",
+       "def __track_enemy_view(" in src_mh
+       and src_mh.count("__track_enemy_view(robot_object, fighter_index, data_list") == 2
+       and "robot_object.m_fight_enemy_views = {}" in src_mh)
+    ok("S:robot.py 初始化 m_fight_enemy_views",
+       "self.m_fight_enemy_views = {}" in src_rb)
+    ns7 = {}
+    frag7 = _extract_func(src_ft, "_pick_fight_target")
+    frag7b = _extract_func(src_mh, "__track_enemy_view")
+    ok("D:提取 _pick_fight_target", frag7 is not None)
+    ok("D:提取 __track_enemy_view", frag7b is not None)
+    if frag7 and frag7b:
+        try:
+            exec(compile(frag7, "<t7>", "exec"), ns7)
+            exec(compile(frag7b, "<t7b>", "exec"), ns7)
+        except Exception as e:  # noqa
+            ok("D:exec 选靶函数", False, repr(e))
+        pick7 = ns7.get("_pick_fight_target")
+        track7 = ns7.get("__track_enemy_view")
+        if pick7 is not None:
+            ok("D:30599 在列（非首位）→ 优先选中",
+               pick7(types.SimpleNamespace(
+                   m_fight_enemy_indexes=[11, 12, 13],
+                   m_fight_enemy_views={11: 30597, 12: 30599, 13: 30598})) == 12)
+            ok("D:空敌列表 → 默认 11",
+               pick7(types.SimpleNamespace(m_fight_enemy_indexes=[])) == 11)
+            ok("D:外形值为字符串'30599'也认（int 化）",
+               pick7(types.SimpleNamespace(
+                   m_fight_enemy_indexes=[31, 32],
+                   m_fight_enemy_views={31: 30597, 32: "30599"})) == 32)
+            ok("CTRL:无 30599 → 回退列表首个（combo1 等存量行为不变）",
+               pick7(types.SimpleNamespace(
+                   m_fight_enemy_indexes=[11, 12],
+                   m_fight_enemy_views={11: 30597, 12: 30598})) == 11)
+            ok("CTRL:无外形记录（旧对象/其它战斗）→ 首个敌人不崩",
+               pick7(types.SimpleNamespace(m_fight_enemy_indexes=[21, 22])) == 21)
+        if track7 is not None:
+            ro7 = types.SimpleNamespace()
+            track7(ro7, 7, 30599)
+            track7(ro7, 8, "30597")
+            track7(ro7, 9, 0)
+            ok("D:__track_enemy_view 记录（int 化；0 不记）",
+               getattr(ro7, "m_fight_enemy_views", None) == {7: 30599, 8: 30597},
+               getattr(ro7, "m_fight_enemy_views", None))
+            ro8 = types.SimpleNamespace(m_fight_enemy_views={1: 30597})
+            track7(ro8, 2, 30599)
+            ok("D:已有 views 字典 → 追加不覆盖",
+               ro8.m_fight_enemy_views == {1: 30597, 2: 30599})
+    else:
+        ok("D:30599 在列（非首位）→ 优先选中", False, "提取失败")
+        ok("D:空敌列表 → 默认 11", False, "提取失败")
+        ok("D:外形值为字符串'30599'也认（int 化）", False, "提取失败")
+        ok("D:__track_enemy_view 记录（int 化；0 不记）", False, "提取失败")
+        ok("D:已有 views 字典 → 追加不覆盖", False, "提取失败")
 
     # ================================================================ 结果
     def _grp(prefix, items=None):
