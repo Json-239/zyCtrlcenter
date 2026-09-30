@@ -348,7 +348,9 @@ check("B4 坏版 noack 跳级: 落入错向'重走重发'(而非按到达推进)
 	"_noack=%s route=%d" % (bh.get("_noack"), len(bq2.dijkstra_route)))
 
 print("\n自检目标: %s" % engine_path)
-print("sha1=%s" % hashlib.sha1(src.encode("utf-8")).hexdigest()[:12])
-print("ghost  sha1=%s" % hashlib.sha1(gsrc.encode("utf-8")).hexdigest()[:12])
+# 注意用"二进制读取"算 sha1（磁盘真值）: quest_engine 是 CRLF 文件, 文本模式读
+# 会做换行归一化(\r\n→\n), 得出的哈希与对外口径(二进制)不一致。
+print("sha1=%s" % hashlib.sha1(open(engine_path, "rb").read()).hexdigest()[:12])
+print("ghost  sha1=%s" % hashlib.sha1(open(ghost_path, "rb").read()).hexdigest()[:12])
 print("结果：%d 项，失败 %d 项" % (total, fails))
 sys.exit(1 if fails else 0)
