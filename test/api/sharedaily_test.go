@@ -190,8 +190,8 @@ func TestDailyOverviewEmptySafe(t *testing.T) {
 		t.Fatalf("没有心跳时应给空数组: %v", res["rows"])
 	}
 	keys := asSlice(res["share_keys"])
-	if len(keys) != 2 || keys[0] != "share_daily_大唐神捕" || keys[1] != "share_daily_宫廷10" {
-		t.Fatalf("应带两个玩法键（前端表头用；次序 shenbu→fenghuo）: %v", res["share_keys"])
+	if len(keys) != 3 || keys[0] != "share_daily_大唐神捕" || keys[1] != "share_daily_宫廷10" || keys[2] != "share_daily_镖行天下" {
+		t.Fatalf("应带三个玩法键（前端表头用；次序 shenbu→fenghuo→biaoxing）: %v", res["share_keys"])
 	}
 }
 

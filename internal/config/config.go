@@ -129,6 +129,20 @@ type Config struct {
 	// 可用环境变量 CTRL_FENGHUO_MIN_LEVEL 覆盖。
 	FenghuoMinLevel int
 
+	// ---- 镖行天下（分享日常家族第三成员，2026-09-30 首期 40-59 档）----
+	//
+	// BiaoxingEnabled 总开关：**默认关** —— 首期只做"1-3 号手动试点"（见 /api/daily/start），
+	// 不参与自动候选/派发；试点回执后再定批量（并发/队列位次/配额）。可用 CTRL_BIAOXING=1 打开。
+	BiaoxingEnabled bool
+	// BiaoxingChainID 专属声明文件名（data/chains/<id>.json，默认 biaoxing_nav；12 变体 task_order）。
+	BiaoxingChainID string
+	// BiaoxingKey 下发给机器人的玩法键（share_daily_start.share_key；默认 share_daily_镖行天下）。
+	BiaoxingKey string
+	// BiaoxingDailyLimit 日限（服务端 20011.xml：40 次/天 + 前 10 次加成子 key）。
+	BiaoxingDailyLimit int
+	// BiaoxingMinLevel 等级门槛（票条件：40~59 档；首期只跑第一档）。
+	BiaoxingMinLevel int
+
 	// AutoRegister* 定时任务的"没号时自动注册"用（默认按本项目的账号命名口径：
 	// robot + 7 位序号 + @xy3.com，如 robot0001000@xy3.com）。可用环境变量
 	// CTRL_AUTO_REGISTER_PREFIX / _SUFFIX / _PAD 覆盖。
@@ -333,6 +347,11 @@ func build(base string, opts *cliOpts) *Config {
 		FenghuoKey:           env("CTRL_FENGHUO_KEY", "share_daily_宫廷10"),
 		FenghuoDailyLimit:    envInt("CTRL_FENGHUO_LIMIT", 20),
 		FenghuoMinLevel:      envInt("CTRL_FENGHUO_MIN_LEVEL", 40),
+		BiaoxingEnabled:      envBool("CTRL_BIAOXING", false),
+		BiaoxingChainID:      env("CTRL_BIAOXING_CHAIN", "biaoxing_nav"),
+		BiaoxingKey:          env("CTRL_BIAOXING_KEY", "share_daily_镖行天下"),
+		BiaoxingDailyLimit:   envInt("CTRL_BIAOXING_LIMIT", 40),
+		BiaoxingMinLevel:     envInt("CTRL_BIAOXING_MIN_LEVEL", 40),
 		AutoRegisterPrefix:   env("CTRL_AUTO_REGISTER_PREFIX", "robot"),
 		AutoRegisterSuffix:   env("CTRL_AUTO_REGISTER_SUFFIX", "@xy3.com"),
 		AutoRegisterPad:      envInt("CTRL_AUTO_REGISTER_PAD", 7),

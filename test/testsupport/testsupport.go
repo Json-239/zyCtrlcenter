@@ -137,6 +137,14 @@ func InstallChainFixture(t *testing.T, chainDir, id, rel string) string {
 	return path
 }
 
+// InstallBiaoxingNav 装齐"镖行天下"载荷需要的**两份**链数据：
+// 基座（newbie_full：坐标/网格/路由）+ 专属声明（biaoxing_nav：12 变体 task_order + 630/651 备点覆盖）。
+func InstallBiaoxingNav(t *testing.T, chainDir string) {
+	t.Helper()
+	InstallChainFixture(t, chainDir, "newbie_full", "chains/newbie_full.mini.json")
+	InstallChainFixture(t, chainDir, "biaoxing_nav", "chains/biaoxing_nav.mini.json")
+}
+
 // InstallGhostNav 装齐"抓鬼导航"需要的**两份**链数据：基座（newbie_full：坐标/网格/路由）
 // + 抓鬼专属（zhongkui_nav：刷鬼图/落点/地图名）。
 //

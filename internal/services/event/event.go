@@ -90,6 +90,10 @@ func New(cfg *config.Config, st *state.State, runStore *store.Store, c *ctrl.Ser
 		dec.FenghuoEnabled = cfg.FenghuoEnabled
 		dec.FenghuoMinLevel = cfg.FenghuoMinLevel
 		dec.FenghuoKey = cfg.FenghuoKey
+		// 镖行天下（2026-09-30 首期；默认关——只手动试点，不参与自动候选/派发）
+		dec.BiaoxingEnabled = cfg.BiaoxingEnabled
+		dec.BiaoxingMinLevel = cfg.BiaoxingMinLevel
+		dec.BiaoxingKey = cfg.BiaoxingKey
 	}
 	return &Handler{
 		Cfg:             cfg,
@@ -792,8 +796,9 @@ func (h *Handler) dailyInfoOf(account string) intent.DailyStates {
 		return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 	}
 	return intent.DailyStates{
-		Shenbu:  infoOf(dec.ShareDailyKeyOf()),
-		Fenghuo: infoOf(dec.FenghuoKeyOf()),
+		Shenbu:   infoOf(dec.ShareDailyKeyOf()),
+		Fenghuo:  infoOf(dec.FenghuoKeyOf()),
+		Biaoxing: infoOf(dec.BiaoxingKeyOf()),
 	}
 }
 

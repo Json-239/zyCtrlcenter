@@ -162,6 +162,8 @@ func shareDailyKindFromString(kind string) (autotask.Kind, bool) {
 		return autotask.KindShenbu, true
 	case string(autotask.KindFenghuo):
 		return autotask.KindFenghuo, true
+	case string(autotask.KindBiaoxing):
+		return autotask.KindBiaoxing, true
 	}
 	return "", false
 }
@@ -176,6 +178,8 @@ func (a *API) shareDailyKeyOf(kind autotask.Kind) string {
 		return a.shareDailyKey()
 	case autotask.KindFenghuo:
 		return a.chainPayloads().FenghuoKey()
+	case autotask.KindBiaoxing:
+		return a.chainPayloads().BiaoxingKey()
 	}
 	return ""
 }
@@ -187,6 +191,8 @@ func (a *API) shareDailyChainIDOf(kind autotask.Kind) string {
 		return a.chainPayloads().ShareDailyChainID()
 	case autotask.KindFenghuo:
 		return a.chainPayloads().FenghuoChainID()
+	case autotask.KindBiaoxing:
+		return a.chainPayloads().BiaoxingChainID()
 	}
 	return ""
 }
@@ -198,6 +204,8 @@ func (a *API) shareDailyLimitOf(kind autotask.Kind) int {
 		return a.chainPayloads().ShareDailyLimit()
 	case autotask.KindFenghuo:
 		return a.chainPayloads().FenghuoDailyLimit()
+	case autotask.KindBiaoxing:
+		return a.chainPayloads().BiaoxingDailyLimit()
 	}
 	return 0
 }
@@ -223,6 +231,10 @@ func (a *API) shareDailyMinLevelOf(kind autotask.Kind, cfg autotask.Config) int 
 	case autotask.KindFenghuo:
 		if a.Cfg != nil && a.Cfg.FenghuoMinLevel > 0 {
 			return a.Cfg.FenghuoMinLevel
+		}
+	case autotask.KindBiaoxing:
+		if a.Cfg != nil && a.Cfg.BiaoxingMinLevel > 0 {
+			return a.Cfg.BiaoxingMinLevel
 		}
 	}
 	return intent.DefaultShareDailyMinLevel
@@ -715,7 +727,8 @@ func (a *API) shareDailyStopAllOf(kind autotask.Kind, reason string) int {
 // 认不出来返回空串（前端可用 share_key 兜底显示）。
 var shareDailyKindByKey = map[string]string{
 	"share_daily_大唐神捕": string(autotask.KindShenbu),
-	"share_daily_宫廷10": string(autotask.KindFenghuo), // 烽火大唐（20021.xml share_daily_key）
+	"share_daily_宫廷10": string(autotask.KindFenghuo),  // 烽火大唐（20021.xml share_daily_key）
+	"share_daily_镖行天下": string(autotask.KindBiaoxing), // 镖行天下（20011~14.xml share_daily_key）
 }
 
 // shareDailyKindOf 玩法键 → 策略 kind（总览 queue 项用；认不出返回空串）。
@@ -725,7 +738,7 @@ func (a *API) shareDailyKindOf(shareKey string) string {
 	if shareKey == "" {
 		return ""
 	}
-	for _, kind := range []autotask.Kind{autotask.KindShenbu, autotask.KindFenghuo} {
+	for _, kind := range []autotask.Kind{autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing} {
 		if shareKey == a.shareDailyKeyOf(kind) {
 			return string(kind)
 		}
@@ -733,10 +746,11 @@ func (a *API) shareDailyKindOf(shareKey string) string {
 	return shareDailyKindByKey[shareKey]
 }
 
-// shareDailyFamilyKind 分享日常家族的 kind 固定次序（= Kinds 里日常两段的次序）：
-// shenbu → fenghuo，与前端 queue 固定排序（ghost→newbie→shenbu→fenghuo）同口径。
+// shareDailyFamilyKinds 分享日常家族的 kind 固定次序（= Kinds 里日常段的次序）：
+// shenbu → fenghuo → biaoxing，与前端 queue 固定排序（ghost→newbie→shenbu→fenghuo→biaoxing）同口径。
+// 注：镖行天下首期默认关（target=0/手动直发），但队列位次先占好，试点后启用不改排序。
 func shareDailyFamilyKinds() []autotask.Kind {
-	return []autotask.Kind{autotask.KindShenbu, autotask.KindFenghuo}
+	return []autotask.Kind{autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing}
 }
 
 // shareDailyKeys 分享日常家族的全部玩法键（按 kind 固定次序；总览 share_keys 用）。
@@ -881,4 +895,51 @@ func (a *API) handleDailyOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "share_keys": keys, "rows": rows,
 	})
+}
+
+// handleDailyStart POST /api/daily/start —— 分享日常家族**手动直发**（2026-09-30 镖行天下首期试点通道）。
+//
+//	请求：{kind:"biaoxing|shenbu|fenghuo", accounts:[...], daily_limit?:int}
+//	行为：按玩法组装 share_daily_start（与自动派发同构：share_key/nav/daily_limit/done）直发机器人；
+//	**不写任何在途/配额/台账** —— 纯粹"用户手动发起"，候选/恢复引擎不会因此接管该号
+//	（试点语义；批量阶段的队列位次/并发/配额待试点回执后拍板）。声明文件缺失 = 硬失败（一条不发）。
+func (a *API) handleDailyStart(w http.ResponseWriter, r *http.Request) {
+	body := readBody(r)
+	k, ok := shareDailyKindFromString(toStr(body["kind"]))
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false,
+			"msg": "kind 必须是分享日常家族：biaoxing / shenbu / fenghuo"})
+		return
+	}
+	accs := normAccounts(bodyAccounts(body))
+	if len(accs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "accounts 为空"})
+		return
+	}
+	if a.Events == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "事件通道不可用（命令下发不了）"})
+		return
+	}
+	cmd, err := a.shareDailyStartCmdOf(k, accs)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
+		return
+	}
+	if limit := toInt(body["daily_limit"], 0); limit > 0 {
+		cmd["daily_limit"] = limit
+	}
+	sent := a.Events.SendCmd(cmd, "daily_start_manual")
+	if a.Store != nil {
+		a.Store.LogEvent(map[string]any{"type": "api", "action": "daily_start_manual",
+			"zone": a.currentZoneKey(), "kind": string(k), "accounts": accs, "sent": sent,
+			"chain_id": cmd["chain_id"], "share_key": cmd["share_key"]})
+	}
+	msg := "已手动下发" + k.Label() + "：" + strings.Join(accs, "、")
+	if !sent {
+		msg = "下发失败：机器人控制通道未连接"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": sent, "kind": string(k),
+		"command": "share_daily_start", "accounts": accs, "sent": sent,
+		"chain_id": cmd["chain_id"], "share_key": cmd["share_key"],
+		"daily_limit": cmd["daily_limit"], "msg": msg})
 }

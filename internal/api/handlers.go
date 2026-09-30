@@ -423,8 +423,8 @@ func (a *API) conditionWarnings(chainID string, accounts []string) []map[string]
 		switch kind {
 		case intent.KindGhost:
 			cmd, label = "ghost_start", "抓鬼"
-		case intent.KindShenbu, intent.KindFenghuo:
-			// 意图 kind 字符串与 autotask.Kind 同名（shenbu/fenghuo）→ 直接用中文名。
+		case intent.KindShenbu, intent.KindFenghuo, intent.KindBiaoxing:
+			// 意图 kind 字符串与 autotask.Kind 同名（shenbu/fenghuo/biaoxing）→ 直接用中文名。
 			cmd, label = "share_daily_start", autotask.Kind(kind).Label()
 		default:
 			continue
@@ -543,8 +543,8 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 			toGhost = append(toGhost, acc)
 			assignments = append(assignments, map[string]any{
 				"account": acc, "command": "ghost_start", "reason": "抓鬼（" + reason + "）"})
-		case intent.KindShenbu, intent.KindFenghuo:
-			// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24）：手动通道按用户意图派
+		case intent.KindShenbu, intent.KindFenghuo, intent.KindBiaoxing:
+			// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24 / 镖行天下 2026-09-30）：手动通道按用户意图派
 			//（等级/余额闸只在自动通道生效 —— 意图已按门槛判过）。
 			dk := autotask.Kind(kind)
 			toDaily[dk] = append(toDaily[dk], acc)
@@ -616,7 +616,7 @@ func (a *API) startAuto(w http.ResponseWriter, defaultChainID string, accounts [
 		switch kind {
 		case autotask.KindGhost:
 			kept, dropped = a.ghostInflight.dropFresh(accs)
-		case autotask.KindShenbu, autotask.KindFenghuo:
+		case autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing:
 			kept, dropped = a.dailyInflight.dropFresh(accs)
 		default:
 			kept, dropped = a.chainInflight.dropFresh(accs)
@@ -818,8 +818,11 @@ func (a *API) startAutoGroups(toChain, toGhost []string, toDaily map[autotask.Ki
 
 // shareDailyChainConfigEnv 该玩法声明文件对应的环境变量名（报错文案指路用）。
 func (a *API) shareDailyChainConfigEnv(kind autotask.Kind) string {
-	if kind == autotask.KindFenghuo {
+	switch kind {
+	case autotask.KindFenghuo:
 		return "CTRL_FENGHUO_CHAIN"
+	case autotask.KindBiaoxing:
+		return "CTRL_BIAOXING_CHAIN"
 	}
 	return "CTRL_SHARE_DAILY_CHAIN"
 }
@@ -961,8 +964,9 @@ func (a *API) dailyInfoOfAccount(acc string) intent.DailyStates {
 		return intent.DailyInfo{Known: true, Full: r.DailyFull(key)}
 	}
 	return intent.DailyStates{
-		Shenbu:  infoOf(dec.ShareDailyKeyOf()),
-		Fenghuo: infoOf(dec.FenghuoKeyOf()),
+		Shenbu:   infoOf(dec.ShareDailyKeyOf()),
+		Fenghuo:  infoOf(dec.FenghuoKeyOf()),
+		Biaoxing: infoOf(dec.BiaoxingKeyOf()),
 	}
 }
 
@@ -993,7 +997,7 @@ func (a *API) handleStop(w http.ResponseWriter, r *http.Request) {
 	msg := okMsg(ok, "已下发停链")
 	msg += "；已标人工暂停 " + itoa(pausedN) + " 个（自动编排不再拉起；再点「启动/立即补发/上线」解除）"
 	if dailyN > 0 {
-		msg += "；已给 " + itoa(dailyN) + " 个在跑的分享日常（神捕/烽火大唐）下发收工"
+		msg += "；已给 " + itoa(dailyN) + " 个在跑的分享日常（神捕/烽火大唐/镖行天下）下发收工"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "paused": pausedN, "daily_stop": dailyN, "msg": msg})
 }

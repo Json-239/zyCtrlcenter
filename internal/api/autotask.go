@@ -109,6 +109,8 @@ func (a *API) ReghostDeps() reghost.Deps {
 				kind = autotask.KindShenbu
 			case intent.KindFenghuo:
 				kind = autotask.KindFenghuo
+			case intent.KindBiaoxing:
+				kind = autotask.KindBiaoxing
 			default:
 				if a.St != nil {
 					if r, ok := a.St.Get(acc); ok {
@@ -530,6 +532,8 @@ func restoreKindMatches(intentKind string, poolKind autotask.Kind) bool {
 		return intentKind == string(intent.KindShenbu)
 	case autotask.KindFenghuo:
 		return intentKind == string(intent.KindFenghuo)
+	case autotask.KindBiaoxing:
+		return intentKind == string(intent.KindBiaoxing)
 	}
 	return false
 }
@@ -563,7 +567,7 @@ func (a *API) poolQuota(kind autotask.Kind, manual bool) int {
 		inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
 	case autotask.KindNewbie:
 		inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
-	case autotask.KindShenbu, autotask.KindFenghuo:
+	case autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing:
 		inflight = a.dailyInflightCountOf(kind) + a.restoreInflightCountByKind(kind)
 	}
 	if q := st.Target - st.Online - inflight; q > 0 {
@@ -611,7 +615,7 @@ func (a *API) poolAllowsDispatch(kind string) (bool, string) {
 			inflight = a.ghostInflightCount() + a.restoreInflightCountByKind(autotask.KindGhost)
 		case autotask.KindNewbie:
 			inflight = a.chainInflightCount() + a.restoreInflightCountByKind(autotask.KindNewbie)
-		case autotask.KindShenbu, autotask.KindFenghuo:
+		case autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing:
 			inflight = a.dailyInflightCountOf(k) + a.restoreInflightCountByKind(k)
 		}
 		return false, fmt.Sprintf("%s 池配额已用满（在跑 %d + 在途 %d ≥ 目标 %d，不自动补发）",
@@ -820,8 +824,8 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			out = append(out, autotask.Candidate{Account: acc, Online: true, Level: level,
 				Reason: fmt.Sprintf("孵化（%s，图 %d）", hatchKindLabel(plan.Kind), plan.MapID)})
 
-		case autotask.KindShenbu, autotask.KindFenghuo:
-			// 分享日常（大唐神捕 / 烽火大唐，判据完全相同）：**等级 ≥ 服务端票条件（默认 40）
+		case autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing:
+			// 分享日常（大唐神捕 / 烽火大唐 / 镖行天下，判据完全相同）：**等级 ≥ 服务端票条件（默认 40）
 			// + 今日未满 + 没在跑别的链**。两个玩法的差异只有玩法键/门槛/满额表（按 kind 取），
 			// 判定主体在 shareDailyCandidateOf（见 sharedaily.go；那里有完整的让路/续跑口径）。
 			if c, ok := a.shareDailyCandidateOf(kind, acc, r, cfg, kinds, hasLive, level); ok {
@@ -891,7 +895,7 @@ func (a *API) usableInZone(acc string) bool {
 
 // poolCounts 号池分区统计（可用数 / 在跑数）：面板"往对应池里拉号"与目标缺口显示用。
 func (a *API) poolCounts(kind autotask.Kind) (usable, running int) {
-	if kind == autotask.KindHatch || kind == autotask.KindShenbu || kind == autotask.KindFenghuo {
+	if kind == autotask.KindHatch || kind == autotask.KindShenbu || kind == autotask.KindFenghuo || kind == autotask.KindBiaoxing {
 		// 孵化与分享日常（大唐神捕 / 烽火大唐）都**没有独立分区**（号本来就在新手池/抓鬼池里）：
 		// usable = 当前可拉起的候选数（判据与自动任务同一套），running = 该策略在跑数。
 		return len(a.autotaskCandidates(kind)), a.autotaskOnlineCount(kind)
@@ -1144,9 +1148,10 @@ func (a *API) LaunchTask(kind autotask.Kind, accs []string) (bool, string) {
 		// 孵化：按号推导蛋种/蛋编号/目标图 → 分组下发 hatch_start（载荷组装与会话记账见 hatch.go）
 		return a.launchHatch(accs)
 
-	case autotask.KindShenbu, autotask.KindFenghuo:
-		// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24 P1）：载荷 = 基座 newbie_full +
-		// <玩法>_nav 声明（发送时组装，见 chainpayload.go:ShareDailyOf）；命令与 ghost_start 同构。
+	case autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing:
+		// 分享日常（大唐神捕 2026-09-23 / 烽火大唐 2026-09-24 P1 / 镖行天下 2026-09-30 首期）：
+		// 载荷 = 基座 newbie_full + <玩法>_nav 声明（发送时组装，见 chainpayload.go:ShareDailyOf）；
+		// 命令与 ghost_start 同构。镖行天下默认池未启用/target=0 → 仅手动直发经 /api/daily/start。
 		return a.launchShareDailyOf(kind, accs)
 	}
 	return false, "未知策略: " + string(kind)
@@ -1246,7 +1251,7 @@ func (a *API) handleAutoTaskStart(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(body["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo / biaoxing"})
 		return
 	}
 	prev := a.AutoTask.States()[kind].Config
@@ -1302,7 +1307,7 @@ func (a *API) handleAutoTaskStop(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(readBody(r)["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo / biaoxing"})
 		return
 	}
 	a.AutoTask.Stop(kind)
@@ -1345,7 +1350,7 @@ func (a *API) handleAutoTaskRun(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := autotask.Kind(strings.ToLower(strings.TrimSpace(toStr(readBody(r)["kind"]))))
 	if !kind.Valid() {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "kind 必须是 newbie / ghost / hatch / shenbu / fenghuo / biaoxing"})
 		return
 	}
 	a.AutoTask.RunNow(kind)

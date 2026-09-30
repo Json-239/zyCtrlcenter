@@ -1,0 +1,64 @@
+{
+  "provenance": {
+    "real": true,
+    "trimmed": true,
+    "raw": "",
+    "how": "从本仓 data/chains/biaoxing_nav.json 裁剪：保留 3 条 task_order（2001101 狮驼岭 / 2001105 阿傩备点38 / 2001107 抵押品入口）+ 630/651 备点 npcs 覆盖；坐标/网格/路由由中控从基座 newbie_full 复用（chainpayload.assembleShareDaily）",
+    "source": "f:/ZyBin/zyCtrlcenter/data/chains/biaoxing_nav.json"
+  },
+  "chain": {
+    "chain_id": "biaoxing_nav",
+    "name": "镖行天下（mini 夹具）",
+    "start_task": 2001101,
+    "grid_cell": 16,
+    "task_order": [
+      {
+        "task_index": 2001101,
+        "name": "镖行天下（狮驼岭）",
+        "thrower_npc": "13063",
+        "thrower_name": "董江",
+        "catcher_npc": "13208",
+        "catcher_name": "狮驼山神",
+        "next": []
+      },
+      {
+        "task_index": 2001105,
+        "name": "镖行天下（雷音寺·备点38）",
+        "thrower_npc": "13063",
+        "thrower_name": "董江",
+        "catcher_npc": "13134",
+        "catcher_name": "阿傩",
+        "next": []
+      },
+      {
+        "task_index": 2001107,
+        "name": "寻找抵押品",
+        "thrower_npc": "13063",
+        "thrower_name": "董江",
+        "catcher_npc": "13063",
+        "catcher_name": "董江",
+        "next": []
+      }
+    ],
+    "map_grids": {
+      "630": {
+        "w": 4,
+        "h": 3,
+        "rows": [
+          "0400",
+          "1110",
+          "0400"
+        ]
+      },
+      "651": {
+        "w": 4,
+        "h": 3,
+        "rows": [
+          "0004",
+          "0110",
+          "4000"
+        ]
+      }
+    }
+  }
+}

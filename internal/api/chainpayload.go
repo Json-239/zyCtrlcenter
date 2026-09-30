@@ -140,6 +140,30 @@ func (p *Payloads) FenghuoDailyLimit() int {
 	return p.cfg.FenghuoDailyLimit
 }
 
+// BiaoxingChainID 镖行天下专属声明文件（配置项 CTRL_BIAOXING_CHAIN，默认 biaoxing_nav）。
+func (p *Payloads) BiaoxingChainID() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.BiaoxingChainID) == "" {
+		return "biaoxing_nav"
+	}
+	return strings.TrimSpace(p.cfg.BiaoxingChainID)
+}
+
+// BiaoxingKey 镖行天下玩法键（配置项 CTRL_BIAOXING_KEY，默认 share_daily_镖行天下）。
+func (p *Payloads) BiaoxingKey() string {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.BiaoxingKey) == "" {
+		return "share_daily_镖行天下"
+	}
+	return strings.TrimSpace(p.cfg.BiaoxingKey)
+}
+
+// BiaoxingDailyLimit 镖行天下日限（配置项 CTRL_BIAOXING_LIMIT，默认 40，服务端 20011.xml 口径）。
+func (p *Payloads) BiaoxingDailyLimit() int {
+	if p == nil || p.cfg == nil || p.cfg.BiaoxingDailyLimit <= 0 {
+		return 40
+	}
+	return p.cfg.BiaoxingDailyLimit
+}
+
 // ShareDailyParams 分享日常家族按 kind 取补发参数：返回该玩法的 (share_key, daily_limit)。
 //
 // kind = 意图 kind 字符串（shenbu / fenghuo，大小写不敏感）；认不出的（含空）回落神捕 ——
@@ -148,6 +172,8 @@ func (p *Payloads) ShareDailyParams(kind string) (string, int) {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "fenghuo":
 		return p.FenghuoKey(), p.FenghuoDailyLimit()
+	case "biaoxing":
+		return p.BiaoxingKey(), p.BiaoxingDailyLimit()
 	default:
 		return p.ShareDailyKey(), p.ShareDailyLimit()
 	}

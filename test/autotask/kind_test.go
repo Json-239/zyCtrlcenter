@@ -43,11 +43,12 @@ func TestKindsIncludeShenbu(t *testing.T) {
 	}
 }
 
-// Kinds 固定次序 newbie→ghost→hatch→shenbu→fenghuo：
-// 前端「日常轮转」queue 的固定排序（ghost→newbie→shenbu→fenghuo）与它同口径，勿改。
+// Kinds 固定次序 newbie→ghost→hatch→shenbu→fenghuo→biaoxing：
+// 前端「日常轮转」queue 的固定排序（ghost→newbie→shenbu→fenghuo→biaoxing）与它同口径，勿改。
+// 注：biaoxing（镖行天下，2026-09-30 首期）默认关/target=0，位次先占好。
 func TestKindsOrderPinsDailyFamily(t *testing.T) {
 	want := []autotask.Kind{autotask.KindNewbie, autotask.KindGhost, autotask.KindHatch,
-		autotask.KindShenbu, autotask.KindFenghuo}
+		autotask.KindShenbu, autotask.KindFenghuo, autotask.KindBiaoxing}
 	if len(autotask.Kinds) != len(want) {
 		t.Fatalf("Kinds 应恰有 %d 项（%v），实际 %v", len(want), want, autotask.Kinds)
 	}

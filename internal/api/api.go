@@ -40,6 +40,7 @@
 //	POST /api/autotask/stop   停止某套定时任务（可选鉴权）
 //	POST /api/autotask/run    立即跑一轮（可选鉴权）
 //	GET  /api/daily/overview  分享日常轮转总览（号 × 日常 × 进度；轮转顺序 P2 再填）
+//	POST /api/daily/start     分享日常手动直发（kind=biaoxing|shenbu|fenghuo；不走自动配额/台账；可选鉴权）
 //	POST /api/random_walk     下发游荡（目标图/随机图 + 白名单 + 档位 + 限时；可选鉴权）
 //	POST /api/random_walk/stop    停止游荡（可选鉴权）
 //	GET  /api/roampool        游荡池 keeper 状态（在游荡/空闲/任务池缺口/最近动作）
@@ -214,6 +215,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	// 分享日常（大唐神捕）轮转总览：号 × 日常 × 进度（数据源=心跳 daily 块 + 意图/池；
 	// 轮转顺序 P2 再填，先给结构 + 空值安全）
 	mux.HandleFunc("GET /api/daily/overview", a.handleDailyOverview)
+	mux.HandleFunc("POST /api/daily/start", a.requireToken(a.handleDailyStart))
 	// 游荡（通用入口：孵化去半月岛 / 其它巡游图）——命令带链载荷，机器人端 random_walk.py 执行
 	// mapid=数字(指定图) 或 "random"(随机图)；maps=白名单；mode=档位；minutes=限时
 	mux.HandleFunc("POST /api/random_walk", a.requireToken(a.handleRandomWalk))

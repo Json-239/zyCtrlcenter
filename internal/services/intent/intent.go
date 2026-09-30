@@ -42,6 +42,9 @@ const (
 	// KindFenghuo 烽火大唐（分享日常体系，2026-09-24 P1 接入）：与神捕同口径 ——
 	// 等级 ≥40 + 该玩法今日未满 + Decider.FenghuoEnabled（默认关）→ 跑烽火大唐。
 	KindFenghuo Kind = "fenghuo"
+	// KindBiaoxing 镖行天下（分享日常体系，2026-09-30 首期 40-59 档）：同口径 ——
+	// 等级 ≥40 + 今日未满 + Decider.BiaoxingEnabled（**默认关**，首期只手动试点）→ 跑镖行天下。
+	KindBiaoxing Kind = "biaoxing"
 )
 
 // DefaultNewbieMaxLevel 新手链等级阈值（与参考实现 start_chain_done_level / NEWBIE_MAX_LEVEL 一致）。
@@ -56,6 +59,9 @@ const DefaultShareDailyKey = "share_daily_大唐神捕"
 // DefaultFenghuoKey 烽火大唐默认玩法键（服务端 20021.xml 的 share_daily_key；
 // 与客户端 auto_task.csv 的「share_daily_宫廷10」行一致）。
 const DefaultFenghuoKey = "share_daily_宫廷10"
+
+// DefaultBiaoxingKey 镖行天下默认玩法键（服务端 20011~14.xml 的 share_daily_key）。
+const DefaultBiaoxingKey = "share_daily_镖行天下"
 
 // DailyInfo 一个账号"分享日常"的运行时信息（判据输入；**零值 = 未知 → 不判该玩法**）。
 //
@@ -72,8 +78,9 @@ type DailyInfo struct {
 // 单独成一个结构（而不是多一个 map）是为了**编译期**绑死两个 kind —— 忘填哪个字段
 // 时零值 = 未知 = 保守不判，不会把号误判去别的玩法。
 type DailyStates struct {
-	Shenbu  DailyInfo // 大唐神捕（share_daily_大唐神捕）
-	Fenghuo DailyInfo // 烽火大唐（share_daily_宫廷10）
+	Shenbu   DailyInfo // 大唐神捕（share_daily_大唐神捕）
+	Fenghuo  DailyInfo // 烽火大唐（share_daily_宫廷10）
+	Biaoxing DailyInfo // 镖行天下（share_daily_镖行天下;首期 40-59 档、默认关）
 }
 
 // ErrNotDecided 等级未知：调用方先别登记意图（也不要覆盖已有意图）。
@@ -108,6 +115,13 @@ type Decider struct {
 	FenghuoEnabled  bool
 	FenghuoMinLevel int
 	FenghuoKey      string
+	// Biaoxing* 镖行天下判据（2026-09-30 首期，口径与神捕/烽火完全同款）：
+	//   - BiaoxingEnabled=false（默认）→ 不做 biaoxing 判定（首期只手动试点，不参与自动派发）；
+	//   - 打开后：等级 ≥ BiaoxingMinLevel（默认 40，服务端票条件）且心跳明确"今日未满" → 判 biaoxing。
+	// 三个玩法都启用且都未满时按 shenbu → fenghuo → biaoxing 次序（队列固定次序同口径）。
+	BiaoxingEnabled  bool
+	BiaoxingMinLevel int
+	BiaoxingKey      string
 }
 
 func (d Decider) normalized() Decider {
@@ -132,6 +146,12 @@ func (d Decider) normalized() Decider {
 	}
 	if d.FenghuoKey == "" {
 		d.FenghuoKey = DefaultFenghuoKey
+	}
+	if d.BiaoxingMinLevel <= 0 {
+		d.BiaoxingMinLevel = DefaultShareDailyMinLevel
+	}
+	if d.BiaoxingKey == "" {
+		d.BiaoxingKey = DefaultBiaoxingKey
 	}
 	return d
 }
@@ -177,6 +197,13 @@ func (d Decider) DecideDailyStates(level int, chainDone bool, days DailyStates) 
 			Reason: fmt.Sprintf("等级 %d ≥ %d 且烽火大唐今日未满 → 烽火大唐", level, d.FenghuoMinLevel),
 		}
 	}
+	if graduated && d.BiaoxingEnabled && days.Biaoxing.Known && !days.Biaoxing.Full &&
+		level >= d.BiaoxingMinLevel {
+		return Decision{
+			Known: true, Kind: KindBiaoxing,
+			Reason: fmt.Sprintf("等级 %d ≥ %d 且镖行天下今日未满 → 镖行天下", level, d.BiaoxingMinLevel),
+		}
+	}
 	switch {
 	case chainDone:
 		return Decision{Known: true, Kind: KindGhost, Reason: "新手链已完成 → 转抓鬼"}
@@ -197,6 +224,9 @@ func (d Decider) DecideDailyStates(level int, chainDone bool, days DailyStates) 
 
 // ShareDailyKeyOf 返回归一化后的分享日常（大唐神捕）玩法键（下发给机器人用）。
 func (d Decider) ShareDailyKeyOf() string { return d.normalized().ShareDailyKey }
+
+// BiaoxingKeyOf 返回归一化后的镖行天下玩法键（心跳 daily 判据用）。
+func (d Decider) BiaoxingKeyOf() string { return d.normalized().BiaoxingKey }
 
 // FenghuoKeyOf 返回归一化后的烽火大唐玩法键（下发给机器人用）。
 func (d Decider) FenghuoKeyOf() string { return d.normalized().FenghuoKey }
