@@ -367,9 +367,9 @@ def counter(ctype, obj=0, cur=0, req=1):
 # 2) S1 · 配置层
 # ================================================================
 check("S1 配置加载成功", CFG.loaded, CFG.load_error)
-check("S1 加载行数 = CSV 数据行数(3: 捉鬼/神捕/宫廷10)",
+check("S1 加载行数 = CSV 数据行数(4: 捉鬼/神捕/宫廷10/镖行天下)",
       sorted(CFG.keys_order) == sorted(["share_daily_捉鬼", "share_daily_大唐神捕",
-                                        "share_daily_宫廷10"]),
+                                        "share_daily_宫廷10", "share_daily_镖行天下"]),
       str(CFG.keys_order))
 kw = CFG.get_keywords("share_daily_大唐神捕")
 check("S1 keywords 拆分为 [大唐神捕, 回复张忍慎]",
