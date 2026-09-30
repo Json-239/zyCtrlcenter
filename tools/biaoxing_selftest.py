@@ -3,9 +3,11 @@
 
 规格：`docs/04-测试/计划-20260930-镖行天下.md` + `分析-20260930-镖行天下任务链.md`。
 本批（机器人端首期，40-59 档）：
-  ① `share_daily_cfg.csv` 新增 `share_daily_镖行天下` 行（keywords=运镖任务|领取报酬、
-     chain_task=2001107（抵押品子链归属）、shop=四店前缀路由（24 件抵押品全覆盖）、
-     accept_ticket=2001101（隐藏票））；
+  ① `share_daily_cfg.csv` 新增两行：
+     - `share_daily_镖行天下`（keywords=运镖任务|领取报酬、chain_task=2001107（抵押品子链归属）、
+       shop=四店前缀路由（24 件抵押品全覆盖）、accept_ticket=2001101（隐藏票））；
+     - `share_daily_镖局嘱托`（P0-1 前置补做 5001607：keywords=尝试一次运镖|领取报酬、
+       accept_ticket=5001607；由中控按 key 派发、daily_limit=1 收尾）；
   ② `share_daily.py` 新增 P2 构件：接票预检（现金 ≥1 金）/ 前置 5001607 检测（专用码）/
      30min 限时观测 / 打劫战斗善后归因 / 交付与加成日志；
   ③ 主驱动（接取/交付/item_recycle/采购/定制战斗/掉任务冷却）全部复用既有通用状态机。
@@ -149,10 +151,12 @@ def main():
        and "biaoxing_tick_note(" in (_extract_func(src, "tick") or ""))
 
     row = None
+    row2 = None
     for ln in csv_text.splitlines():
         if ln.startswith("share_daily_镖行天下,"):
             row = ln
-            break
+        elif ln.startswith("share_daily_镖局嘱托,"):
+            row2 = ln
     ok("S:csv 新增 biaoxing 行", row is not None)
     if row:
         parts = row.split(",")
@@ -162,6 +166,14 @@ def main():
            g(1) == "运镖任务|领取报酬" and g(8) == "2001107" and g(10) == "2001101"
            and g(9) == "13021:101|108@金币;13007:210;13006:220;13011:102",
            (g(1), g(8), g(9), g(10)))
+    ok("S:csv 前置补做行(镖局嘱托, P0-1)", row2 is not None)
+    if row2:
+        p2 = row2.split(",")
+        def g2(k):
+            return p2[k].strip() if len(p2) > k else ""
+        ok("S:镖局嘱托行字段(keywords/accept_ticket=5001607/无shop)",
+           g2(1) == "尝试一次运镖|领取报酬" and g2(10) == "5001607" and g2(9) == "",
+           (g2(1), g2(9), g2(10)))
 
     # ================================================================ config 解析
     print("== 2) config 解析（真实类驱动真实 csv）==")
@@ -194,6 +206,13 @@ def main():
            not bad, bad[:3])
         ok("CTRL:未知名物品 → 无店（不误路由）", cfg.find_shop_npc(K, 999999) == 0)
         ok("D:shop 关键词(金币)继承", cfg.get_shop_keyword(K, 13021) == "金币")
+        # P0-1 前置补做行（镖局嘱托）
+        K2 = "share_daily_镖局嘱托"
+        ok("D:镖局嘱托 keywords 拆分",
+           cfg.get_keywords(K2) == ["尝试一次运镖", "领取报酬"], cfg.get_keywords(K2))
+        ok("D:镖局嘱托 accept_ticket=5001607", cfg.get_accept_ticket(K2) == 5001607)
+        ok("CTRL:镖局嘱托无 shop 配置（find_shop_npc=0）",
+           cfg.find_shop_npc(K2, 101008) == 0)
         # CTRL：既有行不受影响
         ok("CTRL:神捕/烽火行解析不变",
            cfg.get_keywords("share_daily_大唐神捕") == ["大唐神捕", "回复张忍慎"]
@@ -346,6 +365,15 @@ def main():
         dl6 = [("我还是再想想", 0)]
         ok("CTRL:无命中 → 退回第一个非关闭(旧行为)",
            pick_generic(dl6, "", KWS) == 0)
+        # P0-1 前置补做（镖局嘱托）对话样例
+        K2W = ["尝试一次运镖", "领取报酬"]
+        if pick_accept is not None:
+            dl7 = [("尝试一次运镖。", 0), ("我还有别的事情", 0)]
+            idx7, kind7 = pick_accept(dl7, K2W, has_pending=False)
+            ok("CTRL:前置票对话 → 选『尝试一次运镖。』(kind=%s)" % kind7,
+               idx7 == 0, (idx7, kind7))
+        ok("CTRL:前置交付『领取报酬』通用命中",
+           pick_generic([("领取报酬", 0)], "", K2W) == 0)
 
     # ================================================================ 结果
     def _grp(prefix, items=None):
