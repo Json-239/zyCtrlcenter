@@ -94,8 +94,11 @@ func (c *wsClient) writer() {
 			return
 		case data := <-c.ch:
 			if err := c.conn.WriteText(data); err != nil {
-				_ = c.conn.Close()
-				close(c.done)
+				// 2026-10-10 修复"无征兆死亡"根因：原实现直接 close(c.done)，
+				// 与 close() 的 once.Do 路径并发时=close of closed channel → panic → 进程崩溃
+				// （现场 16:08/17:16/19:06 三例均紧随"[WS] 队列积压断开慢客户端"之后）。
+				// 统一走 once 守卫的 close()。
+				c.close()
 				return
 			}
 		}
