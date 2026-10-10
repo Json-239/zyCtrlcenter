@@ -27,6 +27,7 @@ import (
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/intent"
 	"zyctrlcenter/internal/services/reghost"
+	"zyctrlcenter/internal/services/restorer"
 	"zyctrlcenter/internal/services/waterline"
 	"zyctrlcenter/internal/state"
 )
@@ -262,6 +263,12 @@ func (a *API) GhostSkipFunc() func(kind, account string) (bool, string) {
 		}
 		if !strings.EqualFold(kind, "ghost") {
 			return false, ""
+		}
+		// 2026-10-10 错峰抓鬼（CTRL_GHOST_STAGGER，默认关）：受约束且今日未到点的号，
+		// 恢复引擎也不补发 ghost_start —— 否则 RESTORE 补发会绕开候选过滤，错峰被击穿。
+		// 到点后本闸自动放行（无粘滞；判据见 rescue48.go 的 ghostStagger*）。
+		if a.ghostStaggerConstrained(account) && !ghostStaggerReady(account, time.Now()) {
+			return true, "错峰抓鬼：今日未到该号可派时刻（等候选到点自然派）"
 		}
 		// 2026-09-24：当天已派/在跑神捕（2026-09-24 扩到烽火大唐）且未满的号，恢复引擎
 		// **不补发 ghost_start** —— 重启后按意图补发走的正是这条闸（restorer.TickForce：
@@ -538,6 +545,53 @@ func restoreKindMatches(intentKind string, poolKind autotask.Kind) bool {
 	return false
 }
 
+// restoreRecordFresh 单条恢复记录是否"刚补发、还没到 TTL"（纯函数；now 注入便于单测）。
+func restoreRecordFresh(st restorer.Status, now time.Time) bool {
+	return !st.LastDispatchAt.IsZero() && now.Sub(st.LastDispatchAt) <= ghostInflightTTL
+}
+
+// restoreSessionUp 某条恢复记录对应的"会话已起来"判据（与 restoreInflightCountByKind 同源）：
+//
+//	ghost → 活跃抓鬼会话；newbie/zhuaogui → 在线且任务在推进；
+//	日常（shenbu/fenghuo/biaoxing）→ 心跳 daily 在跑（dailyKey 由调用方解析后传入）。
+//
+// 返回 true = 命令已生效（不算在途，避免重复占用）。
+func restoreSessionUp(st restorer.Status, r state.Robot, dailyKey string) bool {
+	switch st.Kind {
+	case string(intent.KindGhost):
+		return r.GhostActive()
+	case string(intent.KindNewbie), string(intent.KindZhuaogui):
+		return r.Online && isTasking(r)
+	}
+	return dailyKey != "" && r.Online && dailyRunningOf(r, dailyKey)
+}
+
+// restoreInflightActive 单号版"恢复引擎刚补发、还没跑起来"（2026-10-10 跨天假满额防线）：
+// 该号在 restorer.Status() 里 LastDispatchAt 落在 ghostInflightTTL（120s）内、
+// 且按补发种类的"会话已起来"判据未命中 → true（调用方不要再直派一遍）。
+//
+// kind 可选：不给 = 任意池的补发记录都算（候选去重用最保守口径）；给了 = 只认该池
+// （restoreKindMatches 同口径，供只想拦某一类的调用方）。
+func (a *API) restoreInflightActive(acc string, kind ...autotask.Kind) bool {
+	if acc == "" || a.Restorer == nil {
+		return false
+	}
+	st, ok := a.Restorer.Status()[acc]
+	if !ok || !restoreRecordFresh(st, time.Now()) {
+		return false
+	}
+	if len(kind) > 0 && !restoreKindMatches(st.Kind, kind[0]) {
+		return false
+	}
+	if a.St != nil {
+		if r, ok := a.St.Get(acc); ok &&
+			restoreSessionUp(st, r, a.shareDailyKeyOf(autotask.Kind(st.Kind))) {
+			return false
+		}
+	}
+	return true
+}
+
 // poolQuota 该池"本轮最多还能派几个"（-1 = 不限，保持旧行为）。
 //
 //   - AutoTask 未装配 / Target<=0 → -1：没配目标 = 不限（沿用 autotask.Config 的 0=不限 语义，
@@ -704,6 +758,17 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 		if kind == autotask.KindGhost && a.ghostInflightActive(acc) {
 			continue
 		}
+		// 2026-10-10 跨天假满额防线（RESTORE/AUTOTASK 双发去重）：恢复引擎刚补发（TTL 120s 内）
+		// 且会话未起来的号，直派（批量上线/定时补号）也不再重复下发 ghost_start ——
+		// 否则"RESTORE 补发 + 直派"在几十秒空窗里把同一命令发两遍（机器人端重启会话）。
+		if kind == autotask.KindGhost && a.restoreInflightActive(acc) {
+			continue
+		}
+		// 2026-10-10 错峰抓鬼（CTRL_GHOST_STAGGER，默认关）：受约束且今日未到点的号不派抓鬼；
+		// 到点的号在下方 Busy 过滤处按"纯游荡"豁免，被拉回抓鬼（判据见 rescue48.go）。
+		if kind == autotask.KindGhost && a.ghostStaggerConstrained(acc) && !ghostStaggerReady(acc, time.Now()) {
+			continue
+		}
 		if kind == autotask.KindNewbie && a.chainInflightActive(acc) {
 			continue
 		}
@@ -735,7 +800,13 @@ func (a *API) autotaskCandidatesCfg(kind autotask.Kind, cfg autotask.Config) []a
 			continue // 同错 ≥3 = 卡住等人工，别自动拉起（与恢复引擎同口径）
 		}
 		if hasLive && isTasking(r) {
-			continue // 在跑就不打扰
+			// 2026-10-10 错峰到点拉回：**仅**"抓鬼 + 受约束 + 已到点 + 纯游荡（walk.enabled
+			// 且非孵化/非战斗/无活跃抓鬼会话）"的号豁免 Busy 过滤（游荡号到点被拉回抓鬼）；
+			// 其他一切情况保持原过滤（在跑就不打扰）。
+			if !(kind == autotask.KindGhost &&
+				ghostStaggerPullBack(a.ghostStaggerConstrained(acc), ghostStaggerReady(acc, time.Now()), r)) {
+				continue
+			}
 		}
 
 		switch kind {

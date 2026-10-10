@@ -205,6 +205,16 @@ func main() {
 	})
 	go restore.Run(ctx)
 
+	// ---- HTTP 端口预检（2026-10-10：必须先于自动拉起机器人）----
+	// 显式 Listen：端口被占用时立刻失败退出（而不是留下一个什么都不做的僵尸进程）。
+	// 顺序敏感：若放到文件后段，被误拉起的第二实例会在 FATAL 退出之前先执行 EnsureRunning，
+	// 每次都多拉起一个 robot 进程 → 孤儿 robot 互抢单控制通道（2026-10-10 15:31 事故）。
+	ln, err := net.Listen("tcp", cfg.WebAddr())
+	if err != nil {
+		log.Printf("[FATAL] HTTP API 端口无法监听 %s: %v（用 --web-port 换端口）", cfg.WebAddr(), err)
+		os.Exit(1)
+	}
+
 	// ---- 机器人进程（默认不动：需要 --auto-robot 显式开启）----
 	if cfg.AutoStartRobot {
 		if err := proc.EnsureRunning(); err != nil {
@@ -279,13 +289,12 @@ func main() {
 	go webAPI.Roampool.Start(ctx)
 	log.Printf("[ROAMPOOL] 游荡池 keeper 已装配（默认 enabled=false；参数文件 %s）", webAPI.Roampool.Path())
 
+	// ---- 48 齐天桥自动救援（2026-10-10）：在线号 mapid∈{47,48} 自动派 map45_rescue 救援；
+	//     开关 CTRL_RESCUE48（默认开）；每号 ≥30min 一发、每日 ≤3 发（实现见 internal/api/rescue48.go）。----
+	go webAPI.StartRescue48(ctx)
+
 	srv := &http.Server{Handler: webAPI.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	// 显式 Listen：端口被占用时立刻失败退出（而不是留下一个什么都不做的僵尸进程）
-	ln, err := net.Listen("tcp", cfg.WebAddr())
-	if err != nil {
-		log.Printf("[FATAL] HTTP API 端口无法监听 %s: %v（用 --web-port 换端口）", cfg.WebAddr(), err)
-		os.Exit(1)
-	}
+	// 注：ln 已在本函数前部预绑定（「HTTP 端口预检」）：端口被占用时更早 FATAL 退出。
 	go func() {
 		log.Printf("[HTTP] API 服务已启动: http://%s/", cfg.WebAddr())
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {

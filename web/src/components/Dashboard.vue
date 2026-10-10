@@ -808,6 +808,15 @@ function chainKindOf(r) {
 // 有分母就 "12/52"，没有就 "12 个任务"（不硬编总数）
 function frac(done, total) { return total > 0 ? `${done}/${total}` : `${done} 个任务` }
 
+// 2026-10-10 本地时区"今天"的日期键（YYYYMMDD）：与机器人/中控 Go 侧 todayKey() 同口径
+// （internal/api/autotask.go: time.Now().Format("20060102")，中控与机器人同机部署）。
+// 不能用 toISOString() —— 那是 UTC，东八区会在每天 16:00 就"换日"。
+function todayKey() {
+  const p = (n) => String(n).padStart(2, '0')
+  const d = new Date()
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+}
+
 // 任务列内容，判定优先级：
 //   抓鬼中 > 抓鬼已满 > 新手链完成 > 抓鬼已停 > 捉鬼链 > 新手链进行中 > 只剩任务号
 // 返回：{ tag 徽标配色, bar 进度条配色, pct 进度%, text 主行, sub 次行 }
@@ -816,7 +825,12 @@ function taskCell(r) {
   const gDone = g ? (Number(g.done) || 0) : 0
   const gLimit = g && Number(g.limit) > 0 ? Number(g.limit) : 50
   const ghostOn = !!(g && g.enabled === true)          // 真在抓鬼（enabled=false 的历史会话不算）
-  const ghostFull = !!g && gDone >= gLimit             // 今日抓鬼已满额
+  // 2026-10-10 跨日门控：满额判定必须"计数属于今天"（count_date=YYYYMMDD，同 todayKey）；
+  // 与 Go 侧 ghostDailyFull / ghostDoneMap 同一跨日口径（autotask.go:849 / handlers.go:444）。
+  // 否则满额号跨天后（count_date=昨天、服务端 0 点已清零）面板仍显示"已满 50/50、今日抓满收工"，
+  // 看着像"任务不隔天刷新"（实际是前端拿昨晚的旧计数在渲染）。
+  const ghostDateOk = !!g && String(g.count_date || '') === todayKey()
+  const ghostFull = !!g && gDone >= gLimit && ghostDateOk   // 今日抓鬼已满额（且计数是今天的）
   const done = Number(r.done) || 0
   const kind = chainKindOf(r)
   const subTask = r.task_index ? taskLabel(r.task_index) : ''
@@ -849,7 +863,9 @@ function taskCell(r) {
     }
   }
   // ② 抓鬼已满：满额即下线换号（enabled 会变 false，但 done/limit 留着）→ 明确写"已满"
-  if (g && (ghostFull || (ghostOn && r.state === 'DONE'))) {
+  //    2026-10-10：两个入口（done>=limit / 机器人报 state=DONE）都必须"计数是今天的"，
+  //    与①的 ghostFull 同口径 —— 跨天未刷新的旧快照一律不算"已满"，不显示"今日抓满收工"。
+  if (g && (ghostFull || (ghostOn && r.state === 'DONE' && ghostDateOk))) {
     return {
       tag: 'ok', bar: 'full', pct: 100,
       text: `👻 抓鬼 已满 ${gDone}/${gLimit}`,
@@ -929,6 +945,30 @@ function dashRowClass({ row }) {
 // 选号弹窗里的候选行：离线压暗（与主表同一口径）
 function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
 
+// ---------------- 跨日计数自检红条（2026-10-10）----------------
+// 场景：机器人端抓鬼计数按天重置（count_date=YYYYMMDD）。若 0 点后计数没刷新，
+// 面板会出现"假满额"（见 taskCell 的 ghostDateOk 门控）——这里主动报出来给人工核对。
+// 口径：当前在线 && ghost.enabled===true && count_date !== 今天 的号数；
+// 仅本地 00:00-00:10（即 00:00:00~00:09:59）且 >10 个才提示，其余时段不打扰
+// （白天"已满未重登"属正常节奏，只有 0 点后集体没重置才可疑）。
+const nowTick = ref(Date.now()) // 响应式"现在"：窗口进/出、跨 0 点都能重算
+let nowTimer = null
+onMounted(() => { nowTimer = setInterval(() => { nowTick.value = Date.now() }, 30000) })
+onUnmounted(() => clearInterval(nowTimer))
+
+// 返回"未重置号的个数"，0 = 不显示红条；数据源 = state.status.robots（store 每 3s 轮询 /api/status）
+const ghostStaleAlert = computed(() => {
+  const d = new Date(nowTick.value) // 依赖时钟：每 30s 重估窗口
+  if (d.getHours() !== 0 || d.getMinutes() >= 10) return 0
+  let n = 0
+  for (const r of state.status.robots || []) {
+    const g = r.ghost
+    if (!r.online || !g || g.enabled !== true) continue
+    if (String(g.count_date || '') !== todayKey()) n += 1
+  }
+  return n > 10 ? n : 0
+})
+
 // 说明：原来这里有一组给 v-memo 用的"外部依赖签名"（zonesSig/mapsSig/ghostSig/chainSig/
 // intentSig/taskNamesSig）。表格换成 el-table + 分页后不再用 v-memo（单元格插槽里的 v-memo
 // 缓存语义对 v-for 之外的行不可靠），改由"只渲染当前页 50 行"来收敛开销；
@@ -936,6 +976,10 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
 </script>
 
 <template>
+  <!-- 跨日计数自检红条（2026-10-10）：仅 0 点后 10 分钟内、且未重置号 >10 时出现（见 ghostStaleAlert） -->
+  <div v-if="ghostStaleAlert" class="stale-alert">
+    ⚠ 跨日计数未重置 {{ ghostStaleAlert }} 个（疑似假满额，请核对）
+  </div>
   <!-- 第一行统计卡：信息与原来一致，改成 el-card + 图标 + 大字号数字（数字跳动动画保留） -->
   <div class="grid cols-5 stat-grid">
     <el-card class="stat-card" shadow="never">
@@ -1833,5 +1877,16 @@ function pickerRowClass({ row }) { return row.online ? '' : 'row-off' }
 /* 表头行本身没有底色，固定表头要单独给（选择器要比 Element 的固定列规则更具体） */
 :deep(.el-table__header-wrapper tr th.el-table-fixed-column--right) {
   background-color: var(--el-table-header-bg-color);
+}
+
+/* 跨日计数自检红条（2026-10-10）：仅 0 点后 10 分钟内出现，页面最顶部强提醒 */
+.stale-alert {
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 93, 108, .55);
+  border-radius: 8px;
+  background: rgba(255, 93, 108, .12);
+  color: var(--danger);
+  font-weight: 600;
 }
 </style>

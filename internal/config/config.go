@@ -166,6 +166,18 @@ type Config struct {
 	// 0/负 = 关闭该闸（灰度/回退）。机器人端同口径常量 daily_ghost.GHOST_RESERVE_FLOOR。
 	// 可用环境变量 CTRL_GHOST_RESERVE_FLOOR 覆盖。
 	GhostReserveFloor int
+	// GhostStagger 错峰抓鬼（2026-10-10；**默认关**）：开启后按 fnv1a32(账号)%18h 把
+	// "今日可派抓鬼"的时刻铺在 0 点~18 点，减轻 0 点集中派发的重登风暴；
+	// 未到点的号不进抓鬼候选、恢复引擎也不补发（到点自动回候选）。
+	// GhostStaggerSamplePct 灰度取样（0-100，默认 100 = 全量受约束；pct<=0 无号受约束）。
+	// 可用环境变量 CTRL_GHOST_STAGGER=1 / CTRL_GHOST_STAGGER_SAMPLE_PCT=50 打开与灰度。
+	GhostStagger          bool
+	GhostStaggerSamplePct int
+	// Rescue48Enabled 47/48 图自动救援 tick 开关（2026-10-10；**默认开**）：
+	// 中控 60s 一轮扫在线号快照，命中 47/48 的号按频控（每号 ≥30min 一发/每日 ≤3 发）
+	// 下发 map45_rescue 救援命令（share_daily_start 通道；见 internal/api/rescue48.go）。
+	// 可用环境变量 CTRL_RESCUE48=0 关闭。
+	Rescue48Enabled bool
 	// AutoRestore 恢复引擎总开关：中控重启/机器人重连后按意图自动补发 start_chain/ghost_start。
 	// **默认关**（会真给机器人发命令）；环境变量 CTRL_AUTO_RESTORE=1 打开。
 	AutoRestore bool
@@ -359,7 +371,11 @@ func build(base string, opts *cliOpts) *Config {
 		AutoRemoveOnDone:     true,
 		NewbieMaxLevel:       envInt("CTRL_NEWBIE_MAX_LEVEL", 31),
 		GhostReserveFloor:    envInt("CTRL_GHOST_RESERVE_FLOOR", 211),
-		AutoRestore:          envBool("CTRL_AUTO_RESTORE", false),
+		// 2026-10-10：错峰抓鬼（默认关）+ 47/48 图自动救援 tick（默认开）。
+		GhostStagger:          envBool("CTRL_GHOST_STAGGER", false),
+		GhostStaggerSamplePct: envInt("CTRL_GHOST_STAGGER_SAMPLE_PCT", 100),
+		Rescue48Enabled:       envBool("CTRL_RESCUE48", true),
+		AutoRestore:           envBool("CTRL_AUTO_RESTORE", false),
 		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
 		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),
 		LiveCountURL:         env("CTRL_LIVECOUNT_URL", ""),
@@ -369,13 +385,14 @@ func build(base string, opts *cliOpts) *Config {
 		LiveCountToken:       env("CTRL_LIVECOUNT_TOKEN", ""),
 		// 2026-09-28 世界图白名单剔除轮回司 25（与 RoamExcludeMaps 同口径：白名单不应含排除图）
 		// 2026-09-30 瑶池回廊 45 剔除（同"白名单不应含排除图"；跳转点连通域残缺，见排除表注释）
-		RoamWorldMaps: envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 609}),
+		// 2026-10-10 追加剔除 48/49（同 45 族困死图：进得去出不来；机器人端游荡白名单同步剔除）
+		RoamWorldMaps: envIntList("CTRL_ROAM_WORLD_MAPS", []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 31, 32, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 609}),
 		// 2026-09-22 用户口径：幽冥界 24 是抓鬼专属，游荡排除（显式选图拒绝 + 白名单剔除）
 		// 2026-09-23 追加牢房 653/654/655（654/655 有网格会被随机抽中，进去出不来）
 		// 2026-09-28 追加轮回司 25（用户口径；白名单同步剔除）
 		// 2026-09-30 追加瑶池回廊 45（用户批准）：跳转点连通域残缺，部分域进去出不来
 		//   → NO_LEGAL_ROUTE（同 25-precedent；机器人端 exclude+world+wild 三处同步，热更）
-		RoamExcludeMaps: envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 25, 45, 653, 654, 655}),
+		RoamExcludeMaps: envIntList("CTRL_ROAM_EXCLUDE_MAPS", []int{24, 25, 45, 48, 49, 653, 654, 655}), // 2026-10-10 追加 48/49（死岛救援批：48 困死图、49 疑似不可达；与机器人端 exclude 同步）
 		// 建号（注册）节奏：自适应限速（默认开、保守）+ 批间隔抖动
 		CreateAdaptive:         envBool("CTRL_CREATE_ADAPTIVE", true),
 		CreateMaxConcurrency:   envInt("CTRL_CREATE_MAX_CONCURRENCY", 8),
