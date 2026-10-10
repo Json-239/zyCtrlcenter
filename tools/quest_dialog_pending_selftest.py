@@ -88,8 +88,10 @@ def clean_lines(text):
 
 
 fix_clean, org_clean = clean_lines(m_fix_blk.group(0)), clean_lines(m_org_blk.group(0))
+# 2026-10-08: set_state 行改走 __env_rest_state 后为 1 行（旧版为 2 行: 三元+else），
+# 两处仍需逐行一致；行数 3=helper 版 / 4=旧三元版。
 check("S2 前置清理动作与原 __handle_dialog 清理逐行一致",
-      fix_clean == org_clean and len(fix_clean) == 4,
+      fix_clean == org_clean and len(fix_clean) in (3, 4),
       "前置=%s 原=%s" % (fix_clean, org_clean))
 
 # S3: 原清理块未被删除（pending==None 时仍为等价路径）
@@ -97,6 +99,16 @@ check("S3 __handle_dialog 内原零选项清理块保留", ORIG_COND in hdl_src)
 
 
 # ---------------------------------------------------------------- 动态执行
+def _env_rest_stub(q):
+    """2026-10-08 waitnext 修复合入适配: show_dialog/__handle_dialog 的空对话清态
+    已改走 quest_engine.__env_rest_state（errand 在途 → ST_SHOP; 否则 active?WAIT_NEXT:IDLE）。
+    本 harness 的 FakeQuest 无采购上下文 → stub 语义与修复前完全一致（旧版无 helper 也可跑）。"""
+    if getattr(q, "active", False) and getattr(q, "shop_ctx", None) \
+            and q.shop_ctx.get("errand"):
+        return quest_state.ST_SHOP
+    return quest_state.ST_WAIT_NEXT if q.active else quest_state.ST_IDLE
+
+
 def build_branch_fn(body_text):
     """把 show_dialog 块体包成可执行函数（`return` 需在函数内）。"""
     lines = ["    " + l.replace("\t", "    ") if l.strip() else ""
@@ -104,7 +116,7 @@ def build_branch_fn(body_text):
     code = ("def _branch(quest, robot_object, data, quest_state, "
             "__handle_dialog, __emit, __emit_state, __now_ms):\n"
             + "\n".join(lines) + "\n")
-    ns = {}
+    ns = {"__env_rest_state": _env_rest_stub}
     exec(compile(code, "<show_dialog branch>", "exec"), ns)
     return ns["_branch"]
 
@@ -117,7 +129,7 @@ old_block = re.sub(
     "", block)
 old_branch = build_branch_fn(old_block)
 
-ns_hdl = {"quest_state": quest_state}
+ns_hdl = {"quest_state": quest_state, "__env_rest_state": _env_rest_stub}
 
 
 class FakeQuest(object):

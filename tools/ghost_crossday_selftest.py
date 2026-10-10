@@ -129,8 +129,9 @@ if not m4:
     check("D-S4 提取启动三态块", False, "未匹配")
 else:
     body = "\n".join((ln[1:] if ln.startswith("\t") else ln) for ln in m4.group(0).splitlines())
-    code = ("def _f(g, robot_object, cmd, __today_key, __srv_ghost_done, __log,\n"
-            "        GHOST_TASK_MIN, GHOST_TASK_MAX):\n" + body + "\n")
+    # 2026-10-10: 三态块新增 _srv_ok(用 it[1] epoch 判"今天") → wrapper 补 __today_epoch
+    code = ("def _f(g, robot_object, cmd, __today_key, __today_epoch, __srv_ghost_done,\n"
+            "        __log, GHOST_TASK_MIN, GHOST_TASK_MAX):\n" + body + "\n")
     ns = {}
     exec(compile(code, "<crossday4>", "exec"), ns)  # noqa: S102
     fn = ns["_f"]
@@ -142,8 +143,10 @@ else:
                                    m_task_limited_loaded_date=loaded)
         cmd = {"done": {ACC: mid}} if mid else {}
         logs = []
-        fn(g, ro, cmd, lambda: TODAY, lambda store: srv, lambda *a: logs.append(a),
-           2019501, 2019513)
+        # 2026-10-10: "今日 epoch"桩传非 0; ro 未设 m_task_limited_epoch(getattr 默认 0)
+        #   → 旧缓存场景 _srv_ok 仍为 False(D7/D9 语义不变); _fresh 场景不受影响。
+        fn(g, ro, cmd, lambda: TODAY, lambda: 12345, lambda store: srv,
+           lambda *a: logs.append(a), 2019501, 2019513)
         return g, logs
 
     g, logs = run(0, TODAY, 30, "", None)

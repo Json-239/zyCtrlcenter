@@ -132,8 +132,8 @@ def main():
     ok("S45:exclude 含 45", 45 in excl, excl)
     ok("S45:world 不含 45", 45 not in world)
     ok("S45:wild 不含 45", 45 not in wild)
-    ok("S45:world 计数 == 35（删 45 后）", len(world) == 35, len(world))
-    ok("S45:wild 计数 == 19（删 45 后）", len(wild) == 19, len(wild))
+    ok("S45:world 计数 == 33（删 45 后再删 48/49）", len(world) == 33, len(world))
+    ok("S45:wild 计数 == 18（删 45 后再删 49）", len(wild) == 18, len(wild))
     ok("S45:注释含 exclude 变更标记", "2026-09-30 追加瑶池回廊 45" in cfg_text)
     ok("S45:注释含 world 变更标记", "2026-09-30 再删瑶池回廊 45" in cfg_text)
     ok("S45:注释含 wild 变更标记", "2026-09-30 删瑶池回廊 45" in cfg_text)
@@ -142,6 +142,12 @@ def main():
     ok("CTRL:world∩exclude 为空（无配置矛盾）", not (set(world) & set(excl)),
        sorted(set(world) & set(excl)))
     ok("CTRL:world 仍有 6/609（未误删）", 6 in world and 609 in world)
+    ok("S48:exclude 含 48", 48 in excl, excl)
+    ok("S49:exclude 含 49", 49 in excl, excl)
+    ok("S48:world 不含 48", 48 not in world)
+    ok("S49:world 不含 49", 49 not in world)
+    ok("S49:wild 不含 49", 49 not in wild)
+    ok("S48:注释含 2026-10-10 变更标记", "2026-10-10 追加齐天桥 48" in cfg_text)
 
     # ================================================================ 2) random_walk 代码形状
     print("== 2) random_walk 拒发路径代码形状")
