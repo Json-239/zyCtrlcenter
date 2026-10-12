@@ -20,6 +20,10 @@
   S48:*  = 48/47 前置段（2026-10-10）—— exec 真实 __tick/__tick_seg4847/__enter_hop_seg，
            用例：48→TO47 hop 参数 / 47→TO45 / srv 优先完成判定 / 90s 超时重试≤3 超限 FAIL /
            段外图终态 / 非 45/47/48 不触发新段（CTRL）/ hop 与链数据交叉（FIX）
+  S34:*  = 34 出图段（2026-10-12）—— exec 真实 __tick/__tick_seg34/__enter_hop34/__pick_hop34，
+           用例：主域位置→选主域候选（203 最近）/ 排除后次选（25）/ 域0 位置→选 23/219 /
+           超时重试≤3 超限 FAIL（失败候选排除）/ srv 优先完成与校正 / 全不可达 FAIL /
+           跳转NPC 对话（空格选项）选目标 / 真网格域隔离（主域↔域0 互不可达）/ 与链数据交叉
   CTRL:* = 控制组（既有行为不回归；坏版也应 PASS —— 证明断言不是"全盘必挂"）
   FIX:*  = 形状/一致性（双副本一致或"批内待部署"、NPC 坐标与链数据交叉、行尾 LF）
 
@@ -31,6 +35,7 @@
 """
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -231,6 +236,32 @@ def test_bfs():
     ok("CTRL:12-24-untouched", bool(r) and all(int(e.get("target_map") or 0) != 45 for e in r),
        "12→24 = %s" % (route_maps(r) if r else None))
 
+    # 2026-10-12 S34: 34→23/219 硬跳过（域0 跳转点，主域号 A* 到不了 → NO_LEGAL_ROUTE）
+    r = bfs(q, 34, 12)
+    ok("S34:bfs-34-12-first-hop-main",
+       bool(r) and int(r[0].get("destination_index", 0)) == 25,
+       "34→12 首跳 dest=%s（应 25 主域；dest219 已硬跳过）" % (
+           r[0].get("destination_index") if r else None))
+    r = bfs(q, 34, 35)
+    ok("S34:bfs-34-35-no-dom0-hop",
+       r is None or int(r[0].get("destination_index", 0)) not in (23, 219),
+       "34→35 = %s（不得以 dest23 域0 首跳规划）" % (route_maps(r) if r else None))
+    r = bfs(q, 34, 17)
+    ok("S34:bfs-34-17-main-edge-kept",
+       bool(r) and int(r[0].get("destination_index", 0)) == 25,
+       "34→17 = %s（主域 dest25 保留）" % (route_maps(r) if r else None))
+    # 坏版灵敏度：去掉 (34,23)/(34,219) 硬跳过 → 34→12 首跳应变回 dest219
+    qe_ng = qe.replace(" (34, 23), (34, 219)", "")
+    bfs_ng = make_bfs(qe_ng)
+    if bfs_ng is None:
+        ok("S34:mutant-build", False, "无护栏变异版构建失败")
+    else:
+        rng = bfs_ng(q, 34, 12)
+        ok("S34:mutant-no-guard-34-12-crosses-dom0",
+           bool(rng) and int(rng[0].get("destination_index", 0)) == 219,
+           "无护栏版 34→12 首跳 = %s（应 219，S34:bfs-34-12-first-hop-main 应 FAIL）" % (
+               rng[0].get("destination_index") if rng else None))
+
     # 坏版灵敏度：去掉护栏两行后 12→49 应变为"穿 45"（S45-1 断言 FAIL）
     bad_bfs = make_bfs(qe, mutate=_mut_strip_guard)
     if bad_bfs is None:
@@ -261,7 +292,9 @@ class _FakeRobot(object):
 def make_dialog(src_text, mutate=None):
     on = extract_func(src_text, "__on_show_dialog")
     ck = extract_func(src_text, "__click_option")
-    if on is None or ck is None:
+    on34 = extract_func(src_text, "__on_show_dialog_34")
+    ck34 = extract_func(src_text, "__click_option_34")
+    if on is None or ck is None or on34 is None or ck34 is None:
         return None
     ns = {
         "time": time,
@@ -272,8 +305,12 @@ def make_dialog(src_text, mutate=None):
         "OPT_CHANGAN": "长安城中",
         "S_LAND": "LAND", "S_WAIT": "WAIT_DLG", "S_GOTO": "GOTO",
         "S_ALIGN": "ALIGN", "S_PICK": "PICK", "S_DONE": "DONE", "S_FAIL": "FAIL",
+        # 2026-10-12：__on_show_dialog 的 34 分支改判 state==S_EXIT34（原 seg=hop34 为死代码）。
+        "S_EXIT34": "EXIT34",
     }
     try:
+        exec(compile(ck34, "<ck34>", "exec"), ns)
+        exec(compile(on34, "<on34>", "exec"), ns)
         exec(compile(ck, "<ck>", "exec"), ns)
         exec(compile(on, "<on>", "exec"), ns)
     except Exception as e:
@@ -335,6 +372,49 @@ def test_dialog():
     r = on(robot, st, d)
     ok("CTRL:dialog-npc0-passthrough", r is False, "r=%s" % r)
 
+    # ---- 34 段（2026-10-12）：跳转NPC 选项按目标名"去空格包容"匹配 ----
+    # S34: 河伯 dialog 选项带空格（服务端 dest_names "女 儿国"）→ 仍选女儿国（#0）
+    st = {"active": True, "state": "EXIT34", "seg": "hop34", "npc": 13264,
+          "hop34_match": "女儿国", "hop34_target": "女儿国", "last_option_ms": 0}
+    d = [0, 0, 13264, "content", 0,
+         [("请送我去女 儿国（1银）", 0), ("请送我去通天河右岸（1银）", 0), ("离开", 1)]]
+    r = on(robot, st, d)
+    ok("S34:dialog-hebo-space-pick-daughter",
+       r is True and robot.sent[-1][1] == [0, 0] and st["state"] == "EXIT34",
+       "r=%s sent=%s state=%s" % (r, robot.sent[-1:], st["state"]))
+    # S34: 杨帆 dialog 选项带空格（"长安城中 品墨斋附近"）→ 仍选长安（#0）
+    st = {"active": True, "state": "EXIT34", "seg": "hop34", "npc": 13287,
+          "hop34_match": "长安城中品墨斋附近", "hop34_target": "长安城中",
+          "last_option_ms": 0}
+    d = [0, 0, 13287, "content", 0,
+         [("请送我去长安城中 品墨斋附近（6银）", 0), ("请送我去通天河左岸（1银）", 0), ("离开", 1)]]
+    r = on(robot, st, d)
+    ok("S34:dialog-yangfan-space-pick-changan",
+       r is True and robot.sent[-1][1] == [0, 0] and st["state"] == "EXIT34",
+       "r=%s sent=%s" % (r, robot.sent[-1:]))
+    # S34: 无目标选项 → 点"离开"收尾（不挂起、不误点其它目的地）
+    st = {"active": True, "state": "EXIT34", "seg": "hop34", "npc": 13287,
+          "hop34_match": "长安城中品墨斋附近", "hop34_target": "长安城中",
+          "last_option_ms": 0}
+    d = [0, 0, 13287, "content", 0, [("兑换物品", 0), ("离开", 1)]]
+    r = on(robot, st, d)
+    ok("S34:dialog-nomatch-close",
+       r is True and robot.sent[-1][1] == [0, 1], "r=%s sent=%s" % (r, robot.sent[-1:]))
+    # S34: 防抖（3 秒内重复推送不重复点）
+    st = {"active": True, "state": "EXIT34", "seg": "hop34", "npc": 13264,
+          "hop34_match": "女儿国", "hop34_target": "女儿国",
+          "last_option_ms": int(time.time() * 1000)}
+    n0 = len(robot.sent)
+    d = [0, 0, 13264, "content", 0, [("请送我去女 儿国（1银）", 0), ("离开", 1)]]
+    r = on(robot, st, d)
+    ok("S34:dialog-debounce", r is True and len(robot.sent) == n0, "r=%s" % r)
+    # CTRL: 34 段激活时其它 NPC 对话不消化（放行默认处理）
+    st = {"active": True, "state": "EXIT34", "seg": "hop34", "npc": 13264,
+          "hop34_match": "女儿国", "hop34_target": "女儿国", "last_option_ms": 0}
+    d = [0, 0, 13287, "content", 0, [("请送我去长安城中 品墨斋附近（6银）", 0), ("离开", 1)]]
+    r = on(robot, st, d)
+    ok("CTRL:dialog-34-other-npc-passthrough", r is False, "r=%s" % r)
+
 
 # ==================================================================
 # 三、A*/域假设（真网格数据；救援选 NPC 的可行性前提）
@@ -385,7 +465,8 @@ def test_domain():
 # ==================================================================
 _SEG_CONSTS = ("S_ALIGN", "S_PICK", "S_GOTO", "S_WAIT", "S_LAND", "S_DONE", "S_FAIL",
                "S_TO47", "S_TO45", "MAP_BRIDGE48", "MAP_YUHUA47", "DEST_4847", "DEST_4745",
-               "HOP_TIMEOUT_MS", "HOP_RETRIES")
+               "HOP_TIMEOUT_MS", "HOP_RETRIES",
+               "S_EXIT34", "MAP_TONGHE34", "HOP34_TIMEOUT_MS", "HOP34_RETRIES")
 
 
 def _src_const(src, name):
@@ -405,6 +486,36 @@ def _list_const(src, name):
     if not m:
         return None
     return [int(x) for x in re.findall(r"\d+", m.group(1))]
+
+
+def _expr_const(src, name):
+    """从源码解析任意 Python 字面量表达式常量（括号配平扫描；用于 HOPS34 这类 dict 列表）。"""
+    m = re.search(r"^%s\s*=\s*" % re.escape(name), src, re.M)
+    if not m:
+        return None
+    start = m.end()
+    depth, i, in_str = 0, start, None
+    while i < len(src):
+        ch = src[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+        elif ch in "'\"":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return eval(src[start:i + 1], {})
+                except Exception:
+                    return None
+        i += 1
+    return None
 
 
 class _SegFakeQE(object):
@@ -456,6 +567,31 @@ class _SegFakeQuest(object):
         self.dijkstra_waiting = False
 
 
+class _Seg34FakeQE(_SegFakeQE):
+    """34 段假 quest_engine：额外提供 __build_path（域规则可达性）。
+
+    same_domain_only=True（默认，模拟真实网格）：主域 x<3000、域0 x>=3000，跨域不可达
+    （真数据实测同型：主域 (840,2024) 到不了 (4107,252)/(3707,435)）；
+    False = 全可达（用于"重试超限"等与域无关的用例）。
+    """
+
+    def __init__(self, same_domain_only=True):
+        _SegFakeQE.__init__(self)
+        self.same_domain_only = same_domain_only
+        self.build_calls = 0
+        setattr(self, "__build_path", self._build_path)
+
+    def _build_path(self, quest, mapid, fx, fy, tx, ty):
+        self.build_calls += 1
+        if int(mapid) != 34:
+            return None
+        if not self.same_domain_only:
+            return [(int(tx), int(ty))]
+        if (int(fx) >= 3000) == (int(tx) >= 3000):
+            return [(int(tx), int(ty))]
+        return None
+
+
 def _use_fake_qe(qe):
     saved = sys.modules.get("quest_engine")
     sys.modules["quest_engine"] = qe
@@ -472,7 +608,8 @@ def _restore_qe(saved):
 def _load_seg_ns(src):
     fns = []
     for nm in ("__make_hop", "__cur_map", "__sync_srv_map", "__enter_45_flow",
-               "__enter_hop_seg", "__tick_seg4847", "__finish", "__tick"):
+               "__enter_hop_seg", "__tick_seg4847", "__finish", "__tick",
+               "__reach", "__pick_hop34", "__enter_hop34", "__tick_seg34"):
         f = extract_func(src, nm)
         if f is None:
             print("    [缺失函数] %s" % nm)
@@ -482,9 +619,13 @@ def _load_seg_ns(src):
     if miss:
         print("    [缺失常量] %s" % miss)
         return None
-    ns = {"time": time, "_log": (lambda rb, lv, msg: None)}
+    ns = {"time": time, "math": math, "_log": (lambda rb, lv, msg: None)}
     for c in _SEG_CONSTS:
         ns[c] = _src_const(src, c)
+    ns["HOPS34"] = _expr_const(src, "HOPS34")
+    if ns["HOPS34"] is None:
+        print("    [缺失常量] HOPS34")
+        return None
     # 既有 45 流程桩（控制组验证"45 号仍走 ALIGN"，不被新段接管）
     ns["__st_align"] = (lambda rb, st2, q: st2.__setitem__("_align_called", True))
     ns["__st_pick"] = (lambda rb, st2, q, n: None)
@@ -655,6 +796,279 @@ def test_seg4847():
 
 
 # ==================================================================
+# 四之二、34 出图段（exec 真实 __tick/__tick_seg34/__enter_hop34/__pick_hop34）
+# ==================================================================
+def test_seg34():
+    print("== 四之二、34 出图段（exec 真实函数体） ==")
+    mr = read(os.path.join(ACT, "map_rescue.py"))
+    ns = _load_seg_ns(mr)
+    if ns is None:
+        ok("S34:functions-present", False, "未提取到 __tick_seg34/__enter_hop34 等")
+        return
+    EXIT34 = ns["S_EXIT34"]
+    HO34, HR34 = ns["HOP34_TIMEOUT_MS"], ns["HOP34_RETRIES"]
+
+    # S34-1: 主域位置（840,2024）→ 选主域可达最近 = 河伯 203
+    # （d²(203)=722k < d²(25)=2474k；域0 的 23/219 被 A* 判不可达）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [840, 2024]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    h0 = qe.execute_hop_calls[0][0] if qe.execute_hop_calls else {}
+    ok("S34:tick-main-domain-picks-203",
+       st.get("state") == EXIT34 and len(qe.execute_hop_calls) == 1 and
+       int(h0.get("destination_index", 0)) == 203 and h0.get("kind") == "npc_jumper" and
+       int(h0.get("npc_index", 0)) == 13264 and int(h0.get("from_map", 0)) == 34 and
+       int(h0.get("target_map", 0)) == 17 and h0.get("match_name") == "女儿国" and
+       st.get("npc") == 13264 and st.get("hop34_retry") == 0 and q.pending is not None,
+       "state=%s hop=%s npc=%s" % (st.get("state"), h0, st.get("npc")))
+
+    # S34-2: 主域 + 203 已排除 → 次选 25（map_skip @147,612，免费）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [840, 2024]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan",
+          "hop34_bad": [203], "npc": 13264}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    h0 = qe.execute_hop_calls[0][0] if qe.execute_hop_calls else {}
+    ok("S34:main-domain-exclude203-picks-25",
+       st.get("state") == EXIT34 and
+       int(h0.get("destination_index", 0)) == 25 and h0.get("kind") == "map_skip" and
+       int(h0.get("x", 0)) == 147 and int(h0.get("y", 0)) == 612 and
+       int(h0.get("target_map", 0)) == 17 and st.get("npc") == 0,
+       "state=%s hop=%s" % (st.get("state"), h0))
+
+    # S34-3: 域0 位置（4100,300）→ 选域0 可达最近 = 23（d²=2353 < d²(219)=172k）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [4100, 300]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    h0 = qe.execute_hop_calls[0][0] if qe.execute_hop_calls else {}
+    ok("S34:dom0-picks-23",
+       st.get("state") == EXIT34 and
+       int(h0.get("destination_index", 0)) == 23 and h0.get("kind") == "map_skip" and
+       int(h0.get("x", 0)) == 4107 and int(h0.get("y", 0)) == 252 and
+       int(h0.get("target_map", 0)) == 35,
+       "state=%s hop=%s" % (st.get("state"), h0))
+
+    # S34-4: 域0 + 23 已排除 → 219（杨帆，npc_jumper；st["npc"]/dijkstra_jumper 同步）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [4100, 300]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan", "hop34_bad": [23]}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    h0 = qe.execute_hop_calls[0][0] if qe.execute_hop_calls else {}
+    _dj = getattr(q, "dijkstra_jumper", None) or {}
+    ok("S34:dom0-exclude23-picks-219",
+       st.get("state") == EXIT34 and
+       int(h0.get("destination_index", 0)) == 219 and h0.get("kind") == "npc_jumper" and
+       int(h0.get("npc_index", 0)) == 13287 and int(h0.get("target_map", 0)) == 12 and
+       h0.get("match_name") == "长安城中品墨斋附近" and st.get("npc") == 13287 and
+       int(_dj.get("npc_id", 0)) == 13287 and
+       _dj.get("match_name") == "长安城中品墨斋附近",
+       "state=%s hop=%s npc=%s dj=%s" % (st.get("state"), h0, st.get("npc"), _dj))
+
+    # S34-5: 90s 无完成 → 重试 ≤3（失败候选进排除表、重评估）；第 4 次超时 → FAIL
+    # 全可达 fake（same_domain_only=False）+ 初始 hop=203：重试顺序 25→219→23
+    qe = _Seg34FakeQE(same_domain_only=False)
+    rb = _SegFakeRobot(34, 0); rb.m_pose = [100, 200]
+    q = _SegFakeQuest(); rb.m_quest = q
+    hop = dict(ns["HOPS34"][1])            # 203
+    st = {"active": True, "state": EXIT34, "seg": "changan", "hop34": hop,
+          "hop34_ms": 3000000, "hop34_retry": 0, "hop34_bad": [], "npc": 13264}
+    saved = _use_fake_qe(qe)
+    t = 3000000
+    try:
+        for _i in range(HR34):
+            t += HO34 + 1000
+            q.pending = None
+            q.walk_target = None
+            ns["__tick"](rb, st, t)
+        retried = len(qe.execute_hop_calls)
+        t += HO34 + 1000
+        q.pending = None
+        q.walk_target = None
+        ns["__tick"](rb, st, t)
+    finally:
+        _restore_qe(saved)
+    ok("S34:timeout-retry3-then-fail",
+       st.get("state") == ns["S_FAIL"] and st.get("active") is False and
+       st.get("hop34_retry") == HR34 + 1 and retried == HR34 and
+       sorted(st.get("hop34_bad") or []) == [23, 25, 203, 219] and
+       len(st.get("hop34_bad") or []) == 4 and "交人工" in (st.get("verdict") or ""),
+       "state=%s retry=%s calls=%d bad=%s verdict=%s" % (
+           st.get("state"), st.get("hop34_retry"), retried, st.get("hop34_bad"),
+           st.get("verdict")))
+
+    # S34-6: 完成判定（srv 优先）——本地 34 / srv 17 → DONE 并清残留
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 17); q = _SegFakeQuest(); rb.m_quest = q
+    q.dijkstra_waiting = True
+    st = {"active": True, "state": EXIT34, "seg": "changan",
+          "hop34": dict(ns["HOPS34"][0]), "hop34_ms": 4000000, "npc": 13264}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 4000000)
+    finally:
+        _restore_qe(saved)
+    ok("S34:srv-priority-complete-done",
+       st.get("state") == ns["S_DONE"] and st.get("active") is False and
+       q.dijkstra_waiting is False and q.dijkstra_jumper is None and st.get("npc") == 0 and
+       not qe.execute_hop_calls and "17" in (st.get("verdict") or ""),
+       "state=%s verdict=%s" % (st.get("state"), st.get("verdict")))
+
+    # S34-7: 开段前 srv 校正 —— 本地 34（幻象）/ srv 17 → 回滚后 DONE（不误进 34 段）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 17); q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    ok("S34:srv-sync-blocks-false-34",
+       st.get("state") == ns["S_DONE"] and getattr(rb, "m_mapid", 0) == 17 and
+       qe.rollbacks == [17] and not qe.execute_hop_calls,
+       "state=%s mapid=%s rollbacks=%s" % (st.get("state"), rb.m_mapid, qe.rollbacks))
+
+    # S34-8: 候选全不可达/全排除 → FAIL 记日志（交人工）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [100, 200]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan",
+          "hop34_bad": [25, 203]}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    ok("S34:all-unreachable-fail",
+       st.get("state") == ns["S_FAIL"] and st.get("active") is False and
+       not qe.execute_hop_calls and "不可达" in (st.get("verdict") or ""),
+       "state=%s verdict=%s" % (st.get("state"), st.get("verdict")))
+
+    # CTRL: 非 34 图（35）不触发新段（保持既有"已不在 45"终态）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(35, 0); q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    ok("CTRL:other-map-35-no-34-seg",
+       st.get("state") == ns["S_DONE"] and not qe.execute_hop_calls and
+       "已不在 45" in (st.get("verdict") or ""),
+       "state=%s verdict=%s" % (st.get("state"), st.get("verdict")))
+
+    # CTRL: 34 图 + 48/47 段中状态（TO45）→ 4847 段接管（34 段不越权）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_TO45"], "seg": "changan",
+          "hop": ns["__make_hop"](62, 1687, 1640, 47, 45), "hop_ms": 1000000,
+          "hop_retry": 0}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    ok("CTRL:34-map-mid-4847-state-not-hijacked",
+       st.get("state") == ns["S_DONE"] and not qe.execute_hop_calls and
+       "48/47" in (st.get("verdict") or ""),
+       "state=%s verdict=%s" % (st.get("state"), st.get("verdict")))
+
+    # FIX: HOPS34 与链数据 newbie_full.dijkstra["34"] 逐字段交叉 + 排除项不动
+    try:
+        data = json.load(open(CHAIN, encoding="utf-8"))
+        dj34 = data["dijkstra"].get("34", [])
+        by_dest = {int(e["destination_index"]): e for e in dj34}
+        bad, excluded_ok = [], True
+        for h in ns["HOPS34"]:
+            e = by_dest.get(h["destination_index"])
+            if e is None or int(e.get("x")) != h["x"] or int(e.get("y")) != h["y"] or \
+                    int(e.get("target_map", 0)) != h["target_map"] or e.get("kind") != h["kind"]:
+                bad.append(h["destination_index"])
+                continue
+            if h["kind"] == "npc_jumper" and (
+                    int(e.get("npc_index", 0)) != h["npc_index"] or
+                    e.get("match_name") != h["match_name"]):
+                bad.append("meta%s" % h["destination_index"])
+        picked = [h["destination_index"] for h in ns["HOPS34"]]
+        for d in (141, 202, 220):            # 水牢 / 两个图内自跳 → 不得出现在候选
+            if d in picked:
+                excluded_ok = False
+        ok("FIX:hops34-chain-cross", not bad, "不一致: %s" % bad)
+        ok("FIX:hops34-exclusions-not-picked", excluded_ok and
+           by_dest.get(141, {}).get("target_map") == 655 and
+           by_dest.get(202, {}).get("target_map") == 34 and
+           by_dest.get(220, {}).get("target_map") == 34,
+           "候选=%s" % picked)
+        # BFS 黑名单（STATIC_DEAD_HOPS 34→23/219）不影响救援段直投：候选仍含 23/219
+        ok("S34:rescue-keeps-23-219-despite-bfs-guard",
+           23 in picked and 219 in picked,
+           "候选=%s（域0 救援仍可用 dest23/219）" % picked)
+    except Exception as e:
+        ok("FIX:hops34-chain-cross", False, str(e))
+
+
+# ==================================================================
+# 四之三、34 域隔离（真网格数据；救援可行性前提）
+# ==================================================================
+def test_domain34():
+    print("== 四之三、34 域隔离（真网格数据） ==")
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import roam_map_connectivity_scan as scan
+        rp = scan.load_grid_module(ACT)
+        data = json.load(open(CHAIN, encoding="utf-8"))
+        g = rp.MapGrid(34, data["map_grids"]["34"])
+        comp_id, sizes = scan.components(g)
+        fp = rp.GridPathFinder(g)
+        main = (840, 2024)
+        dom0 = (4100, 300)
+        hid = comp_id.get(g.to_grid(*main))
+        ok("S34:grid-two-domains-plus-singleton",
+           sizes.count(3225) == 1 and sizes.count(888) == 1 and 1 in sizes and
+           comp_id.get(g.to_grid(*dom0)) != hid and hid is not None,
+           "sizes=%s main_id=%s" % (sizes, hid))
+
+        def reach(a, b):
+            return fp.find_path(a[0], a[1], b[0], b[1]) is not None
+
+        pts_main = ((147, 612), (1682, 1908))
+        pts_dom0 = ((4107, 252), (3707, 435))
+        ok("S34:grid-main-reaches-25-203-not-dom0",
+           all(reach(main, p) for p in pts_main) and
+           not any(reach(main, p) for p in pts_dom0),
+           "主域→25/203=%s；→23/219=%s" % (
+               [reach(main, p) for p in pts_main], [reach(main, p) for p in pts_dom0]))
+        ok("S34:grid-dom0-reaches-23-219-not-main",
+           all(reach(dom0, p) for p in pts_dom0) and
+           not any(reach(dom0, p) for p in pts_main),
+           "域0→23/219=%s；→25/203=%s" % (
+               [reach(dom0, p) for p in pts_dom0], [reach(dom0, p) for p in pts_main]))
+        # 三个入图落点都在主域（35/655 为可走格；17→34 落阻挡格=就近落点）
+        ok("S34:grid-entry-points-main",
+           comp_id.get(g.to_grid(86, 1318)) == hid and
+           comp_id.get(g.to_grid(368, 928)) == hid and
+           bool(g.blocked(*g.to_grid(4269, 1963))),
+           "35入口=%s 655入口=%s 17入口blocked=%s" % (
+               comp_id.get(g.to_grid(86, 1318)), comp_id.get(g.to_grid(368, 928)),
+               g.blocked(*g.to_grid(4269, 1963))))
+    except Exception as e:
+        ok("S34:grid-suite", False, "异常: %s" % e)
+
+
+# ==================================================================
 # 五、形状/一致性
 # ==================================================================
 def test_shape():
@@ -674,7 +1088,11 @@ def test_shape():
                 "MAP_BRIDGE48 = 48", "MAP_YUHUA47 = 47",
                 "DEST_4847 = 64", "DEST_4745 = 62",
                 "HOP_TIMEOUT_MS = 90 * 1000", "HOP_RETRIES = 3",
-                "def __tick_seg4847(", "def __enter_hop_seg("):
+                "def __tick_seg4847(", "def __enter_hop_seg(",
+                "S_EXIT34 = \"EXIT34\"", "MAP_TONGHE34 = 34",
+                "HOP34_TIMEOUT_MS = 90 * 1000", "HOP34_RETRIES = 3",
+                "HOPS34 = [", "def __pick_hop34(", "def __enter_hop34(",
+                "def __tick_seg34(", "def __on_show_dialog_34("):
         ok("S45:map_rescue-has-%s" % tok, tok in mr)
     # share_daily 三处转交
     ok("S45:share_daily-dispatch-transfer", 'map45_rescue' in sd and
@@ -699,6 +1117,15 @@ def test_shape():
     ok("FIX:cfg-wild-no-49", wild is not None and 49 not in wild,
        "wild n=%s 49=%s" % (len(wild) if wild else None, 49 in (wild or [])))
     ok("FIX:cfg-exclude-25-45", excl is not None and 25 in excl and 45 in excl, str(excl))
+    # 2026-10-12：通天河 34 双端剔除（world 32 / wild 17 / exclude 含 34 + 注释标记）
+    ok("FIX:cfg-world-no-34-n32", world is not None and 34 not in world and
+       len(world) == 32, "world n=%s 34=%s" % (len(world) if world else None,
+                                              34 in (world or [])))
+    ok("FIX:cfg-wild-no-34-n17", wild is not None and 34 not in wild and
+       len(wild) == 17, "wild n=%s 34=%s" % (len(wild) if wild else None,
+                                            34 in (wild or [])))
+    ok("FIX:cfg-exclude-34", excl is not None and 34 in excl, str(excl))
+    ok("FIX:cfg-34-comment-marker", "2026-10-12" in cfg and "通天河" in cfg)
     # NPC 坐标与链数据交叉一致
     try:
         data = json.load(open(CHAIN, encoding="utf-8"))
@@ -759,6 +1186,8 @@ def main():
     test_dialog()
     test_domain()
     test_seg4847()
+    test_seg34()
+    test_domain34()
     test_shape()
     print("\n== 汇总 ==")
     print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))

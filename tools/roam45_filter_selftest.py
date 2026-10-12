@@ -132,8 +132,8 @@ def main():
     ok("S45:exclude 含 45", 45 in excl, excl)
     ok("S45:world 不含 45", 45 not in world)
     ok("S45:wild 不含 45", 45 not in wild)
-    ok("S45:world 计数 == 33（删 45 后再删 48/49）", len(world) == 33, len(world))
-    ok("S45:wild 计数 == 18（删 45 后再删 49）", len(wild) == 18, len(wild))
+    ok("S34:world 计数 == 32（删 45/48/49 后再删 34）", len(world) == 32, len(world))
+    ok("S34:wild 计数 == 17（删 45/49 后再删 34）", len(wild) == 17, len(wild))
     ok("S45:注释含 exclude 变更标记", "2026-09-30 追加瑶池回廊 45" in cfg_text)
     ok("S45:注释含 world 变更标记", "2026-09-30 再删瑶池回廊 45" in cfg_text)
     ok("S45:注释含 wild 变更标记", "2026-09-30 删瑶池回廊 45" in cfg_text)
@@ -148,6 +148,13 @@ def main():
     ok("S49:world 不含 49", 49 not in world)
     ok("S49:wild 不含 49", 49 not in wild)
     ok("S48:注释含 2026-10-10 变更标记", "2026-10-10 追加齐天桥 48" in cfg_text)
+
+    # 2026-10-12：通天河 34（与 45 同族连通域残缺；world 32 / wild 17 / exclude 含 34）
+    ok("S34:exclude 含 34", 34 in excl, excl)
+    ok("S34:world 不含 34", 34 not in world)
+    ok("S34:wild 不含 34", 34 not in wild)
+    ok("S34:注释含 2026-10-12 变更标记（通天河 34）",
+       "2026-10-12" in cfg_text and "通天河 34" in cfg_text)
 
     # ================================================================ 2) random_walk 代码形状
     print("== 2) random_walk 拒发路径代码形状")
@@ -213,21 +220,27 @@ def main():
         s = ex_set()
         ok("S45:__roam_excluded_maps() 含 45", 45 in s, sorted(s))
         ok("CTRL:__roam_excluded_maps() 含 24", 24 in s, sorted(s))
+        ok("S34:__roam_excluded_maps() 含 34", 34 in s, sorted(s))
     if banned is not None:
         ok("S45:__map_roam_banned(45) → True", banned(45) is True)
         ok("CTRL:__map_roam_banned(24) → True", banned(24) is True)
         ok("CTRL:__map_roam_banned(11) → False", banned(11) is False)
+        ok("S34:__map_roam_banned(34) → True", banned(34) is True)
 
     if pick is not None:
         rng = random.Random(20260930)
         drawn = [pick(world, exclude=None, rng=rng) for _ in range(3000)]
         ok("S45:world 池 3000 次抽签不含 45", all(v != 45 for v in drawn),
            "drawn45=%d" % drawn.count(45))
+        ok("S34:world 池 3000 次抽签不含 34", all(v != 34 for v in drawn),
+           "drawn34=%d" % drawn.count(34))
         ok("CTRL:world 池抽签都在池内", all(v in set(world) for v in drawn))
         rng = random.Random(20260930)
         drawn_w = [pick(wild, exclude=None, rng=rng) for _ in range(3000)]
         ok("S45:wild 池 3000 次抽签不含 45", all(v != 45 for v in drawn_w),
            "drawn45=%d" % drawn_w.count(45))
+        ok("S34:wild 池 3000 次抽签不含 34", all(v != 34 for v in drawn_w),
+           "drawn34=%d" % drawn_w.count(34))
         ok("CTRL:wild 池抽签都在池内", all(v in set(wild) for v in drawn_w))
 
     if resolve is not None:
@@ -302,6 +315,18 @@ def main():
            w24 is not None and getattr(w24, "enabled", True) is False
            and int(getattr(w24, "mapid", -1) or -1) == 5,
            (getattr(w24, "enabled", None), getattr(w24, "mapid", None)))
+
+        # -- S34: 显式 mapid=34（新排除项）→ 明确拒绝 + 零副作用（坏版会放行进 34）
+        resp34, l34, w34 = _drive({"cmd": "random_walk", "mapid": 34})
+        ok("S34:显式 mapid=34 → 明确拒绝(excluded_map)",
+           isinstance(resp34, dict) and resp34.get("result") == "error"
+           and resp34.get("reason") == "excluded_map", resp34)
+        ok("S34:显式 mapid=34 → 拒发日志(游荡排除图/34)",
+           any(("游荡排除图" in m) and ("34" in m) for _l, m in l34), l34)
+        ok("S34:显式 mapid=34 拒绝零副作用(未置 enabled/未改目标图)",
+           w34 is not None and getattr(w34, "enabled", True) is False
+           and int(getattr(w34, "mapid", -1) or -1) == 5,
+           (getattr(w34, "enabled", None), getattr(w34, "mapid", None)))
 
         # -- 控制: 显式 mapid=11（非排除图）→ 不走"排除图"拒发
         resp11, l11, _w11 = _drive({"cmd": "random_walk", "mapid": 11})
