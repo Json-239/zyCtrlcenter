@@ -24,6 +24,8 @@ set CTRL_FENGHUO=1
 REM 2026-09-29: enable share_daily heartbeat judge (shenbu/fenghuo pools never
 REM   worked without it - see docs P0-1 of 20260929 shenbu analysis).
 set CTRL_SHARE_DAILY=1
+REM 2026-10-12 owner-approved: stagger ghost starts across 18h (hash by account).
+set CTRL_GHOST_STAGGER=1
 
 REM Live server online count (livecount). Disabled per owner's decision 2026-09-22:
 REM   GET http://<game-server>:8080/gm/online -> {"online_count":N,"success":true,"serverId":1000}
