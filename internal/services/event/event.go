@@ -488,11 +488,35 @@ func (h *Handler) RunEventLoop(ctx context.Context) {
 }
 
 // AfterEvent 事件后置动作：WS 广播（robot_pos 走合并推送，debug 日志不推 WS）。
+//
+// 2026-10-12 性能止血：robot_state 的 bag 字段不进 WS 广播（单条 ~3.5KB、占该类型 ~94% 体积）；
+// 面板 MapView 详情背包改走 /api/status/robot 按需拉取（/api/status?bag=1 可回退全量）。
+// **拷贝后删字段**：原 ev 仍被状态表/历史日志消费（onRobotState 已把 bag 引用存入 state），不就地改。
 func (h *Handler) AfterEvent(ev map[string]any) {
 	if str(ev, "type") == "robot_pos" || mutedLog(ev) {
 		return
 	}
+	if str(ev, "type") == "robot_state" {
+		if _, ok := ev["bag"]; ok {
+			h.Broadcast(cloneWithout(ev, "bag"))
+			return
+		}
+	}
 	h.Broadcast(ev)
+}
+
+// cloneWithout 浅拷贝 map 并去掉指定键（未命中时原样返回入参）。
+func cloneWithout(m map[string]any, drop string) map[string]any {
+	if _, ok := m[drop]; !ok {
+		return m
+	}
+	cp := make(map[string]any, len(m)-1)
+	for k, v := range m {
+		if k != drop {
+			cp[k] = v
+		}
+	}
+	return cp
 }
 
 // Broadcast 向 WS 客户端推送（未注入时静默）。

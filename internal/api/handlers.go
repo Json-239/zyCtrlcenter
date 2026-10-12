@@ -14,6 +14,7 @@ import (
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/intent"
 	"zyctrlcenter/internal/services/restorer"
+	"zyctrlcenter/internal/state"
 	"zyctrlcenter/internal/wsutil"
 )
 
@@ -54,10 +55,13 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		svrOnline = map[string]any{"count": c, "ts": int64(tsMS), "age_sec": int(ageSec), "source": source}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// 2026-10-12 性能止血：默认剥每行 bag（~1MB → ~0.2MB；?bag=1 恢复旧行为）。
+	// 单机完整行（含 bag）见 GET /api/status/robot?account=<acc>。
+	snap := a.St.Snapshot()
+	resp := map[string]any{
 		"ok":                      true,
 		"version":                 config.Version,
-		"robots":                  a.St.Snapshot(),
+		"robots":                  robotViewRows(snap, bagParam(r)),
 		"counts":                  map[string]any{"total": total, "online": online, "handshake": handshake},
 		"ghost_unavailable_today": a.St.GhostUnavailableTodayCount(), // 今日已标"抓鬼不可用/已满"的号数
 		"svr_online":              svrOnline,
@@ -87,7 +91,96 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"chain_dir":               a.Cfg.ChainDir,
 		"zones_file":              a.Zones.Path(),
 		"deploy_dir":              a.Cfg.DeployDir,
-	})
+	}
+	// 错峰抓鬼摘要（2026-10-12）：开关/灰度/期望每小时到点数（读 Cfg + 现有实现语义）。
+	if blk := a.staggerSummary(snap); blk != nil {
+		resp["stagger"] = blk
+	}
+	// 47/48(+34) 自动救援摘要（2026-10-12；另一批合入，签名固定
+	// func (a *API) Rescue48Summary() map[string]any）：enabled/today/last_tick。
+	if s := a.Rescue48Summary(); s != nil {
+		resp["rescue48"] = s
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// bagParam /api/status 兼容参数：?bag=1（或 true）= 每行恢复完整 bag（旧行为，2026-10-12 前）。
+func bagParam(r *http.Request) bool {
+	v := strings.TrimSpace(r.URL.Query().Get("bag"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// robotViewRow 面板机器人行视图（2026-10-12 性能止血）：默认**不带 bag**。
+//
+// 实现：内嵌 state.Robot + 外层同名 Bag 字段。encoding/json 对重名字段（含 tag）
+// 取**深度更浅**者 —— 外层 Bag 完全抑制内嵌 Bag；外层 nil + omitempty 时输出无 bag 键，
+// 其余字段全部原样保留（面板行 ~3.5KB → ~1KB，/api/status 总量 ~1MB → ~0.21MB）。
+type robotViewRow struct {
+	state.Robot
+	Bag any `json:"bag,omitempty"`
+}
+
+// robotViewRowOf 单行视图；withBag=true 时给回完整 bag（= 旧序列化行为）。
+func robotViewRowOf(r state.Robot, withBag bool) robotViewRow {
+	row := robotViewRow{Robot: r}
+	if withBag {
+		row.Bag = r.Bag
+	}
+	return row
+}
+
+// robotViewRows 全量行视图（保持快照原顺序，账号升序）。
+func robotViewRows(snap []state.Robot, withBag bool) []robotViewRow {
+	rows := make([]robotViewRow, 0, len(snap))
+	for _, r := range snap {
+		rows = append(rows, robotViewRowOf(r, withBag))
+	}
+	return rows
+}
+
+// handleStatusRobot 单机完整状态（**含 bag**，面板 MapView 详情按需拉取；/api/status 默认已剥 bag）。
+//
+//	GET /api/status/robot?account=<acc>  → 200 {"ok":true,"robot":{...}}；未知/缺参 → 404 {"ok":false}
+//
+// 鉴权跟随 /api/status（只读 GET，不要求 token）。
+func (a *API) handleStatusRobot(w http.ResponseWriter, r *http.Request) {
+	acc := strings.TrimSpace(r.URL.Query().Get("account"))
+	if acc == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "msg": "缺少 account 参数"})
+		return
+	}
+	robot, ok := a.St.Get(acc)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "msg": "未知账号或未上线: " + acc})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "robot": robotViewRowOf(robot, true)})
+}
+
+// staggerSummary 错峰抓鬼摘要块（/api/status 顶部）：enabled/sample_pct 直读 Cfg；
+// per_hour = 期望每小时到点号数（最接近现有实现语义的量化口径）：实现把每号当日可派时刻
+// offset=fnv1a32(acc)%18h 铺在本地 0~18 点（rescue48.go ghostStagger*），并无"每小时配额"常量
+// —— 故取 受约束行数 / 18 小时（四舍五入）作为等效到点速率。Cfg 缺席返回 nil（省略整块）。
+func (a *API) staggerSummary(snap []state.Robot) map[string]any {
+	if a.Cfg == nil {
+		return nil
+	}
+	const windowHours = int(ghostStaggerDaySec / 3600) // 18
+	constrained := 0
+	for _, r := range snap {
+		if a.ghostStaggerConstrained(r.Account) {
+			constrained++
+		}
+	}
+	perHour := 0
+	if constrained > 0 {
+		perHour = (constrained + windowHours/2) / windowHours
+	}
+	return map[string]any{
+		"enabled":    a.Cfg.GhostStagger,
+		"per_hour":   perHour,
+		"sample_pct": a.Cfg.GhostStaggerSamplePct,
+	}
 }
 
 // handleChains 链列表（文件驱动）；带 ?id= 时附上该链完整数据。

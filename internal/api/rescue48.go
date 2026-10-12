@@ -1,11 +1,13 @@
-// 47/48 图自动救援 tick + 错峰抓鬼（2026-10-10）。
+// 47/48 图自动救援 tick + 错峰抓鬼（2026-10-10；2026-10-12 纳入 34 通天河）。
 //
-// 救援背景：图 47/48 是"进得去出不来"的困死图（出图 map_skip 被服务端拒；与 45 瑶池回廊同族）。
+// 救援背景：图 47/48 是"进得去出不来"的困死图（出图 map_skip 被服务端拒；与 45 瑶池回廊同族）；
+// 34（通天河）为 2026-10-12 纳入的连通域残缺图（主域 3225/域0 888 两域互不连通，主域号到不了
+// 杂货店 (3707,435)（在域0）→ 采购 NO_LEGAL_ROUTE 卡 ERROR，现场 18 号）。
 // 机器人端已有救援状态机（deploy/zones/.../script/map_rescue.py：收到 share_daily_start 且
 // share_key=map45_rescue 时转交），手动通道 = POST /api/daily/start
 // {"share_key":"map45_rescue","chain_id":"newbie_full","accounts":[...]}（见该模块 doc）。
-// 本文件把"发现 + 下发"自动化：60s 一轮扫在线号快照，命中 47/48 的号按频控下发救援命令。
-// 命令让机器人端 stop 当前任务并进入救援；mapid 过滤保证只命中 47/48 号（正常抓鬼号不受影响）。
+// 本文件把"发现 + 下发"自动化：60s 一轮扫在线号快照，命中 34/47/48 的号按频控下发救援命令。
+// 命令让机器人端 stop 当前任务并进入救援；mapid 过滤保证只命中目标图号（正常抓鬼号不受影响）。
 //
 // 频控（内存态；中控重启清零可接受——重启后每号最多多补一发）：
 //   - 每号 ≥30 分钟一发（机器人端救援要走路/对话，短窗重发只会打断）；
@@ -46,10 +48,11 @@ const (
 	rescue48MaxPerTick = 10
 )
 
-// rescue48MapHit 该图是否救援目标（47/48；后续要纳入 45 时改这一处）。
-func rescue48MapHit(mapid int) bool { return mapid == 47 || mapid == 48 }
+// rescue48MapHit 该图是否救援目标（34/47/48；新图纳入时改这一处）。
+// 34（通天河）= 2026-10-12 连通域残缺救援（与 45/48 同族）；47/48 = 死岛救援（2026-10-10）。
+func rescue48MapHit(mapid int) bool { return mapid == 34 || mapid == 47 || mapid == 48 }
 
-// rescue48Eligible 单号资格（纯函数）：在线 + 图 47/48 + 未人工暂停 + 未当日卡死熔断。
+// rescue48Eligible 单号资格（纯函数）：在线 + 图 34/47/48 + 未人工暂停 + 未当日卡死熔断。
 // "已移除/私人池"在快照行上没有标记，由调用方注入 exclude 先剔（见 rescue48Tick）。
 func rescue48Eligible(r state.Robot) bool {
 	return r.Online && rescue48MapHit(r.MapID) && !r.Paused && !r.RestoreCapped
@@ -175,6 +178,7 @@ func rescue48Summary(accs, reasons []string) string {
 
 // rescue48Tick 跑一轮：扫描 → 组装救援命令 → 下发 → 记账 → 留痕。
 func (a *API) rescue48Tick(now time.Time, lim *rescue48Limiter) {
+	rescue48StatsTick(now)
 	if a.St == nil || a.Events == nil {
 		return
 	}
@@ -200,6 +204,7 @@ func (a *API) rescue48Tick(now time.Time, lim *rescue48Limiter) {
 		a.Log.Printf("[RESCUE48] 下发失败（机器人通道未连接）：%d 个号本轮不记账，下轮重试", len(batch))
 		return
 	}
+	rescue48StatsSent(now, len(batch))
 	for _, acc := range batch {
 		lim.mark(acc, now)
 	}
@@ -230,7 +235,7 @@ func (a *API) StartRescue48(ctx context.Context) {
 	lim := newRescue48Limiter()
 	tk := time.NewTicker(rescue48Interval)
 	defer tk.Stop()
-	a.Log.Printf("[RESCUE48] 自动救援已启动（%s 一轮；命中图 47/48；每号 ≥%s 一发、每日 ≤%d 发、每轮 ≤%d 个）",
+	a.Log.Printf("[RESCUE48] 自动救援已启动（%s 一轮；命中图 34/47/48；每号 ≥%s 一发、每日 ≤%d 发、每轮 ≤%d 个）",
 		rescue48Interval, rescue48MinGap, rescue48DailyMax, rescue48MaxPerTick)
 	for {
 		select {
@@ -241,6 +246,54 @@ func (a *API) StartRescue48(ctx context.Context) {
 			a.rescue48Tick(time.Now(), lim)
 		}
 	}
+}
+
+// ---------------------------------------------------------------- 运行摘要（供 /api/status）
+
+// rescue48Stats 救援运行态摘要（tick 写、HTTP 读并发，互斥保护；中控重启清零）。
+// today 计"成功下发号次"（一次命令批量 N 号记 N），跨日按日期键清零（惰性，无需定时清理）。
+var rescue48Stats struct {
+	mu       sync.Mutex
+	day      string // 今日下发计数所属日期（YYYYMMDD）
+	today    int    // 本进程今日成功下发号次
+	lastTick string // 最近一轮 tick 的 "HH:MM:SS"；尚未跑过 = ""
+}
+
+// rescue48StatsTick 记录一轮 tick（每轮必调，last_tick 反映调度心跳；含空轮）。
+func rescue48StatsTick(now time.Time) {
+	rescue48Stats.mu.Lock()
+	rescue48Stats.lastTick = now.Format("15:04:05")
+	rescue48Stats.mu.Unlock()
+}
+
+// rescue48StatsSent 记一轮成功下发（day 跨日清零后累加 n 号次）。
+func rescue48StatsSent(now time.Time, n int) {
+	day := now.Format("20060102")
+	rescue48Stats.mu.Lock()
+	if rescue48Stats.day != day {
+		rescue48Stats.day = day
+		rescue48Stats.today = 0
+	}
+	rescue48Stats.today += n
+	rescue48Stats.mu.Unlock()
+}
+
+// Rescue48Summary 救援摘要（供 /api/status 顶部 rescue48 块）：enabled/today/last_tick。
+//   - enabled = CTRL_RESCUE48 解析值（Cfg 缺席视为默认开，与 StartRescue48 同口径）；
+//   - today   = 本进程今日成功下发号次（跨日按日期键清零；未跑过 = 0）；
+//   - last_tick = 最近一轮 tick 的 "HH:MM:SS"（StartRescue48 未启动/未跑过 = ""）。
+//
+// tick 与 HTTP 读取并发，取数走 rescue48Stats 互斥（最小写法；只读快照，不改状态）。
+func (a *API) Rescue48Summary() map[string]any {
+	enabled := true
+	if a.Cfg != nil {
+		enabled = a.Cfg.Rescue48Enabled
+	}
+	rescue48Stats.mu.Lock()
+	today := rescue48Stats.today
+	last := rescue48Stats.lastTick
+	rescue48Stats.mu.Unlock()
+	return map[string]any{"enabled": enabled, "today": today, "last_tick": last}
 }
 
 // ---------------------------------------------------------------- 错峰抓鬼（默认关）

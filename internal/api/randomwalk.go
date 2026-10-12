@@ -51,6 +51,9 @@ func (a *API) handleRandomWalk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "maps 白名单非法：" + mapsErr.Error()})
 		return
 	}
+	// 过滤前先留档：区分「没给白名单」（随机图走默认世界图）与「给的白名单被排除表剔空」（明确拒绝）。
+	hadExplicitMaps := len(mapsList) > 0
+	explicitMaps := append([]int(nil), mapsList...)
 	// 随机图：mapid="random"（推荐）或 mode="random"（等价别名，档位改用 profile 字段）。
 	isRandom := isRandomMapVal(mapidRaw)
 
@@ -70,6 +73,14 @@ func (a *API) handleRandomWalk(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		mapsList = kept
+	}
+	// 2026-10-12：显式白名单里的图**全部**在排除表内 → 明确拒绝，不静默降级成「全图随机」
+	// （契约：参数层就地拒绝、不静默改图。起因：34 通天河入排除表后，maps=[34] 被剔成空，
+	// 旧行为会静默变成「随机抽全图」下发，与本文件用例「白名单里没有有网格的图」的拒收口径冲突）。
+	if hadExplicitMaps && len(mapsList) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false,
+			"msg": fmt.Sprintf("maps 白名单 %v 里的图都在游荡排除表内（%v）：换图或去掉 maps", explicitMaps, a.Cfg.RoamExcludeMaps)})
+		return
 	}
 	profile := modeStr
 	if isRandomWord(modeStr) {

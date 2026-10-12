@@ -95,6 +95,8 @@ func TestRandomWalkModeRandomAlias(t *testing.T) {
 }
 
 // 白名单里混入"没有网格的图"：只要有一张可用就放行（抽签由机器人端在可用图里做）。
+// 2026-10-12 起 34 通天河已入游荡排除表（连通域残缺）→ 本用例的"无网格"样本改用 40；
+// 排除表的剔除/拒绝行为见 TestRandomWalkExcludeListedMapsInWhitelist。
 func TestRandomWalkRandomWhitelistPartiallyUsable(t *testing.T) {
 	env := newTestEnv(t, "")
 	installWalkChain(t, env)
@@ -104,13 +106,54 @@ func TestRandomWalkRandomWhitelistPartiallyUsable(t *testing.T) {
 	feedRobot(t, env, acc, nil)
 
 	_, body := postJSON(t, env.srv.URL+"/api/random_walk", map[string]any{
-		"accounts": []string{acc}, "mapid": "random", "maps": []any{34, 6}}, nil)
+		"accounts": []string{acc}, "mapid": "random", "maps": []any{40, 6}}, nil)
 	if body["ok"] != true {
 		t.Fatalf("白名单里有一张可用图就应放行: %v", body)
 	}
 	cmd := rb.ReadCmd(t, 2*time.Second)
 	if got := asSlice(cmd["maps"]); len(got) != 2 {
 		t.Fatalf("白名单应原样透传（可用性与抽签由机器人端处理）: %v", cmd["maps"])
+	}
+}
+
+// 排除表回归（2026-10-12 34 通天河入表）：白名单部分含排除图 → 剔除保留其余；
+// 全含 → 明确拒绝（不静默降级为"全图随机"）且零命令。
+func TestRandomWalkExcludeListedMapsInWhitelist(t *testing.T) {
+	env := newTestEnv(t, "")
+	installWalkChain(t, env)
+	rb := testsupport.ConnectFakeRobot(t, env.ctrl)
+	defer rb.Close()
+
+	acc := "rw_excl@xy3.com"
+	feedRobot(t, env, acc, nil)
+
+	// ① [34, 6] → 34 剔除，剩 [6]（响应与命令一致）。
+	_, body := postJSON(t, env.srv.URL+"/api/random_walk", map[string]any{
+		"accounts": []string{acc}, "mapid": "random", "maps": []any{34, 6}}, nil)
+	if body["ok"] != true {
+		t.Fatalf("部分含排除图应放行（剔除后仍有可用图）: %v", body)
+	}
+	if got := asSlice(body["maps"]); len(got) != 1 || got[0] != float64(6) {
+		t.Fatalf("响应白名单应剔除 34 只剩 [6]: %v", body["maps"])
+	}
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if got := asSlice(cmd["maps"]); len(got) != 1 || got[0] != float64(6) {
+		t.Fatalf("命令白名单应剔除 34 只剩 [6]: %v", cmd["maps"])
+	}
+
+	// ② [34] → 全部被剔除 → 明确拒绝，零命令。
+	acc2 := "rw_excl2@xy3.com"
+	feedRobot(t, env, acc2, nil)
+	_, body2 := postJSON(t, env.srv.URL+"/api/random_walk", map[string]any{
+		"accounts": []string{acc2}, "mapid": "random", "maps": []any{34}}, nil)
+	if body2["ok"] != false {
+		t.Fatalf("白名单全为排除图应拒绝: %v", body2)
+	}
+	if !strings.Contains(toStrAny(body2["msg"]), "排除表") {
+		t.Fatalf("拒绝原因应说明排除表（实际 %v）", body2["msg"])
+	}
+	if cmd := rb.TryReadCmd(300 * time.Millisecond); cmd != nil {
+		t.Fatalf("被拒的请求不该下发命令: %v", cmd)
 	}
 }
 
@@ -121,7 +164,8 @@ func TestRandomWalkRejectsBadMapsAndRandom(t *testing.T) {
 		body        map[string]any
 		wantMsgPart string
 	}{
-		{"白名单里没有有网格的图", map[string]any{"mapid": "random", "maps": []any{34}}, "网格"},
+		{"白名单里没有有网格的图", map[string]any{"mapid": "random", "maps": []any{40}}, "网格"},
+		{"白名单里的图都在游荡排除表内", map[string]any{"mapid": "random", "maps": []any{34}}, "排除"},
 		{"白名单项非法", map[string]any{"mapid": "random", "maps": []any{"x"}}, "非法"},
 		{"白名单为空数组", map[string]any{"mapid": "random", "maps": []any{}}, "空"},
 		{"白名单类型不对", map[string]any{"mapid": "random", "maps": map[string]any{"a": 1}}, "类型"},

@@ -4,7 +4,8 @@
 //
 //	GET  /                    入口提示；web/dist 存在时直接返回面板首页（中控托管前端）
 //	GET  /*（非 /api、/ws）    web/dist 静态资源，未命中回落 index.html（SPA 前端路由）
-//	GET  /api/status          机器人/通道/进程状态总览（含多区列表与当前区）
+//	GET  /api/status          机器人/通道/进程状态总览（含多区列表与当前区；**默认不含每行 bag**，?bag=1 恢复）
+//	GET  /api/status/robot    单机完整状态（含 bag；?account=<acc>；未知 404）
 //	GET  /api/chains          链列表（文件驱动）+ 指定链详情 ?id=<文件名>
 //	GET  /api/modules         模块地图（注册表 + 最近一次测试报告）
 //	GET  /api/maps            地图名表（mapid → 名称）+ 客户端坐标口径 grid_cell
@@ -195,6 +196,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", a.handleRoot) // "/"：web/dist 存在 → 面板首页；否则 JSON 入口提示
 	mux.HandleFunc("/", a.handleWebFallback) // 其余路径：非 /api、/ws 的 GET → 静态资源（SPA 回落）；否则 404 JSON
 	mux.HandleFunc("GET /api/status", a.handleStatus)
+	mux.HandleFunc("GET /api/status/robot", a.handleStatusRobot) // 单机完整状态（含 bag；MapView 详情按需拉取）
 	mux.HandleFunc("GET /api/chains", a.handleChains)
 	mux.HandleFunc("GET /api/modules", a.handleModules) // 只读：模块地图（read 接口不鉴权）
 	mux.HandleFunc("GET /api/maps", a.handleMaps)
@@ -279,10 +281,12 @@ func (a *API) Register(mux *http.ServeMux) {
 }
 
 // Handler 返回带 CORS 的根 handler。
+//
+// 中间件顺序（外→内）：CORS → gzip（GET /api/* 透明压缩，2026-10-12 性能止血）→ 路由。
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.Register(mux)
-	return withCORS(mux)
+	return withCORS(withGzip(mux))
 }
 
 // ---------------------------------------------------------------- 中间件
