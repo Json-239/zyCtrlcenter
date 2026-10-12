@@ -11,6 +11,8 @@ FATAL 退出前又各多拉起一个 robot 进程 → 4 个孤儿 robot 互抢�
   - 拉起退避：拉起后仍未恢复时，下一次拉起间隔 60→120→300s（上限 300s），恢复后重置；
   - HTTP 探测超时 5s→8s（高负载时降低误判）；
   - 每轮统计 zyctrlcenter.exe 实例数，>1 时记日志（只记不杀；孤儿实例请人工清理）。
+2026-10-12 修补（20:57 误拉实例成因之一）：tasklist 探测失败（procs=None）此前会"立即拉起"，
+  现与"进程存在"同口径——先观察 3 个周期；拉起点日志附 procs=N 证据。
 
 用法（独立后台运行，日志 logs/watchdog.log）：
   python tools/ctrlcenter_watchdog.py            # 前台跑（Ctrl+C 停）
@@ -137,15 +139,16 @@ def main():
                 down_since = time.time()
             unreach_streak += 1
 
-            if n_proc is not None and n_proc >= 1 and unreach_streak < CONFIRM_CYCLES:
-                # 进程还在（HTTP 只是忙/慢）：先观察，不立即拉起（2026-10-10 防单次忙误判）
+            if (n_proc is None or n_proc >= 1) and unreach_streak < CONFIRM_CYCLES:
+                # 进程还在（HTTP 只是忙/慢）；tasklist 探测失败（None）同样按"在"保守处理：先观察，
+                # 不立即拉起（2026-10-10 防单次忙误判；2026-10-12 None 语义修复——20:57 误拉实例成因之一）
                 _log("中控进程存在但 HTTP 无响应, 观察中 %d/%d" % (unreach_streak, CONFIRM_CYCLES))
             else:
                 # 退避：第 k 次拉起后，需等满 BACKOFF_SECS[k-1]（封顶最后一档）才允许下一次
                 wait = BACKOFF_SECS[min(max(start_count - 1, 0), len(BACKOFF_SECS) - 1)]
                 if start_count == 0 or time.time() - last_start >= wait:
                     if start_count == 0:
-                        _log("★中控不可达 → 拉起中控")
+                        _log("★中控不可达 → 拉起中控（procs=%s）" % n_proc)
                     else:
                         _log("中控仍不可达（已 %ds），第 %d 次拉起（间隔 %ds）"
                              % (int(time.time() - down_since), start_count + 1, wait))

@@ -133,22 +133,39 @@ for n in ("POS_BAG_BEGIN", "POS_BAG_END", "POS_EQUIP_BEGIN", "POS_EQUIP_END",
           "DROP_PROTECT_INDEXES", "EGG_EQUIP_POS", "MOUNT_EGG_ELEMENT_PREFIX",
           "MOUNT_EGG_ELEMENT_KEYWORD", "GUARDIAN_EGG_INDEXES", "GUARDIAN_EGG_NAMES",
           # 2026-09-22 防重复丢弃闸门(两套整理共用): auto_equip_best_items 也调它
-          "_DROP_GUARD", "_DROP_GUARD_MS"):
+          "_DROP_GUARD", "_DROP_GUARD_MS",
+          # 2026-10-12 任务采购品禁穿禁丢 + 工具槽 + 穿戴回执(依赖链见下)
+          "TOOL_EQUIP_POS", "TOOL_EQUIP_CLASS", "_TOOL_INDEX_CACHE", "_TOOL_LOAD_TRIED",
+          "_EQUIP_ACK_TIMEOUT_MS", "_EQUIP_MAX_TRIES", "_EQUIP_PENDING_KEEP_MS",
+          "PURSUIT_ORDER_NAME_KEYWORD", "PURSUIT_ORDER_FALLBACK_SEGMENTS"):
     parts.append(grab_const(bag_src, n))
 # 2026-09-22 孵化链路: auto_equip_best_items 现在调 is_egg_item/is_protected_item,
 # 提取块必须带上蛋判据依赖链(否则 NameError —— 上一版漏了这组, 本自检曾 FAIL)。
 parts.append(grab_const_multi(bag_src, "MOUNT_EGG_NAMES"))
+# 2026-10-12 任务采购品名单(多行元组)
+parts.append(grab_const_multi(bag_src, "NO_EQUIP_ITEMS"))
 for n in ("_is_in_bag_pos", "_item_data", "egg_kind_of", "egg_kind", "is_mount_egg",
           "is_guardian_egg", "is_egg_item", "egg_pos_ok", "is_protected_item",
+          "is_no_equip_item",
           "_get_equip_slot", "parse_equip_lv", "_get_equip_lv",
           "meta_quality", "equip_score", "score_gt", "score_lt", "equip_slot",
           "collect_best_equipped", "should_drop_equip", "_emit_log",
           # 2026-09-22 防重复丢弃闸门依赖链(否则 auto_equip_best_items 里 NameError)
           "_now_ms", "item_recently_dropped", "mark_item_dropped",
+          # 2026-10-12 追捕令丢弃链(auto_equip 步骤 0 调用 —— 09-23 起本自检因缺它
+          # 在 run_equip 处 NameError, 属存量失败, 本次一并补齐)
+          "_item_name", "is_pursuit_order_name", "is_pursuit_order_index",
+          "is_pursuit_order_item", "_meta_is_locked", "drop_pursuit_orders",
+          # 2026-10-12 穿戴回执核验链 + 工具槽链
+          "_equip_pending_map", "_equip_giveup_map", "_equip_day_key",
+          "_equip_pending_hit", "_equip_given_up", "_register_equip_pending",
+          "_tick_equip_pending",
+          "_tool_slot_empty", "_collect_bag_tools", "_load_tool_indexes",
+          "is_tool_item", "_equip_tool_if_slot_empty",
           "auto_equip_best_items"):
     parts.append(grab_func(bag_src, n))
 exec("\n".join(parts), NS)
-check("bag_ops 源码块提取(21 函数 + 11 常量, 含蛋判据依赖链)", True)
+check("bag_ops 源码块提取(含蛋判据+追捕令+回执/工具依赖链)", True)
 
 # auto_summon 的背包整理(动态跑: 验证丢弃过滤/保护名单/buff 卡称谓安排)
 AS = {}
@@ -434,8 +451,8 @@ check("auto_summon tick: 调用 _try_title_restore",
       "_try_title_restore(robot_object, st, now_ms)" in as_src)
 check("auto_summon 丢弃日志带 lv/quality",
       "丢弃多余低等级装备 %s(lv=%s quality=%s)" in as_src)
-check("bag_ops 换装日志带 lv/quality",
-      "穿装备 %s(lv=%s quality=%s, 部位=%s)" in bag_src
+check("bag_ops 换装日志带 lv/quality(2026-10-12 改'穿装备(已发送)')",
+      "穿装备(已发送) %s(lv=%s quality=%s, 部位=%s)" in bag_src
       and "丢弃多余装备 %s(lv=%s quality=%s, 部位=%s)" in bag_src)
 check("bag_ops 存在统一判据函数族",
       all(("def %s(" % n) in bag_src for n in

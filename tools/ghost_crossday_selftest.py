@@ -145,7 +145,10 @@ else:
         logs = []
         # 2026-10-10: "今日 epoch"桩传非 0; ro 未设 m_task_limited_epoch(getattr 默认 0)
         #   → 旧缓存场景 _srv_ok 仍为 False(D7/D9 语义不变); _fresh 场景不受影响。
-        fn(g, ro, cmd, lambda: TODAY, lambda: 12345, lambda store: srv,
+        # 2026-10-12: 调用方新增 only_epoch/epochs 关键字(混龄缓存防抬数) →
+        #   桩补收形参; 返回值/断言不变(only_epoch 语义由 dup 自检直测)。
+        fn(g, ro, cmd, lambda: TODAY, lambda: 12345,
+           lambda store, only_epoch=None, epochs=None: srv,
            lambda *a: logs.append(a), 2019501, 2019513)
         return g, logs
 
