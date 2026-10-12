@@ -1195,11 +1195,56 @@ func (a *API) handleRobotsClearRemoved(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "state 不可用"})
 		return
 	}
-	names := a.St.ClearRemoved()
+	names := a.unremoveAccounts(nil)
 	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_clear_removed",
 		"zone": a.currentZoneKey(), "count": len(names)})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(names),
 		"msg": fmt.Sprintf("已清空移除名单（%d 个号回到候选池，水位器/池子将在下一轮按需补号）", len(names))})
+}
+
+// unremoveAccounts 解除"已移除"标记（**公共实现**：clear_removed 全清 / unremove 指定号）。
+// accounts 为空 = 全部清空（clear_removed 语义）；返回实际被解除的账号（升序）。
+//
+// 幂等：不在移除名单里的号不会进返回清单（也不算错误）。
+func (a *API) unremoveAccounts(accounts []string) []string {
+	if a.St == nil {
+		return nil
+	}
+	if len(accounts) == 0 {
+		return a.St.ClearRemoved()
+	}
+	out := make([]string, 0, len(accounts))
+	for _, acc := range normAccounts(accounts) {
+		if a.St.UnmarkRemoved(acc) {
+			out = append(out, acc)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// handleRobotsUnremove 解除指定账号的"已移除"标记（POST /api/robots/unremove {"accounts":[...]}）。
+//
+// 用途：① 号池轮换回池（rotation 到龄自动调用；见 rotation.go）；② 手工救急 —— 某个号被
+// 误下线/手工移除后，不必全清名单（clear_removed）就能把它单独放回候选池（水位器/池子
+// 下一轮按"最久未上线优先"可拉起）。旧缺口：前端审计指出"全清之外无单号解除通道"。
+func (a *API) handleRobotsUnremove(w http.ResponseWriter, r *http.Request) {
+	if a.St == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "state 不可用"})
+		return
+	}
+	body := readBody(r)
+	accounts := bodyAccounts(body)
+	if len(accounts) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "accounts 为空（全清请用 /api/robots/clear_removed）"})
+		return
+	}
+	restored := a.unremoveAccounts(accounts)
+	a.Store.LogEvent(map[string]any{"type": "api", "action": "robots_unremove",
+		"zone": a.currentZoneKey(), "requested": len(accounts), "count": len(restored), "accounts": restored})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(restored), "accounts": restored,
+		"msg": fmt.Sprintf("已解除移除 %d/%d 个号（回到候选池，水位器/池子将在下一轮按需补号）",
+			len(restored), len(accounts))})
 }
 
 // handleReloadScripts 热更机器人脚本（进程内 importlib.reload 指定模块，免重启）。

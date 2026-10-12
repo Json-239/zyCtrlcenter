@@ -34,6 +34,8 @@
 //	POST /api/stop            停链
 //	POST /api/reset           重置重跑
 //	POST /api/robots/manage   动态添加/移除机器人（可选鉴权）
+//	POST /api/robots/unremove 解除指定账号的"已移除"标记（轮换回池 / 手工救急；可选鉴权）
+//	GET  /api/rotation        号池轮换状态（enabled/名单数/今日下线/预备队/上一轮动作；只读）
 //	POST /api/robot/restart   重启机器人进程（可选鉴权）
 //	GET  /api/autotask        定时自动任务状态（新手链/抓鬼/孵化/大唐神捕策略 + 候选数 + 待恢复名单）
 //	POST /api/autotask/start  启动/改参数某套定时任务（可选鉴权）
@@ -166,6 +168,10 @@ type API struct {
 	// /api/team/status 每次拉取都会扫到，10 分钟/号防审计刷屏）。
 	rejoinMu       sync.Mutex
 	rejoinLoggedAt map[string]time.Time
+	// rotation 号池轮换运行态（2026-10-12，见 rotation.go）：惰性初始化；名单落盘
+	// data/rotation.json（到龄自动解除移除回池）。rotationMu 只护懒建。
+	rotationMu sync.Mutex
+	rotation   *rotationRuntime
 }
 
 // New 创建 API。
@@ -246,6 +252,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/shop_errand", a.requireToken(a.handleShopErrand))
 	mux.HandleFunc("POST /api/robots/manage", a.requireToken(a.handleRobotsManage))
 	mux.HandleFunc("POST /api/robots/clear_removed", a.requireToken(a.handleRobotsClearRemoved)) // 清空"已移除"名单（池子被吃空时一键恢复候选池）
+	mux.HandleFunc("POST /api/robots/unremove", a.requireToken(a.handleRobotsUnremove))          // 单个/批量解除"已移除"（轮换回池 / 手工救急）
+	mux.HandleFunc("GET /api/rotation", a.handleRotationGet)                                     // 号池轮换状态（enabled/名单/今日下线/预备队；只读）
 	mux.HandleFunc("POST /api/robot/restart", a.requireToken(a.handleRobotRestart))
 	mux.HandleFunc("POST /api/robot/reload_scripts", a.requireToken(a.handleReloadScripts)) // 脚本热更（importlib.reload，免重启机器人）
 	// 2026-09-23 技能策略配置（模块地图·战斗卡）：前端可配，保存即下发

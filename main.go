@@ -293,6 +293,11 @@ func main() {
 	//     开关 CTRL_RESCUE48（默认开）；每号 ≥30min 一发、每日 ≤3 发（实现见 internal/api/rescue48.go）。----
 	go webAPI.StartRescue48(ctx)
 
+	// ---- 号池轮换（最小版，2026-10-12）：满额纯游荡号按速率下线 → 水位器从预备队补新号 → 轮班；
+	//     开关 CTRL_ROTATION（默认关，关闭时仅执行到龄回池）；名单落盘 data/rotation.json。
+	//     实现见 internal/api/rotation.go + internal/services/rotation。----
+	go webAPI.StartRotation(ctx)
+
 	srv := &http.Server{Handler: webAPI.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	// 注：ln 已在本函数前部预绑定（「HTTP 端口预检」）：端口被占用时更早 FATAL 退出。
 	go func() {

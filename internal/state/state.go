@@ -1010,11 +1010,17 @@ func (s *State) MarkRemoved(account string) {
 	s.removed[account] = true
 }
 
-// UnmarkRemoved 取消已移除标记。
-func (s *State) UnmarkRemoved(account string) {
+// UnmarkRemoved 取消已移除标记；返回该号原本是否在移除名单里。
+//
+// 幂等：不在名单里也返回 false 而不报错（轮换回池/手工救急都会重复调）。
+// 调用方：event 上线清标、api.unremoveAccounts（/api/robots/unremove 与
+// clear_removed 的公共实现）、rotation 到龄回池。
+func (s *State) UnmarkRemoved(account string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, ok := s.removed[account]
 	delete(s.removed, account)
+	return ok
 }
 
 // IsRemoved 是否已标记移除。

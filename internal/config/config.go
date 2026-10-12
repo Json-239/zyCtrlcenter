@@ -9,7 +9,8 @@
 //     CTRL_LIVECOUNT_ENABLED / CTRL_LIVECOUNT_URL / CTRL_LIVECOUNT_SERVER_ID /
 //     CTRL_LIVECOUNT_INTERVAL_SEC / CTRL_LIVECOUNT_TIMEOUT_SEC / CTRL_LIVECOUNT_TOKEN /
 //     CTRL_CREATE_ADAPTIVE / CTRL_CREATE_MAX_CONCURRENCY / CTRL_CREATE_MIN_CONCURRENCY /
-//     CTRL_CREATE_BATCH_INTERVAL_SEC / CTRL_CREATE_JITTER_SEC / CTRL_WEB_DIST）
+//     CTRL_CREATE_BATCH_INTERVAL_SEC / CTRL_CREATE_JITTER_SEC / CTRL_WEB_DIST /
+//     CTRL_ROTATION / CTRL_ROTATION_PER_HOUR / CTRL_ROTATION_MIN_RESERVE / CTRL_ROTATION_KEEP_HOURS）
 //  3. config.local.json（本地覆盖，不入库：api_token）
 //  4. 本文件内置默认值
 //
@@ -181,6 +182,26 @@ type Config struct {
 	// AutoRestore 恢复引擎总开关：中控重启/机器人重连后按意图自动补发 start_chain/ghost_start。
 	// **默认关**（会真给机器人发命令）；环境变量 CTRL_AUTO_RESTORE=1 打开。
 	AutoRestore bool
+
+	// ---- 号池轮换（rotation 最小版；2026-10-12）----
+	//
+	// 目标：每天上午全队打满抓鬼配额后，把"满额且纯游荡"的号按速率下线，让水位器自动从
+	// 预备队（可用但离线的号）补新号上线继续抓鬼 → 2+ 班次轮换（产能上限 ×2 级）；
+	// 轮换号记入 data/rotation.json，满 KeepHours 后自动解除"已移除"回池（次日可复用）。
+	// 实现：internal/services/rotation（纯决策）+ internal/api/rotation.go（60s tick，
+	// 复用批量下线/水位器压号的同一条通路；安全护栏见该文件头注释）。
+	//
+	// RotationEnabled 总开关：**默认关**（置 1 才生效）。可用 CTRL_ROTATION=1 打开。
+	RotationEnabled bool
+	// RotationPerHour 速率：每小时最多下线多少号（整点窗口重置）。默认 30。
+	// 可用 CTRL_ROTATION_PER_HOUR 覆盖。
+	RotationPerHour int
+	// RotationMinReserve 预备队保护：当前区"可用且离线"的毕业号少于它 → 本轮不下线。默认 50。
+	// 可用 CTRL_ROTATION_MIN_RESERVE 覆盖（0 = 关闭保护）。
+	RotationMinReserve int
+	// RotationKeepHours 轮换号回池年龄（小时；默认 24=跨日回池）。
+	// 可用 CTRL_ROTATION_KEEP_HOURS 覆盖。
+	RotationKeepHours int
 
 	RunsKeepDays int // 运行历史保留天数（按日期切分）
 	RunsMaxMB    int // 单日运行历史熔断阈值（MB）
@@ -376,6 +397,12 @@ func build(base string, opts *cliOpts) *Config {
 		GhostStaggerSamplePct: envInt("CTRL_GHOST_STAGGER_SAMPLE_PCT", 100),
 		Rescue48Enabled:       envBool("CTRL_RESCUE48", true),
 		AutoRestore:           envBool("CTRL_AUTO_RESTORE", false),
+		// 2026-10-12 号池轮换（最小版；默认关）：满额纯游荡号按速率下线 → 水位器补预备队 → 轮班；
+		// 名单落盘 data/rotation.json，KeepHours 到龄自动回池。
+		RotationEnabled:    envBool("CTRL_ROTATION", false),
+		RotationPerHour:    envInt("CTRL_ROTATION_PER_HOUR", 30),
+		RotationMinReserve: envInt("CTRL_ROTATION_MIN_RESERVE", 50),
+		RotationKeepHours:  envInt("CTRL_ROTATION_KEEP_HOURS", 24),
 		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
 		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),
 		LiveCountURL:         env("CTRL_LIVECOUNT_URL", ""),
