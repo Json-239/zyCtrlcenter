@@ -76,6 +76,65 @@ const detail = computed(() => state.status?.robots?.find((r) => r.account === pi
 // 2026-09-22 选中号的游荡状态（机器人心跳 walk 字段：{enabled,mapid,state}）
 const detailWalk = computed(() => detail.value?.walk || null)
 
+// ---------------- 2026-10-12 背包按需拉取（性能适配批1）----------------
+// 新版中控 /api/status 默认不再返回每号 bag（整表瘦身），单机详情走
+// GET /api/status/robot?account=X（含 bag）。打开详情面板时拉取，打开期间每 5s 刷新、关闭即停。
+// 双兼容：旧后端没有这个接口（404）→ 回退行内 detail.bag（老整表里可能恰有），再没有就提示"暂不可用"。
+const bagLive = ref(null)      // 按需拉到的背包数组（null = 还没有实时快照）
+const bagState = ref('idle')   // idle | loading | ok | unavailable
+let bagTimer = 0
+let bagSeq = 0                 // 切号/关闭时自增：让在途响应作废（防串号）
+let bagBusyFor = ''            // 在途请求的账号：同一号不并发；切号立即放行新号（防被旧请求卡住）
+
+async function fetchBag(acc) {
+  if (bagBusyFor === acc) return   // 同一号：上一拍还没回来就跳过这一拍
+  bagBusyFor = acc
+  const seq = ++bagSeq
+  try {
+    const d = await apiGet('/api/status/robot?account=' + encodeURIComponent(acc))
+    if (seq !== bagSeq || picked.value !== acc) return     // 已切号：旧响应丢弃
+    const bag = d && d.robot ? d.robot.bag : null
+    if (Array.isArray(bag)) { bagLive.value = bag; bagState.value = 'ok' }
+    else { bagLive.value = null; bagState.value = 'unavailable' }  // 快照缺 bag 字段也别白屏
+  } catch (e) {
+    if (seq !== bagSeq || picked.value !== acc) return
+    bagLive.value = null
+    bagState.value = 'unavailable'   // 404（旧后端）/网络失败 → 走回退
+  } finally {
+    if (bagBusyFor === acc) bagBusyFor = ''   // 只清自己的标记（切号后不误清新号的）
+  }
+}
+
+function stopBagPoll() {
+  if (bagTimer) { clearInterval(bagTimer); bagTimer = 0 }
+  bagSeq++            // 让在途响应作废
+}
+// 详情面板打开/切号 → 起停按需拉取（关闭即停，不在后台空转）
+watch(() => detail.value?.account, (acc) => {
+  stopBagPoll()
+  bagLive.value = null
+  if (!acc) { bagState.value = 'idle'; return }
+  bagState.value = 'loading'
+  fetchBag(acc)
+  bagTimer = setInterval(() => {
+    if (document.hidden) return   // 页面隐藏时暂停（与 store 轮询同口径）
+    fetchBag(acc)
+  }, 5000)
+}, { immediate: true })
+
+// 面板背包数据源：优先按需快照，其次回退行内 bag（旧后端整表里才有该字段）
+const bagRows = computed(() => {
+  if (Array.isArray(bagLive.value)) return bagLive.value
+  const r = detail.value
+  return r && Array.isArray(r.bag) ? r.bag : []
+})
+// 空背包时的占位文案（区分：加载中 / 旧后端不可用 / 真没数据）
+const bagHint = computed(() => {
+  if (bagState.value === 'loading') return '背包加载中…'
+  if (bagState.value === 'unavailable') return '背包暂不可用（旧版中控没有按需接口；等中控升级后自动可用）'
+  return '（无背包数据）'
+})
+
 // 状态 → el-tag 类型（沿用 store 的状态分类，保证与其他页面口径一致）
 const TAG_TYPE = { ok: 'success', warn: 'warning', danger: 'danger', info: 'primary', dim: 'info' }
 function stateType(s) { return TAG_TYPE[stateTagClass(s)] || 'info' }
@@ -607,6 +666,7 @@ function draw(now) {
 
 onMounted(() => { raf = requestAnimationFrame(draw) })
 onUnmounted(() => cancelAnimationFrame(raf))
+onUnmounted(stopBagPoll)   // 离开地图页：停掉背包按需轮询
 
 // ---------------------------------------------------------------- 交互
 
@@ -644,7 +704,6 @@ function hpPct(v) {
   if (!Array.isArray(v) || v.length < 2 || !v[1]) return 0
   return Math.max(0, Math.min(100, Math.round(v[0] / v[1] * 100)))
 }
-function bagList(r) { return Array.isArray(r.bag) ? r.bag : [] }
 function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
 </script>
 
@@ -832,15 +891,15 @@ function summonsList(r) { return Array.isArray(r.summons) ? r.summons : [] }
       </table>
       <div v-else class="muted" style="padding:4px 0">（无守护数据）</div>
 
-      <!-- 背包 -->
-      <div class="sec">背包（{{ bagList(detail).length }}）</div>
-      <div v-if="bagList(detail).length" class="bag">
-        <div v-for="(it, i) in bagList(detail)" :key="i" class="bag-item" :title="'itemid=' + it.id">
+      <!-- 背包：2026-10-12 起按需拉取（GET /api/status/robot），不再依赖整表轮询带的 bag -->
+      <div class="sec">背包（{{ bagRows.length }}）</div>
+      <div v-if="bagRows.length" class="bag">
+        <div v-for="(it, i) in bagRows" :key="i" class="bag-item" :title="'itemid=' + it.id">
           <span class="bname">{{ it.name || ('#' + it.id) }}</span>
           <span class="bcount" v-if="it.count > 1">×{{ it.count }}</span>
         </div>
       </div>
-      <div v-else class="muted" style="padding:4px 0">（无背包数据）</div>
+      <div v-else class="muted" style="padding:4px 0">{{ bagHint }}</div>
 
       <!-- 2026-09-22 选中号的日志输出（历史 + 实时） -->
       <div class="sec">

@@ -22,6 +22,12 @@ export const state = reactive({
     current: {},
     task_failed: { count: 0, items: [] },
     waterline: {},       // 在线水位保持器摘要（/api/status 顺带带）
+    removed: [],         // 「已移除」名单（/api/status 顺带带；「清空已移除」按钮读它）
+    paused: [],          // 人工暂停名单（/api/status 顺带带）
+    restore_capped: [],  // 当日卡死熔断名单（/api/status 顺带带：[{account,cap_until,cap_reason}]）
+    svr_online: {},      // 全服在线读数（count/ts/age_sec/source；source=local 表示没有服务端读数）
+    stagger: null,       // 错峰抓鬼摘要（新后端才有：enabled/per_hour/sample_pct；缺=未知）
+    rescue48: null,      // RESCUE48 救援摘要（新后端才有：enabled/today/last_tick；缺=未知）
   },
   statusError: '',
   wsConnected: false,
@@ -117,6 +123,13 @@ function mergeStatus(next) {
     if (k in (next || {})) st[k] = next[k]
   }
   st.removed = next?.removed || st.removed
+  // 2026-10-12 可见性补齐：这几个顶层字段以前不在白名单里，面板永远读不到
+  // （svr_online 缺失就是"全服在线"模块一直不显示的直接原因）。旧后端缺字段时保持原值（双兼容）。
+  st.svr_online = next?.svr_online || st.svr_online
+  st.paused = next?.paused || st.paused
+  st.restore_capped = next?.restore_capped || st.restore_capped
+  st.stagger = next?.stagger || st.stagger        // 新后端才有；旧后端恒为 null（面板显示"未知"）
+  st.rescue48 = next?.rescue48 || st.rescue48     // 同上
 }
 
 export async function refreshStatus() {
@@ -296,19 +309,37 @@ async function loadTaskNames() {
 }
 
 let pollTimer = 0
+// 3 秒轮询一拍。2026-10-12 性能适配：页面隐藏时**暂停**（省掉后台标签页的整轮合并/渲染开销），
+// 切回可见时由 visibilitychange 立即补一轮并恢复（见下）。
+function pollNext() {
+  if (hidden) return
+  clearTimeout(pollTimer) // 防重：切回可见补一轮时可能与上一拍撞车
+  pollTimer = setTimeout(async () => {
+    pollTimer = 0
+    await refreshStatus()
+    pollNext()
+  }, 3000)
+}
 export function startRealtime() {
+  hidden = document.hidden
   refreshStatus()
-  const loop = () => {
-    // 页面不可见时降频（省电、避免后台无谓渲染）
-    pollTimer = setTimeout(async () => { await refreshStatus(); loop() }, hidden ? 10000 : 3000)
-  }
-  loop()
+  pollNext()
   loadMaps()
   loadTaskNames()
   setInterval(loadMaps, 60000)
   setInterval(loadTaskNames, 60000)
   connectWS(pushEvent, (ok) => { state.wsConnected = ok })
-  document.addEventListener('visibilitychange', () => { hidden = document.hidden })
+  document.addEventListener('visibilitychange', () => {
+    const wasHidden = hidden
+    hidden = document.hidden
+    if (hidden) { // 切走：暂停轮询（在途的一拍完成后自然收尾）
+      clearTimeout(pollTimer)
+      pollTimer = 0
+      return
+    }
+    if (wasHidden) refreshStatus() // 切回可见：立即补一轮，别等下一拍
+    pollNext()
+  })
 }
 
 // ---------------- 多区 ----------------
@@ -420,6 +451,16 @@ export function fmtAgo(ts) {
   if (sec < 60) return `${sec} 秒前`
   if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`
   return `${Math.floor(sec / 3600)} 小时前`
+}
+
+// 2026-10-12 本地时区"今天"的日期键（YYYYMMDD）：与机器人/中控 Go 侧 todayKey() 同口径
+// （internal/api/autotask.go: time.Now().Format("20060102")，中控与机器人同机部署）。
+// 不能用 toISOString() —— 那是 UTC，东八区会在每天 16:00 就"换日"。
+// 抽出共享：Dashboard 跨日门控与 AccountsView「今日抓鬼满额」筛选共用同一份实现。
+export function todayKey() {
+  const p = (n) => String(n).padStart(2, '0')
+  const d = new Date()
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
 }
 
 // 任务号 → 人话（中控不生产任务数据，这里只把机器人上报的编号翻成能看懂的标签）。

@@ -6,7 +6,7 @@ import { apiGet } from '../api'
 import {
   state, post, stateLabel, statePhrase, stateTagClass, fmtTime, fmtAgo,
   mapLabel, posLabel, posPxLabel, zoneFullLabel, isActive,
-  avatarChar, avatarStyle, hpPct, hpText, taskLabel, taskHint,
+  avatarChar, avatarStyle, hpPct, hpText, taskLabel, taskHint, todayKey, refreshStatus,
 } from '../store'
 // 忙/空闲/异常归类判据（与地图页 MapView、Go 侧 waterline.Busy / roampool.Idle 同源，
 // 口径说明见该模块注释）——2026-09-23 统一：大屏不再自己维护状态集合
@@ -188,16 +188,54 @@ watch([filtered, pageSize], () => {
 
 // 2026-09-22 全服在线（含真实玩家）：中控直连游戏服 /gm/online（source=svr_provider，参考 hqm）
 // 优先；其次机器人 @online 回执（source=svr）；两路都没有时 source=local（面板另有本地兜底口径）。
+// 2026-10-12 可见性补齐：svr_online 现在随 /api/status 返回（store 白名单已接）——
+// 之前这里 v-if="count" 会让"无读数/旧后端"时整行隐藏，看着像模块不存在。
+// 现在恒定展示：有真读数（ts 存在）显示数字+时间；否则显示 "--"，source=local 标"本地兜底"。
 const svrOnline = computed(() => {
   const s = state.status?.svr_online || {}
+  const count = Number(s.count || 0)
+  const hasData = count > 0 && !!s.ts   // 有服务端真读数（ts 存在）才算数
   const age = Number(s.age_sec || 0)
-  const ageText = age <= 0 ? '刚刚' : (age < 90 ? `${age} 秒前` : `${Math.floor(age / 60)} 分钟前`)
+  const ageText = hasData ? (age <= 0 ? '刚刚' : (age < 90 ? `${age} 秒前` : `${Math.floor(age / 60)} 分钟前`)) : ''
   const source = String(s.source || '')
   const sourceText = source === 'svr_provider' ? '直连游戏服 /gm/online'
     : source === 'svr' ? '机器人 @online 回执'
-      : source === 'local' ? '无服务端读数' : ''
-  return { count: Number(s.count || 0), ageText, source, sourceText }
+      : source === 'local' ? '本地兜底（无服务端读数）' : ''
+  return { count: hasData ? count : 0, hasData, ageText, source, sourceText }
 })
+
+// 2026-10-12 可见性补齐：已移除名单（「清空已移除」按钮读它显示个数）
+const removedCount = computed(() => (state.status.removed || []).length)
+// 2026-10-12 可见性补齐：当日卡死熔断名单（restore_capped：[{account,cap_until,cap_reason}]）
+const cappedRows = computed(() => state.status.restore_capped || [])
+const cappedDlg = ref(false)
+// 2026-10-12 可见性补齐：错峰抓鬼 / RESCUE48 摘要（新后端才有；旧后端缺字段 → null → 显示"未知"）
+const stagger = computed(() => state.status.stagger || null)
+const rescue48 = computed(() => state.status.rescue48 || null)
+// 时间字段兼容（cap_until 是 RFC3339 字符串；也容忍 unix 秒/毫秒数值）：
+// tsSec → 秒；tsText 绝对时间（弹窗明细用）；tsAgoText 相对时间（卡片摘要用）
+function tsSec(v) {
+  if (!v) return 0
+  if (typeof v === 'number') return v > 1e12 ? v / 1000 : v
+  const t = Date.parse(String(v))
+  return Number.isFinite(t) ? t / 1000 : 0
+}
+function tsText(v) {
+  const s = tsSec(v)
+  return s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false }) : String(v || '')
+}
+function tsAgoText(v) {
+  const s = tsSec(v)
+  if (!s) return String(v || '')
+  const diff = s - Date.now() / 1000
+  // cap_until 是"到点恢复"的**未来**时刻：fmtAgo 对负数会显示"0 秒前"（具有误导性），
+  // 未来时刻单独给"约 N 分钟后 / 约 N 小时后"。rescue48.last_tick 是过去时刻，照旧走 fmtAgo。
+  if (diff > 60) {
+    if (diff < 3600) return `约 ${Math.round(diff / 60)} 分钟后`
+    return `约 ${(diff / 3600).toFixed(1)} 小时后`
+  }
+  return fmtAgo(s)
+}
 
 // 拟人化的一句话现状
 const headline = computed(() => {
@@ -757,9 +795,16 @@ async function removeOffline() {
 // 2026-09-22：清空"已移除"名单。自动移除（满额/下线换号）会把号永久排除出候选池，
 // 池子被吃空后水位器补不到号（"号池里没有可上线的号"，在线数卡住上不去）。
 // 这里一键清空（不重启、不断控制通道）：候选池立即恢复，水位器/各池下一轮按需补号。
+// 2026-10-12 可见性补齐：按钮恢复（显示名单个数）+ 二次确认写明风险（清空后可被重新拉起）；
+// 成功后手动再刷一轮 status（post() 已刷一次，这里双保险让名单/候选计数立即对齐）。
 async function clearRemoved() {
-  if (!await confirmBox('清空「已移除」名单？被移除的号会回到候选池（当天抓鬼满额的号仍会被挡，属预期）。', '确认清空', '清空')) return
-  await post('/api/robots/clear_removed', {})
+  const n = removedCount.value
+  if (!n) return
+  if (!await confirmBox(
+    `清空「已移除」名单（共 ${n} 个）？\n清空后这些号会回到候选池、可被重新拉起（当天抓鬼满额的号仍会被挡，属预期）。`,
+    '确认清空', '清空')) return
+  const res = await post('/api/robots/clear_removed', {})
+  if (res && res.ok !== false) await refreshStatus()
 }
 
 function hpClass(r) {
@@ -810,12 +855,8 @@ function frac(done, total) { return total > 0 ? `${done}/${total}` : `${done} �
 
 // 2026-10-10 本地时区"今天"的日期键（YYYYMMDD）：与机器人/中控 Go 侧 todayKey() 同口径
 // （internal/api/autotask.go: time.Now().Format("20060102")，中控与机器人同机部署）。
+// 2026-10-12 抽到 store.js 共享（AccountsView「今日抓鬼满额」筛选同口径），此处直接导入。
 // 不能用 toISOString() —— 那是 UTC，东八区会在每天 16:00 就"换日"。
-function todayKey() {
-  const p = (n) => String(n).padStart(2, '0')
-  const d = new Date()
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
-}
 
 // 任务列内容，判定优先级：
 //   抓鬼中 > 抓鬼已满 > 新手链完成 > 抓鬼已停 > 捉鬼链 > 新手链进行中 > 只剩任务号
@@ -992,11 +1033,11 @@ const ghostStaleAlert = computed(() => {
         {{ counts.total }}<span class="unit">机器人</span>
       </div>
       <div class="sub">在线 = 握手完成（已连上游戏服）· 机器人 = 表内全部 · 已登录角色 {{ counts.online }} 个</div>
-      <div class="sub" v-if="svrOnline.count"
+      <div class="sub"
         :title="`服务端全服在线角色数（含真实玩家，不只是我们的号）${svrOnline.sourceText ? ' · ' + svrOnline.sourceText : ''}`">
-        🌐 全服在线（含真人）：<b>{{ svrOnline.count }}</b>
-        <span class="muted">（{{ svrOnline.ageText }}）</span>
-        <span class="muted" v-if="svrOnline.sourceText"> · {{ svrOnline.sourceText }}</span>
+        🌐 全服在线（含真人）：<b>{{ svrOnline.hasData ? svrOnline.count : '--' }}</b>
+        <span class="muted" v-if="svrOnline.ageText">（{{ svrOnline.ageText }}）</span>
+        <span class="muted"> · {{ svrOnline.sourceText || '暂无读数（旧后端或服务端未上报）' }}</span>
       </div>
     </el-card>
     <el-card class="stat-card" shadow="never">
@@ -1159,6 +1200,73 @@ const ghostStaleAlert = computed(() => {
       口径：在线总数 = 抓鬼池 + 新手池 + 游荡池（余量）。调整规则：每 {{ rp.interval_sec || 60 }} 秒一轮，
       任务池缺人时**立刻回收**游荡号（优先挑所在图人最多的，顺带纠偏），否则把空闲号**按图均匀**派出去；
       单轮最多调 {{ rp.max_step || 5 }} 个。机器人端「空闲 90s 自动游荡」仍是兜底（本池只管名额与分布）。
+    </div>
+  </el-card>
+
+  <!-- 2026-10-12 可见性补齐：卡死熔断名单（restore_capped）——当日卡死触顶的号不再自动补发，
+       等次日自动恢复；面板要能看见名单/原因/恢复时间（原来接口里有、前端没有展示位）。 -->
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">卡死熔断（restore_capped）</span>
+        <el-tag size="small" :type="cappedRows.length ? 'warning' : 'success'" effect="plain" disable-transitions>
+          {{ cappedRows.length ? cappedRows.length + ' 个' : '无' }}
+        </el-tag>
+        <span class="spacer" />
+        <span class="muted">当日卡死触顶 → 不再自动补发，等次日自动恢复（「立即补发该号」可提前解除）</span>
+        <el-button size="small" :disabled="!cappedRows.length" @click="cappedDlg = true">查看名单</el-button>
+      </div>
+    </template>
+    <div class="metrics">
+      <div class="metric">
+        <span class="k">今日熔断</span>
+        <b class="v big" :class="{ warnText: cappedRows.length }">{{ cappedRows.length }}</b>
+        <span class="k">个</span>
+      </div>
+      <div class="metric" v-if="cappedRows.length">
+        <span class="k">最近到点</span>
+        <b class="v mono" :title="tsText(cappedRows[0].cap_until)">{{ tsAgoText(cappedRows[0].cap_until) }}</b>
+      </div>
+    </div>
+    <div class="sub" v-if="cappedRows.length">
+      名单：{{ cappedRows.slice(0, 8).map((x) => x.account).join('、') }}<template v-if="cappedRows.length > 8"> 等 {{ cappedRows.length }} 个</template>
+    </div>
+    <div class="sub" v-else>当前没有卡死熔断的号（正常）</div>
+  </el-card>
+
+  <!-- 2026-10-12 可见性补齐：策略摘要（错峰抓鬼 / RESCUE48）——新后端才带这两个块；
+       旧后端 stagger/rescue48 为 null → 显示"未知（需新后端）"，绝不白屏报错。 -->
+  <el-card class="panel-card" shadow="never">
+    <template #header>
+      <div class="card-head">
+        <span class="card-title">策略摘要</span>
+        <span class="spacer" />
+        <span class="muted">错峰抓鬼 / RESCUE48 救援（数据来自 /api/status 顶部块；旧后端显示"未知"）</span>
+      </div>
+    </template>
+    <div class="metrics">
+      <div class="metric">
+        <span class="k">错峰抓鬼</span>
+        <template v-if="stagger">
+          <el-tag size="small" :type="stagger.enabled ? 'success' : 'info'" effect="plain" disable-transitions>
+            {{ stagger.enabled ? '开' : '关' }}
+          </el-tag>
+          <b class="v">{{ stagger.per_hour ?? '--' }}</b><span class="k">/h</span>
+          <span class="k">· 采样</span><b class="v">{{ stagger.sample_pct ?? '--' }}</b><span class="k">%</span>
+        </template>
+        <span v-else class="muted">未知（需新后端）</span>
+      </div>
+      <div class="metric">
+        <span class="k">RESCUE48</span>
+        <template v-if="rescue48">
+          <el-tag size="small" :type="rescue48.enabled ? 'success' : 'info'" effect="plain" disable-transitions>
+            {{ rescue48.enabled ? '开' : '关' }}
+          </el-tag>
+          <b class="v">{{ rescue48.today ?? 0 }}</b><span class="k">今日</span>
+          <span class="k" v-if="rescue48.last_tick">· 上次 {{ tsAgoText(rescue48.last_tick) }}</span>
+        </template>
+        <span v-else class="muted">未知（需新后端）</span>
+      </div>
     </div>
   </el-card>
 
@@ -1520,6 +1628,27 @@ const ghostStaleAlert = computed(() => {
     </template>
   </el-dialog>
 
+  <!-- 2026-10-12 卡死熔断名单明细（restore_capped）：账号 / 恢复时间（到点自动恢复）/ 原因 -->
+  <el-dialog v-model="cappedDlg" title="卡死熔断名单（restore_capped）" width="760px">
+    <el-table :data="cappedRows" size="small" max-height="380" row-key="account">
+      <el-table-column label="账号" min-width="185" class-name="mono" show-overflow-tooltip>
+        <template #default="{ row: x }">{{ x.account }}</template>
+      </el-table-column>
+      <el-table-column label="恢复时间（到点自动解除）" min-width="180">
+        <template #default="{ row: x }">
+          {{ tsText(x.cap_until) || '--' }}
+          <span class="muted" v-if="tsSec(x.cap_until)">（{{ tsAgoText(x.cap_until) }}）</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="原因" min-width="260" show-overflow-tooltip>
+        <template #default="{ row: x }">{{ x.cap_reason || '--' }}</template>
+      </el-table-column>
+    </el-table>
+    <template #footer>
+      <el-button size="small" @click="cappedDlg = false">关闭</el-button>
+    </template>
+  </el-dialog>
+
   <el-card class="panel-card" shadow="never">
     <div class="toolbar" style="margin-bottom:10px">
       <el-radio-group v-model="filter" size="small" class="filter-group">
@@ -1534,6 +1663,11 @@ const ghostStaleAlert = computed(() => {
         <el-icon>
           <Delete />
         </el-icon>移除掉线({{ offlineAccounts.length }})
+      </el-button>
+      <!-- 2026-10-12 可见性补齐：清空「已移除」名单（池子被吃空后一键恢复候选池） -->
+      <el-button size="small" type="warning" plain :disabled="!removedCount" @click="clearRemoved"
+        :title="removedCount ? '清空后这些号会回到候选池、可被重新拉起' : '当前没有已移除的号'">
+        清空已移除({{ removedCount }})
       </el-button>
       <span class="muted">当前区 {{ curZone.key || '--' }} · 每 3 秒对齐一次</span>
     </div>
@@ -1572,6 +1706,10 @@ const ghostStaleAlert = computed(() => {
               title="今天抓鬼已满/不可用（服务端次数上限）：已转野外游荡，次日重置后恢复抓鬼">
               🈵 已抓满
             </el-tag>
+            <!-- 2026-10-12 可见性补齐：人工暂停（/api/status 行内 paused；停止按钮打标）——
+                 自动编排不会派活；点行内「启动」可解除 -->
+            <el-tag v-if="r.paused" size="small" type="info" effect="plain" disable-transitions
+              title="人工暂停：自动编排不会派活给它（点行内「启动」可解除）">暂停</el-tag>
             <!-- 2026-09-24：分享日常在跑标记（神捕/烽火）——大屏直接可见"在跑哪个日常、第几轮" -->
             <!--   <el-tag v-if="dailyKindOf(r)" size="small" :type="dailyKindOf(r) === 'shenbu' ? 'warning' : 'info'"
                     effect="dark" disable-transitions :title="dailyTitle(r)">

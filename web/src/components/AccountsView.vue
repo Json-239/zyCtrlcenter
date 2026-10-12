@@ -1,9 +1,9 @@
 <script setup>
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 // 脚本式 API（ElMessage / ElMessageBox）必须显式 import；模板里的 <el-xxx> 是全局注册的
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiGet, apiPost } from '../api'
-import { state, post, zones, currentZoneKey } from '../store'
+import { state, post, zones, currentZoneKey, todayKey } from '../store'
 
 // MessageBox 的 message 用 VNode 才能保留 \n 换行（纯文本里的换行会被折叠）
 function pre(text) { return h('div', { style: 'white-space: pre-line' }, text) }
@@ -39,7 +39,7 @@ const loading = ref(false)
 const err = ref('')
 const selected = ref(new Set())
 
-const filter = reactive({ zone: '', keyword: '', usable: false, onlyOnline: false, includeLive: false, pool: '' })
+const filter = reactive({ zone: '', keyword: '', usable: false, onlyOnline: false, includeLive: false, pool: '', ghostFull: false })
 // 号池分区下拉：以接口 pool_split 为准 + 实际行里出现过的池值补齐（老版接口无 pool_split 时兜底）。
 // 防御式：中控不返回的池就不显示，不硬编码假项（2026-09-23 分享日常接入，方案 §4.4）。
 // 注：2026-09-23 本文件被两个 agent 并发改到过（两套 poolOptions 重名）——此处已合并为单一实现。
@@ -64,6 +64,40 @@ function notePools(list) {
     }
   }
 }
+
+// ---------------- 2026-10-12 可见性补齐：暂停 / 今日抓鬼满额 / 私池标记 ----------------
+// /api/accounts 的行只带运行时基础态（online/state/…），不带 paused/ghost/personal；
+// 这三个标记都从既有数据源兜：前两个查 store 的 /api/status 机器人表（转 Map 一次），
+// 私池走 GET /api/personal（只读，60s 刷一次）。
+const robotByName = computed(() => {
+  const m = new Map()
+  for (const r of state.status.robots || []) m.set(r.account, r)
+  return m
+})
+function robotOf(r) { return robotByName.value.get(r.name) || null }
+function isPausedRow(r) { const b = robotOf(r); return !!(b && b.paused) }
+// 今日抓鬼满额：与 Dashboard taskCell 的 ghostFull 同口径（计数属于今天 + done≥limit；
+// limit 缺省兜底 50，避免 limit=0 时 done>=limit 恒真把正常号误标）。
+function ghostFullToday(r) {
+  const b = robotOf(r)
+  const g = b && b.ghost
+  if (!g) return false
+  const limit = Number(g.limit) > 0 ? Number(g.limit) : 50
+  return (Number(g.done) || 0) >= limit && String(g.count_date || '') === todayKey()
+}
+// 「今日抓鬼满额」快捷筛选：客户端筛已加载的当前页（池接口不支持该条件）
+const viewRows = computed(() => (filter.ghostFull ? rows.value.filter(ghostFullToday) : rows.value))
+
+// 私池标记（尽力项）：GET /api/personal → {ok, count, accounts}；旧后端/失败保持空集不标记
+const personal = ref(new Set())
+let personalTimer = 0
+async function loadPersonal() {
+  try {
+    const d = await apiGet('/api/personal')
+    personal.value = new Set(d.accounts || [])
+  } catch (e) { /* 接口不可用：不标记 */ }
+}
+
 const batch = reactive({ limit: 1, chunk: 1, interval_ms: 1500, only_usable: true, force: false })
 const addForm = reactive({ text: '', password: '', zone: '' })
 
@@ -141,7 +175,10 @@ onMounted(() => {
   addForm.zone = currentAddr()
   load()
   loadPending()
+  loadPersonal()
+  personalTimer = setInterval(loadPersonal, 60000)
 })
+onUnmounted(() => clearInterval(personalTimer))
 
 function gotoPage(delta) {
   const next = pageInfo.value.page + delta
@@ -157,14 +194,14 @@ function toggle(name) {
   else s.add(name)
   selected.value = s
 }
-// 本页勾选状态（跨页选择保留，所以判断"全选"必须只看本页行）
-const allPageSelected = computed(() => rows.value.length > 0 && rows.value.every((r) => selected.value.has(r.name)))
-const somePageSelected = computed(() => !allPageSelected.value && rows.value.some((r) => selected.value.has(r.name)))
+// 本页勾选状态（跨页选择保留，所以判断"全选"必须只看本页行；带「满额」筛选时以可见行为准）
+const allPageSelected = computed(() => viewRows.value.length > 0 && viewRows.value.every((r) => selected.value.has(r.name)))
+const somePageSelected = computed(() => !allPageSelected.value && viewRows.value.some((r) => selected.value.has(r.name)))
 // 表头全选：只增删"本页这一批"，别把别的页已勾的号一起清掉
 function toggleAll() {
   const s = new Set(selected.value)
-  if (allPageSelected.value) rows.value.forEach((r) => s.delete(r.name))
-  else rows.value.forEach((r) => s.add(r.name))
+  if (allPageSelected.value) viewRows.value.forEach((r) => s.delete(r.name))
+  else viewRows.value.forEach((r) => s.add(r.name))
   selected.value = s
 }
 const selectedNames = computed(() => Array.from(selected.value))
@@ -469,9 +506,10 @@ async function toggleOnline(r) {
 }
 
 // 快捷选择（都是"替换选择"，结果可预期；手动逐行勾选仍跨页保留）
+// 基数 = 当前可见行（带「今日抓鬼满额」筛选时，别把筛掉的行也选进去）
 function selectPage(kind) {
   if (kind === 'none') { selected.value = new Set(); return }
-  const pick = rows.value.filter((r) => {
+  const pick = viewRows.value.filter((r) => {
     if (kind === 'usable') return !!r.usable
     if (kind === 'offline') return !r.online
     if (kind === 'online') return !!r.online
@@ -605,6 +643,9 @@ const headline = computed(() => {
         <el-option value="" label="池分区：全部" />
         <el-option v-for="p in poolOptions" :key="p.value" :value="p.value" :label="p.label" />
       </el-select>
+      <!-- 2026-10-12 可见性补齐：今日抓鬼满额快捷筛选（客户端筛当前页；判据与 Dashboard 同口径） -->
+      <el-checkbox v-model="filter.ghostFull" size="small"
+                   title="今日抓鬼已满额的号（计数属于今天；数据来自 /api/status 机器人表）——只筛当前页已加载的行">今日抓鬼满额</el-checkbox>
       <span class="spacer" />
       <el-button size="small" type="primary" plain @click="ui.addOpen = true">
         <el-icon><Plus /></el-icon>加号入池
@@ -828,12 +869,12 @@ const headline = computed(() => {
     <template #header>
       <div class="card-head">
         <span class="card-title">账号池</span>
-        <span class="muted">第 {{ pageInfo.page }} 页 · 本页 {{ rows.length }} 行{{ loading ? ' · 加载中…' : '' }}</span>
+        <span class="muted">第 {{ pageInfo.page }} 页 · 本页 {{ viewRows.length }} 行<template v-if="filter.ghostFull">（已筛「今日抓鬼满额」）</template>{{ loading ? ' · 加载中…' : '' }}</span>
         <span class="spacer" />
         <span class="muted">密码不下发到前端；批量上线由服务端从池里取密码</span>
       </div>
     </template>
-    <el-table v-loading="loading" :data="rows" class="pool-table" size="small" stripe height="560"
+    <el-table v-loading="loading" :data="viewRows" class="pool-table" size="small" stripe height="560"
               row-key="name" :row-class-name="poolRowClass">
       <el-table-column width="46">
         <template #header>
@@ -847,13 +888,16 @@ const headline = computed(() => {
       <el-table-column label="账号" min-width="170" class-name="mono" show-overflow-tooltip>
         <template #default="{ row: r }">{{ r.name }}</template>
       </el-table-column>
-      <el-table-column label="池" width="66">
+      <el-table-column label="池" width="96">
         <template #default="{ row: r }">
           <el-tag v-if="r.pool === 'newbie'" size="small" type="info" effect="light" disable-transitions
                   title="新手池：未毕业（等级<31 且未链完成）">新手</el-tag>
           <el-tag v-else-if="r.pool === 'ghost'" size="small" type="warning" effect="light" disable-transitions
                   title="抓鬼池：已毕业（≥31 级 或 链完成）">抓鬼</el-tag>
           <el-tag v-else size="small" type="info" effect="plain" disable-transitions title="等级未上报/无记录">未知</el-tag>
+          <!-- 2026-10-12 私池标记（GET /api/personal）：私号不参与自动编排，任务由面板手动发起 -->
+          <el-tag v-if="personal.has(r.name)" size="small" type="danger" effect="plain" disable-transitions
+                  title="私池号：不参与任何自动编排（任务由面板手动发起）">私</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="等级" width="70">
@@ -887,9 +931,14 @@ const headline = computed(() => {
                   :effect="r.online ? 'light' : 'plain'">{{ r.online ? '在线' : '离线' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="104">
+      <el-table-column label="状态" width="158">
         <template #default="{ row: r }">
           <el-tag size="small" type="info" effect="plain" disable-transitions>{{ r.state || '--' }}</el-tag>
+          <!-- 2026-10-12 可见性补齐：暂停（人工）/ 今日抓鬼满额——池行没有这两个字段，从 store 的机器人表兜 -->
+          <el-tag v-if="isPausedRow(r)" size="small" type="info" effect="dark" disable-transitions
+                  title="人工暂停：自动编排不会派活（面板「启动」可解除）">暂停</el-tag>
+          <el-tag v-if="ghostFullToday(r)" size="small" type="warning" effect="plain" disable-transitions
+                  title="今日抓鬼已满额（计数属于今天；服务端 0 点重置后自动消失）">🈵满</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="运行时区" width="150" class-name="mono" show-overflow-tooltip>
@@ -917,6 +966,7 @@ const headline = computed(() => {
         <el-empty :image-size="60" description="这一页没有数据">
           <div class="muted small">
             <template v-if="!meta.count">先点「加号入池」把账号加进来，或「建号」批量注册。</template>
+            <template v-else-if="filter.ghostFull && rows.length">当前页没有"今日抓鬼满额"的号（取消勾选可看全部）。</template>
             <template v-else>换个关键词/筛选，或翻回上一页。</template>
           </div>
         </el-empty>
@@ -926,7 +976,7 @@ const headline = computed(() => {
     <!-- 分页：接口是 offset+limit+hasMore（没有过滤后的总数），所以用"上一页/下一页"+每页条数 -->
     <div class="pager">
       <span class="muted">
-        第 {{ pageInfo.page }} 页 · 本页 {{ rows.length }} 行
+        第 {{ pageInfo.page }} 页 · 本页 {{ viewRows.length }} 行
         <template v-if="stats.total">· 池内共 {{ stats.total }} 个（该区可用 {{ stats.usable ?? 0 }}）</template>
       </span>
       <span class="spacer" />
