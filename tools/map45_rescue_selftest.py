@@ -958,6 +958,74 @@ def test_seg34():
        not qe.execute_hop_calls and "不可达" in (st.get("verdict") or ""),
        "state=%s verdict=%s" % (st.get("state"), st.get("verdict")))
 
+    # S34-9 (2026-10-13): 战斗中暂停超时——不烧重试额度、不倒计候选、刷新计时基准
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [840, 2024]
+    rb.m_fight_state = 1
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": EXIT34, "seg": "changan",
+          "hop34": dict(ns["HOPS34"][0]), "hop34_ms": 100000, "npc": 0}
+    t = 100000 + HO34 + 5000  # 早已超过超时窗口，但处于战斗 → 应暂停而非重试
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, t)
+    finally:
+        _restore_qe(saved)
+    ok("S34:fight-pauses-timeout",
+       st.get("state") == EXIT34 and int(st.get("hop34_retry", 0) or 0) == 0 and
+       int(st.get("hop34_ms", 0) or 0) == t and not (st.get("hop34_bad") or []) and
+       st.get("hop34_was_fight") is True and not qe.execute_hop_calls,
+       "retry=%s ms=%s bad=%s was_fight=%s calls=%d" % (
+           st.get("hop34_retry"), st.get("hop34_ms"), st.get("hop34_bad"),
+           st.get("hop34_was_fight"), len(qe.execute_hop_calls)))
+
+    # S34-10: 战斗结束 → 自动重发跳转（重新选路执行一次；was_fight 清除；不烧重试额度）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [840, 2024]
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": EXIT34, "seg": "changan",
+          "hop34": dict(ns["HOPS34"][0]), "hop34_ms": 100000,
+          "hop34_was_fight": True, "npc": 0}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 100000 + HO34 + 5000)
+    finally:
+        _restore_qe(saved)
+    h0 = qe.execute_hop_calls[0][0] if qe.execute_hop_calls else {}
+    ok("S34:fight-end-resends",
+       st.get("state") == EXIT34 and len(qe.execute_hop_calls) == 1 and
+       st.get("hop34_was_fight") is False and int(st.get("hop34_retry", 0) or 0) == 0 and
+       int(h0.get("destination_index", 0)) == 203,
+       "state=%s calls=%d was_fight=%s hop=%s" % (
+           st.get("state"), len(qe.execute_hop_calls), st.get("hop34_was_fight"), h0))
+
+    # S34-11: 战斗结束时已换图成功 → 完成判定优先（不误重发）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 17); q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": EXIT34, "seg": "changan",
+          "hop34_was_fight": True, "hop34_ms": 100000}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 100000 + HO34 + 5000)
+    finally:
+        _restore_qe(saved)
+    ok("S34:fight-end-already-left-done",
+       st.get("state") == ns["S_DONE"] and st.get("active") is False and
+       not qe.execute_hop_calls,
+       "state=%s calls=%d" % (st.get("state"), len(qe.execute_hop_calls)))
+
+    # S34-12: 战斗中不开段（不把跳转发进战斗被吞；状态不动、零命令）
+    qe = _Seg34FakeQE(); rb = _SegFakeRobot(34, 0); rb.m_pose = [840, 2024]
+    rb.m_fight_state = 1
+    q = _SegFakeQuest(); rb.m_quest = q
+    st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
+    saved = _use_fake_qe(qe)
+    try:
+        ns["__tick"](rb, st, 1000000)
+    finally:
+        _restore_qe(saved)
+    ok("S34:fight-blocks-open-segment",
+       st.get("state") == ns["S_ALIGN"] and not qe.execute_hop_calls and
+       st.get("hop34_ms") is None,
+       "state=%s calls=%d" % (st.get("state"), len(qe.execute_hop_calls)))
+
     # CTRL: 非 34 图（35）不触发新段（保持既有"已不在 45"终态）
     qe = _Seg34FakeQE(); rb = _SegFakeRobot(35, 0); q = _SegFakeQuest(); rb.m_quest = q
     st = {"active": True, "state": ns["S_ALIGN"], "seg": "changan"}
