@@ -52,16 +52,24 @@ func (l *Logger) Printf(format string, args ...any) {
 	}
 	stamped := time.Now().Format("2006-01-02 15:04:05") + " " + line
 
+	var removed []string // 跨日/首次访问时清理掉的历史日志（在锁外再输出提示）
 	l.mu.Lock()
-	if f, err := l.fileLocked(); err == nil {
+	if f, err := l.fileLocked(&removed); err == nil {
 		_, _ = f.WriteString(stamped)
 	}
 	l.mu.Unlock()
 	_, _ = os.Stdout.WriteString(stamped)
+	// 2026-10-23 P0 修复：清理提示必须在释放 l.mu 之后输出。
+	// 原实现由 cleanupLocked 在持锁路径回调 l.Printf → 对同一把 sync.Mutex 重入 →
+	// 永久死锁：跨天时整进程挂起（10-20/10-22 两次午夜静默死亡），启动首行时单 goroutine
+	// 被 Go 运行时判定全局死锁直接退出（0 字节日志）。
+	if len(removed) > 0 {
+		l.Printf("[LOG] 清理历史应用日志 %d 个: %s", len(removed), strings.Join(removed, ", "))
+	}
 }
 
-// fileLocked 取当天文件句柄（跨日/首次访问时自动切换并清理历史）。
-func (l *Logger) fileLocked() (*os.File, error) {
+// fileLocked 取当天文件句柄（跨日/首次访问时自动切换并清理历史）；removed 带回被清理的文件名。
+func (l *Logger) fileLocked(removed *[]string) (*os.File, error) {
 	day := time.Now().Format("20060102")
 	if l.f != nil && l.day == day {
 		return l.f, nil
@@ -77,15 +85,18 @@ func (l *Logger) fileLocked() (*os.File, error) {
 	}
 	l.f = f
 	l.day = day
-	l.cleanupLocked()
+	if removed != nil {
+		*removed = l.cleanupLocked()
+	}
 	return f, nil
 }
 
-// cleanupLocked 清理超过保留窗口的历史日志（当前文件不删）。
-func (l *Logger) cleanupLocked() {
+// cleanupLocked 清理超过保留窗口的历史日志（当前文件不删），返回被删文件名。
+// 注意：本函数在 l.mu 持有期间调用，**不得**再调用 l.Printf/任何会加锁的方法（2026-10-23 死锁事故）。
+func (l *Logger) cleanupLocked() []string {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		return
+		return nil
 	}
 	cutoff := time.Now().Add(-time.Duration(l.keepDays) * 24 * time.Hour)
 	today := filepath.Base(l.Path())
@@ -110,8 +121,8 @@ func (l *Logger) cleanupLocked() {
 	}
 	if len(removed) > 0 {
 		sort.Strings(removed)
-		l.Printf("[LOG] 清理历史应用日志 %d 个: %s", len(removed), strings.Join(removed, ", "))
 	}
+	return removed
 }
 
 // Close 关闭当前文件句柄。

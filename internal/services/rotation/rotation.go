@@ -11,8 +11,13 @@
 // 安全护栏（逐条，宁可少下线不误下线）：
 //  1. 候选（全满足才下线）：在线 ≥30 分钟 + 今日抓鬼已满（心跳 done≥limit 且
 //     count_date=今日，或独立满额表）+ 纯游荡（walk.enabled 且非战斗/非孵化/非抓鬼会话）
-//     + 非人工暂停 + 非熔断 + 非私人池 + 无队伍 + 不在自动重登处理中 + 今日领双已用
+//     + 非人工暂停 + 非私人池 + 无队伍 + 不在自动重登处理中 + 今日领双已用
 //     （心跳 double_claim_date==今日；字段缺失放行 —— 旧版机器人不报该字段）；
+//     例外·熔断号止损换出（2026-10-14 新增）：当日卡死熔断（capped，到次日 0 点才释放）的号
+//     当天已无产出能力（不再重登/不补发/不进任何候选），留在线上只占在线位发呆
+//     （实战：8.7h 内 25 个号因"任务 0 换图推送"熔断）。此类号只要"物理护栏"过关
+//     （在线/未移除/非私人池/非暂停/无队伍/非孵化/在线 ≥30 分钟）即换出，**豁免**
+//     满额/纯游荡/战斗等产能类判据 —— 换健康预备队上来止损；
 //  2. 预备队保护：可用且离线（且未移除/未暂停）的毕业号 < MinReserve（默认 50）→ 本轮不下线；
 //  3. 速率：≤ PerHour（默认 30）/小时（整点窗口重置），且每轮 ≤ MaxPerTick（10）；
 //  4. 名单：被下线的号持久化（data/rotation.json，原子落盘），age ≥ KeepHours → 回池。
@@ -131,7 +136,22 @@ func Candidate(r state.Robot, f Facts, today string) (bool, string) {
 	case r.Paused:
 		return false, "人工暂停"
 	case r.RestoreCapped:
-		return false, "当日卡死熔断"
+		// 2026-10-14 熔断号止损换出：当日卡死熔断（capped）的号当天已无产出能力
+		//（不再重登/不补发/不进任何候选），留在线只是占位发呆 —— 只要"物理护栏"
+		// 过关就换出，豁免下方全部产能类判据（满额/游荡/战斗/抓鬼会话/领双）。
+		// 保留护栏：重登处理中（防御；capped 是终态，正常不会同时在等待相位）、
+		// 队伍（不拆队）、孵化（不误伤进行中的孵化）、在线 ≥30 分钟（防闪断号被换）。
+		switch {
+		case f.Reghosting:
+			return false, "自动重登处理中"
+		case inTeam(r):
+			return false, "在队伍中"
+		case r.HatchActive():
+			return false, "孵化中"
+		case f.OnlineFor < MinOnline:
+			return false, "在线不足 30 分钟"
+		}
+		return true, ""
 	case f.Reghosting:
 		return false, "自动重登处理中"
 	case !f.GhostFull:
@@ -231,6 +251,9 @@ func (q *HourQuota) Used(now time.Time) int {
 type Result struct {
 	// Batch 本轮应下线的号（≤min(MaxPerTick, 小时剩余)；快照升序）。
 	Batch []string
+	// CappedOut Batch 中"当日卡死熔断·止损换出"的号（2026-10-14；Batch 子集，升序；
+	// 日志/事件区分措辞用）。
+	CappedOut []string
 	// Eligible 通过全部过滤的候选总数（含被额度截断排队的部分）。
 	Eligible int
 	// Queued 候选超出本轮额度、留到后面的号数。
@@ -254,6 +277,7 @@ func Plan(now time.Time, cfg Config, snap []state.Robot, facts func(acc string) 
 		return res
 	}
 	cands := make([]string, 0, 16)
+	capped := map[string]bool{} // 2026-10-14 候选中的熔断号（止损换出；截断后回填 CappedOut）
 	for _, r := range snap {
 		ok, why := Candidate(r, facts(r.Account), today)
 		if !ok {
@@ -263,6 +287,9 @@ func Plan(now time.Time, cfg Config, snap []state.Robot, facts func(acc string) 
 			continue
 		}
 		cands = append(cands, r.Account)
+		if r.RestoreCapped {
+			capped[r.Account] = true
+		}
 	}
 	res.Eligible = len(cands)
 	if len(cands) == 0 {
@@ -278,6 +305,11 @@ func Plan(now time.Time, cfg Config, snap []state.Robot, facts func(acc string) 
 		cands = cands[:keep]
 	}
 	res.Batch = cands
+	for _, acc := range cands {
+		if capped[acc] {
+			res.CappedOut = append(res.CappedOut, acc)
+		}
+	}
 	return res
 }
 

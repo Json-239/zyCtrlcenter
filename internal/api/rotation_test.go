@@ -299,7 +299,66 @@ func TestRotationTickSkipsNotFullGhost(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------- 重登处理中
+// ---------------------------------------------------------------- 熔断号止损换出（2026-10-14）
+
+// 熔断（capped）+ 未满额 + IDLE（无 walk 块）的号：当天已无产出能力 → 满足物理护栏即
+// 止损换出（豁免"满额+纯游荡"产能判据），走批量下线通路；且换出**不解除熔断**
+// （独立表跨日 0 点才惰性释放）。
+func TestRotationTickEvictsCappedStopLoss(t *testing.T) {
+	env := newRotEnv(t)
+	env.cfg.RotationEnabled = true
+	for i := 0; i < 60; i++ {
+		env.addUsable(t, fmt.Sprintf("cv%04d@xy3.com", i), 40)
+	}
+	cand := "cv0000@xy3.com"
+	t0 := time.Now()
+	t1 := t0.Add(31 * time.Minute)
+	// 防跨日 flaky：熔断表"到次日 0 点"惰性失效；若 +31min 越到次日，前置不成立 → 跳过。
+	if t1.Format("20060102") != t0.Format("20060102") {
+		t.Skip("运行时刻临近 0 点（t1 跨日，熔断表将失效）；请在非跨日时段运行")
+	}
+	// 熔断 + 在线 + IDLE（无 walk 块、无抓鬼会话）：机器人上报的典型"废号"形态。
+	env.st.Update(cand, func(r *state.Robot) { r.Online = true })
+	if until := env.st.MarkRestoreCapped(cand, "任务 0 换图推送（单测）"); !until.After(t0) {
+		t.Fatalf("熔断失效时刻应在未来：%v", until)
+	}
+	rb := testsupport.ConnectFakeRobot(t, env.ch)
+
+	// 第一轮：刚见在线（<30min）→ 不下线（在线时长护栏对熔断号同样保留）。
+	env.a.rotationTick(t0)
+	if env.st.IsRemoved(cand) {
+		t.Fatal("第一轮（刚见在线）不应下线")
+	}
+	if cmd := rb.TryReadCmd(200 * time.Millisecond); cmd != nil {
+		t.Fatalf("第一轮不应发命令：%v", cmd)
+	}
+
+	// 第二轮（+31min）：止损换出走批量下线通路。
+	env.a.rotationTick(t1)
+	cmd := rb.ReadCmd(t, 2*time.Second)
+	if cmd["cmd"] != "robot_manage" || cmd["action"] != "remove" {
+		t.Fatalf("应下发 robot_manage remove：%v", cmd)
+	}
+	accs, _ := cmd["accounts"].([]any)
+	if len(accs) != 1 || accs[0] != cand {
+		t.Fatalf("remove 名单应只含熔断号：%v", cmd["accounts"])
+	}
+	// 本地语义：MarkRemoved + 删行；熔断表独立存续（换出 ≠ 解熔断）。
+	if !env.st.IsRemoved(cand) || env.st.Has(cand) {
+		t.Fatal("换出后应 MarkRemoved + 删行")
+	}
+	if !env.st.IsRestoreCapped(cand) {
+		t.Fatal("止损换出不应解除熔断（跨日 0 点/手动解除才清）")
+	}
+	// 轮换名单落盘 + 上一轮动作。
+	rt := env.a.rotationOf()
+	if rt.store.Count() != 1 {
+		t.Fatalf("名单应 1 条：%d", rt.store.Count())
+	}
+	if act := env.lastAction(); !strings.Contains(act, "下线 1 个") {
+		t.Fatalf("上一轮动作应记录下线：%q", act)
+	}
+}
 
 func TestRotationReghostSetSkipsPending(t *testing.T) {
 	env := newRotEnv(t)

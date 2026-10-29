@@ -1,5 +1,5 @@
 // 号池轮换（rotation 最小版，2026-10-12）核心单测（纯逻辑）：
-// 候选过滤反例（满额/战斗/孵化/组队/私池/熔断/在线<30min/领双未用…）/
+// 候选过滤反例（满额/战斗/孵化/组队/私池/在线<30min/领双未用…）/熔断号止损换出（2026-10-14）/
 // 限速（30/h、每轮 ≤10、跨小时重置）/ 预备队保护 / 一轮判决（Plan）/
 // 名单持久化（存读一致、到龄回池）/ 配置夹取 / 摘要。
 package rotation
@@ -96,10 +96,13 @@ func TestCandidateRejects(t *testing.T) {
 	f.Personal = true
 	mustReject(t, pureRoam(), f, "私人池", "私人池")
 
-	// —— 反例 6：当日卡死熔断 ——
+	// —— 反例 6：当日卡死熔断（2026-10-14 语义反转：熔断号改走"止损换出"通道，
+	// 不再一概拒绝 —— 满足物理护栏即换出、豁免产能类判据，完整矩阵见
+	// TestCandidateCappedStopLoss；这里只留一条"物理护栏仍拦"的示例）——
 	r = pureRoam()
 	r.RestoreCapped = true
-	mustReject(t, r, baseFacts(), "当日卡死熔断", "熔断")
+	r.Online = false
+	mustReject(t, r, baseFacts(), "离线", "熔断+离线")
 
 	// —— 反例 7：在线不足 30 分钟（边界 29m59s 拒 / 30m 整过）——
 	f = baseFacts()
@@ -148,6 +151,90 @@ func TestCandidateRejects(t *testing.T) {
 	f = baseFacts()
 	f.Reghosting = true
 	mustReject(t, pureRoam(), f, "自动重登处理中", "自动重登处理中")
+}
+
+// ---------------------------------------------------------------- 熔断号止损换出（2026-10-14）
+
+// 背景：当日卡死熔断（capped，到次日 0 点才释放）的号当天已无产出能力（不再重登/不补发/
+// 不进任何候选），留在线上只占在线位发呆。新语义：熔断号只要"物理护栏"过关即可换出，
+// **豁免**满额/纯游荡/战斗/抓鬼会话/领双等产能类判据；未熔断号的既有条件一字未动（对照）；
+// 离线/私池/移除/暂停/队伍/孵化/在线<30min 等物理护栏对熔断号同样保留。
+func TestCandidateCappedStopLoss(t *testing.T) {
+	// 熔断 + IDLE（无 walk 块、无抓鬼会话）+ 未满额 的"废号"形态。
+	cappedIdle := func() state.Robot {
+		r := pureRoam()
+		r.RestoreCapped = true
+		r.Walk = nil
+		r.Ghost = map[string]any{"done": 0, "limit": 50, "enabled": false, "count_date": testToday}
+		return r
+	}
+	notFull := Facts{GhostFull: false, OnlineFor: 31 * time.Minute}
+
+	// —— 正例 a：熔断 + 未满额 + IDLE → 可换出 ——
+	mustPass(t, cappedIdle(), notFull, "熔断+未满额+IDLE（止损换出）")
+
+	// —— 对照：未熔断的同状态 → 按既有条件拒（证明上例放行源自熔断豁免）——
+	r := pureRoam()
+	r.Walk = nil
+	r.Ghost = map[string]any{"done": 0, "limit": 50, "enabled": false, "count_date": testToday}
+	mustReject(t, r, notFull, "今日抓鬼未满", "未熔断+未满额+IDLE（对照）")
+
+	// —— 正例：熔断 + 战斗中 → 可换出（状态可能停在 FIGHT；今天已废不阻止换出）——
+	r = pureRoam()
+	r.RestoreCapped = true
+	r.Fight = true
+	mustPass(t, r, baseFacts(), "熔断+战斗中")
+	// 对照：未熔断 + 战斗中 → 拒（既有语义）
+	r = pureRoam()
+	r.Fight = true
+	mustReject(t, r, baseFacts(), "战斗中", "未熔断+战斗中（对照）")
+
+	// —— 正例：熔断 + 抓鬼会话活跃 + 不在游荡 + 领双未用 → 全豁免 ——
+	r = pureRoam()
+	r.RestoreCapped = true
+	r.Ghost = map[string]any{"done": 10, "limit": 50, "enabled": true, "count_date": testToday}
+	r.Walk = nil
+	r.DoubleClaimDate = "20261011"
+	f := baseFacts()
+	f.GhostFull = false
+	mustPass(t, r, f, "熔断+抓鬼会话活跃+不在游荡+领双未用（豁免）")
+
+	// —— 物理护栏（保留，熔断号同样受约束）——
+	// 私人池：绝不换
+	f = baseFacts()
+	f.Personal = true
+	mustReject(t, cappedIdle(), f, "私人池", "熔断+私人池")
+	// 离线：不是候选
+	r = cappedIdle()
+	r.Online = false
+	mustReject(t, r, baseFacts(), "离线", "熔断+离线")
+	// 已在移除名单
+	f = baseFacts()
+	f.Removed = true
+	mustReject(t, cappedIdle(), f, "已在移除名单", "熔断+已在移除名单")
+	// 人工暂停
+	r = cappedIdle()
+	r.Paused = true
+	mustReject(t, r, baseFacts(), "人工暂停", "熔断+人工暂停")
+	// 队伍（块存在即视为在队；不拆队）
+	r = cappedIdle()
+	r.Team = map[string]any{"role": "member", "captain_role_id": 1001}
+	mustReject(t, r, baseFacts(), "在队伍中", "熔断+在队伍中")
+	// 孵化中（不误伤进行中的孵化）
+	r = cappedIdle()
+	r.Hatch = map[string]any{"active": true, "kind": "egg"}
+	mustReject(t, r, baseFacts(), "孵化中", "熔断+孵化中")
+	// 在线 ≥30 分钟（防闪断号被换；边界口径同既有）
+	f = baseFacts()
+	f.OnlineFor = MinOnline - time.Second
+	mustReject(t, cappedIdle(), f, "在线不足", "熔断+在线 29m59s")
+	f = baseFacts()
+	f.OnlineFor = MinOnline
+	mustPass(t, cappedIdle(), f, "熔断+在线 30m 整（边界）")
+	// 自动重登处理中（防御：capped 是终态，正常不与之共存）
+	f = baseFacts()
+	f.Reghosting = true
+	mustReject(t, cappedIdle(), f, "自动重登处理中", "熔断+重登处理中")
 }
 
 // ---------------------------------------------------------------- 限速
@@ -305,6 +392,49 @@ func TestPlanReasonsCollected(t *testing.T) {
 	}
 	if len(res.Batch) != 1 || res.Batch[0] != "a@xy3.com" {
 		t.Fatalf("应只有 a 下线：%+v", res)
+	}
+}
+
+// Plan 层：熔断候选经"止损换出"通道进入 Batch，CappedOut 只回收 Batch 内的熔断号
+// （壳层日志措辞/事件 capped_out 字段的数据源，2026-10-14）。
+func TestPlanCappedStopLossCollected(t *testing.T) {
+	now := time.Date(2026, 10, 14, 10, 0, 0, 0, time.Local)
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	snap := fakeSnap(2)
+	// a：正常满额+纯游荡（既有通道）；b：熔断+未满额+IDLE（止损换出通道）。
+	snap[1].RestoreCapped = true
+	snap[1].Walk = nil
+	facts := func(acc string) Facts {
+		if acc == "b@xy3.com" {
+			return Facts{GhostFull: false, OnlineFor: 31 * time.Minute}
+		}
+		return baseFacts()
+	}
+	var q HourQuota
+	res := Plan(now, cfg, snap, facts, testToday, 100, &q)
+	if len(res.Batch) != 2 || res.Batch[1] != "b@xy3.com" {
+		t.Fatalf("熔断号应随止损通道进入 Batch（=2）：%+v", res)
+	}
+	if len(res.CappedOut) != 1 || res.CappedOut[0] != "b@xy3.com" {
+		t.Fatalf("CappedOut 应只含熔断号 b：%v", res.CappedOut)
+	}
+	if _, ok := res.Reasons["b@xy3.com"]; ok {
+		t.Fatalf("熔断号不应出现在 Reasons：%v", res.Reasons)
+	}
+	// 额度截断（perHour=1 → keep=1）：b 被截到排队 → CappedOut 只回填真正下线的部分（空）。
+	var q2 HourQuota
+	cfg1 := cfg
+	cfg1.PerHour = 1
+	res = Plan(now, cfg1, snap, facts, testToday, 100, &q2)
+	if len(res.Batch) != 1 || res.Batch[0] != "a@xy3.com" {
+		t.Fatalf("额度 1 时应先下 a：%+v", res)
+	}
+	if len(res.CappedOut) != 0 {
+		t.Fatalf("截断后 CappedOut 应为空（b 只在排队里）：%v", res.CappedOut)
+	}
+	if res.Queued != 1 {
+		t.Fatalf("应排队 1：%+v", res)
 	}
 }
 

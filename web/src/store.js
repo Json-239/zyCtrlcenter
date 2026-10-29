@@ -28,6 +28,7 @@ export const state = reactive({
     svr_online: {},      // 全服在线读数（count/ts/age_sec/source；source=local 表示没有服务端读数）
     stagger: null,       // 错峰抓鬼摘要（新后端才有：enabled/per_hour/sample_pct；缺=未知）
     rescue48: null,      // RESCUE48 救援摘要（新后端才有：enabled/today/last_tick；缺=未知）
+    robot_guard: null,   // 机器人内存护栏摘要（2026-10-27：mem_mb/uptime_h/last_restart_at；缺=未知）
   },
   statusError: '',
   wsConnected: false,
@@ -130,6 +131,7 @@ function mergeStatus(next) {
   st.restore_capped = next?.restore_capped || st.restore_capped
   st.stagger = next?.stagger || st.stagger        // 新后端才有；旧后端恒为 null（面板显示"未知"）
   st.rescue48 = next?.rescue48 || st.rescue48     // 同上
+  st.robot_guard = next?.robot_guard || st.robot_guard // 同上（机器人内存护栏）
 }
 
 export async function refreshStatus() {

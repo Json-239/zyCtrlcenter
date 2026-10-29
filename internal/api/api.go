@@ -85,6 +85,7 @@ import (
 	"zyctrlcenter/internal/services/accounts"
 	"zyctrlcenter/internal/services/autotask"
 	"zyctrlcenter/internal/services/event"
+	"zyctrlcenter/internal/services/instances"
 	"zyctrlcenter/internal/services/livecount"
 	"zyctrlcenter/internal/services/process"
 	"zyctrlcenter/internal/services/reghost"
@@ -126,6 +127,9 @@ type Deps struct {
 	// 启用且读到数时，/api/status.svr_online 与水位保持器优先用它（source=svr_provider），
 	// 失败/过期回落到机器人 @online 回执（source=svr）→ 本地握手数。
 	LiveCount *livecount.Provider
+	// Instances 多实例注册表与生命周期操作（2026-10-14 实例管理页 V1；可为 nil：
+	// 注册表加载失败时接口回 503；main 用 LoadInstances 装配，见 instances.go）。
+	Instances *instances.Service
 	// Payloads 链数据载荷提供者（可为 nil：按 Cfg 懒建。与 restorer 共用同一份缓存时显式注入）
 	Payloads *Payloads
 	Events   *event.Handler
@@ -173,6 +177,9 @@ type API struct {
 	// data/rotation.json（到龄自动解除移除回池）。rotationMu 只护懒建。
 	rotationMu sync.Mutex
 	rotation   *rotationRuntime
+	// guard 机器人内存护栏运行态（2026-10-27，见 robotguard.go）：
+	// 按 max(工作集, 提交量) 分级，低峰窗口/紧急阈值重启机器人，防 1.1GB/天泄漏耗尽主机内存。
+	guard *robotGuardState
 }
 
 // New 创建 API。
@@ -277,6 +284,15 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/personal/add", a.requireToken(a.handlePersonalAdd))
 	mux.HandleFunc("POST /api/personal/remove", a.requireToken(a.handlePersonalRemove))
 	mux.HandleFunc("POST /api/personal/task", a.requireToken(a.handlePersonalTask))
+	// 2026-10-14 实例管理（多实例注册表 <exe目录>/instances.json；**仅本机** + 写操作 requireToken；
+	// 实现见 instances.go：进程定位只按 ctrl_match/ExecutablePath，绝不 taskkill /IM）
+	mux.HandleFunc("GET /api/ping", a.localOnly(a.handlePing)) // 超轻探活（watchdog 用）
+	mux.HandleFunc("GET /api/instances", a.requireToken(a.localOnly(a.handleInstancesList)))
+	mux.HandleFunc("POST /api/instances", a.requireToken(a.localOnly(a.handleInstancesCreate)))
+	mux.HandleFunc("POST /api/instances/{id}/start", a.requireToken(a.localOnly(a.handleInstanceStart)))
+	mux.HandleFunc("POST /api/instances/{id}/stop", a.requireToken(a.localOnly(a.handleInstanceStop)))
+	mux.HandleFunc("POST /api/instances/{id}/restart", a.requireToken(a.localOnly(a.handleInstanceRestart)))
+	mux.HandleFunc("DELETE /api/instances/{id}", a.requireToken(a.localOnly(a.handleInstanceDelete)))
 	mux.HandleFunc("/ws", a.handleWS)
 }
 

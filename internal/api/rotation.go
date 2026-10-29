@@ -3,6 +3,8 @@
 // 引擎在 internal/services/rotation（纯决策：候选过滤/限速/名单/持久化，可单测）；
 // 这里只负责把"真实世界"接上：
 //   - 取数：当前机器人快照（判"纯游荡/满额/队伍/暂停/熔断"；口径同 rescue48/waterline）；
+//   - 熔断号止损（2026-10-14）：当日卡死熔断的号当天无产出能力 → 满足物理护栏即换出
+//     （判据全在 rotation.Candidate；本壳层不额外过滤，仅日志/事件按 CappedOut 区分措辞）；
 //   - 预备队：账号池"当前区可用 且 离线 且 毕业（level≥31）"的号数（ROTATION_MIN_RESERVE 保护）；
 //   - 执行：**复用批量下线/水位器压号的同一条通路**（handlers_accounts.go sendOfflineChunks：
 //     cancelRegHost + MarkRemoved + 删行 + 分批 robot_manage remove）——绝不绕开 MarkRemoved；
@@ -157,7 +159,8 @@ func (a *API) rotationReserveCount() int {
 }
 
 // rotationReghostSet 正在"自动重登恢复"处理中的号集合（等待离线/在线/补发三相位才叫处理中；
-// done/failed/capped 不算——capped 号已被快照的 RestoreCapped 判据挡住）。
+// done/failed/capped 不算——capped 是终态：2026-10-14 起改由候选侧"熔断号止损换出"通道处理，
+// 见 rotation.Candidate）。
 func (a *API) rotationReghostSet() map[string]bool {
 	if a.Reghost == nil {
 		return nil
@@ -255,7 +258,15 @@ func (a *API) rotationTick(now time.Time) {
 	rt.mu.Unlock()
 	a.logRotationFlip(rt, now, "下线 %d 个（sent %d/%d 批；排队 %d；预备队 %d）",
 		len(res.Batch), len(sent), chunks, res.Queued, reserve)
-	a.Log.Printf("[ROTATION] 轮换下线 %d 个（已满额+纯游荡）：%s", len(res.Batch), rotation.Summary(res.Batch, 10))
+	// 2026-10-14 熔断号止损换出：含熔断号时用单独措辞（便于观测），并单列止损名单。
+	if n := len(res.CappedOut); n > 0 {
+		a.Log.Printf("[ROTATION] 轮换下线 %d 个（含 %d 个当日卡死熔断·止损）：%s",
+			len(res.Batch), n, rotation.Summary(res.Batch, 10))
+		a.Log.Printf("[ROTATION] 熔断·止损换出（当日已无产出能力，换预备队止损）：%s",
+			rotation.Summary(res.CappedOut, 10))
+	} else {
+		a.Log.Printf("[ROTATION] 轮换下线 %d 个（已满额+纯游荡）：%s", len(res.Batch), rotation.Summary(res.Batch, 10))
+	}
 	if len(sent) < len(res.Batch) {
 		a.Log.Printf("[ROTATION] 警告：remove 只送达 %d/%d（本地已标记移除；机器人端可能仍在线，下次 hello/运维核对）",
 			len(sent), len(res.Batch))
@@ -263,7 +274,7 @@ func (a *API) rotationTick(now time.Time) {
 	if a.Store != nil {
 		a.Store.LogEvent(map[string]any{"type": "api", "action": "rotation_offline",
 			"zone": a.currentZoneKey(), "accounts": res.Batch, "sent": len(sent), "chunks": chunks,
-			"queued": res.Queued, "reserve": reserve})
+			"queued": res.Queued, "reserve": reserve, "capped_out": res.CappedOut})
 	}
 }
 

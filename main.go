@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // 2026-10-28 按需 pprof（CTRL_PPROF=1 时监听 127.0.0.1:6060）
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -256,6 +257,16 @@ func main() {
 	go webAPI.Reghost.Run(ctx)
 	webAPI.LoadAutoTask() // 恢复上次的定时任务参数（保持数/间隔/启用状态；2026-09-21 落盘）
 
+	// ---- 实例管理（2026-10-14：多实例注册表 <exe目录>/instances.json；实例管理页 V1 后端）----
+	// 加载失败仅禁用实例管理接口（其余功能不受影响）；文件不存在时以"本进程自身"种子落盘。
+	if seeded, err := webAPI.LoadInstances(); err != nil {
+		log.Printf("[INSTANCES] 注册表加载失败（实例管理接口不可用）: %v", err)
+	} else if seeded {
+		log.Printf("[INSTANCES] 首次启动：已以本进程写入种子实例 → %s", webAPI.Instances.RegistryPath())
+	} else {
+		log.Printf("[INSTANCES] 注册表已加载: %s（%d 个实例）", webAPI.Instances.RegistryPath(), webAPI.Instances.Count())
+	}
+
 	// ---- 服务端在线数直连数据源（参考 game_admin_web origin/hqm 的 /gm/online；默认关）----
 	// 中控直接 HTTP 拉游戏服在线数（不需要 GM 授权），读到后 /api/status.svr_online 与在线水位
 	// 保持器优先用它（source=svr_provider）；失败/过期自动回落 @online 回执 → 本地握手数。
@@ -297,6 +308,28 @@ func main() {
 	//     开关 CTRL_ROTATION（默认关，关闭时仅执行到龄回池）；名单落盘 data/rotation.json。
 	//     实现见 internal/api/rotation.go + internal/services/rotation。----
 	go webAPI.StartRotation(ctx)
+
+	// ---- 机器人内存护栏（2026-10-27）：机器人 commit 约 1.1GB/天泄漏（实测 4 天 4.52GB），
+	//     叠加主机其它大进程会耗尽虚拟内存（WER 2004）→ 中控退出/全队重登。
+	//     按 max(工作集, 提交量) 分级：告警 → 低峰窗口重启 → 紧急重启；
+	//     开关 CTRL_ROBOT_GUARD（默认开），阈值/窗口见 internal/config/config.go。----
+	go webAPI.StartRobotGuard(ctx)
+
+	// ---- 取证加固（2026-10-28）：心跳文件每 5s 原子写 logs/heartbeat.json ----
+	//     背景：10-28 14:13 中控静默死亡（无 FATAL / stderr 0 字节 / 无系统事件），
+	//     事后无法区分"进程卡死"还是"被强制终止"。心跳带 pid/uptime/goroutines/online，
+	//     死亡后看最后一条是否停在死亡前、goroutine 数是否异常。
+	go webAPI.StartHeartbeat(ctx)
+
+	// 按需 pprof（默认关）：卡住时人工 curl 127.0.0.1:6060/debug/pprof/goroutine?debug=2。
+	if cfg.PprofEnabled {
+		go func() {
+			log.Printf("[PPROF] 调试端口已启动: http://127.0.0.1:6060/debug/pprof/")
+			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+				log.Printf("[PPROF] 启动失败: %v", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{Handler: webAPI.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	// 注：ln 已在本函数前部预绑定（「HTTP 端口预检」）：端口被占用时更早 FATAL 退出。

@@ -212,6 +212,17 @@ const cappedDlg = ref(false)
 // 2026-10-12 可见性补齐：错峰抓鬼 / RESCUE48 摘要（新后端才有；旧后端缺字段 → null → 显示"未知"）
 const stagger = computed(() => state.status.stagger || null)
 const rescue48 = computed(() => state.status.rescue48 || null)
+// 2026-10-27 机器人内存护栏（新后端才有）：mem_mb 超阈值时标签变色，提示即将/已触发低峰重启。
+const robotGuard = computed(() => state.status.robot_guard || null)
+const guardMemType = computed(() => {
+  const g = robotGuard.value
+  if (!g) return 'info'
+  const mem = Number(g.mem_mb) || 0
+  const t = g.thresholds || {}
+  if (mem >= (Number(t.urgent_mb) || 3200)) return 'danger'
+  if (mem >= (Number(t.warn_mb) || 1800)) return 'warning'
+  return 'success'
+})
 // 时间字段兼容（cap_until 是 RFC3339 字符串；也容忍 unix 秒/毫秒数值）：
 // tsSec → 秒；tsText 绝对时间（弹窗明细用）；tsAgoText 相对时间（卡片摘要用）
 function tsSec(v) {
@@ -1264,6 +1275,20 @@ const ghostStaleAlert = computed(() => {
           </el-tag>
           <b class="v">{{ rescue48.today ?? 0 }}</b><span class="k">今日</span>
           <span class="k" v-if="rescue48.last_tick">· 上次 {{ tsAgoText(rescue48.last_tick) }}</span>
+        </template>
+        <span v-else class="muted">未知（需新后端）</span>
+      </div>
+      <!-- 2026-10-27 机器人内存护栏：mem 接近阈值变黄/红，低峰窗口自动重启（全体重登） -->
+      <div class="metric">
+        <span class="k">机器人内存</span>
+        <template v-if="robotGuard">
+          <el-tag size="small" :type="robotGuard.enabled ? guardMemType : 'info'" effect="plain" disable-transitions>
+            {{ robotGuard.enabled ? (robotGuard.dry_run ? '观察' : '护') : '关' }}
+          </el-tag>
+          <b class="v">{{ robotGuard.mem_mb ?? '--' }}</b><span class="k">MB</span>
+          <span class="k">· 运行</span><b class="v">{{ robotGuard.uptime_h ?? '--' }}</b><span class="k">h</span>
+          <span class="k" v-if="robotGuard.last_restart_at">· 上次重启 {{ tsAgoText(robotGuard.last_restart_at) }}</span>
+          <span class="k" v-else-if="robotGuard.restarts_today > 0">· 今日 {{ robotGuard.restarts_today }} 次</span>
         </template>
         <span v-else class="muted">未知（需新后端）</span>
       </div>

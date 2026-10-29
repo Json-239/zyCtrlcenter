@@ -36,6 +36,13 @@ type Manager struct {
 	exited bool
 	waitCh chan struct{}
 
+	// restartMu 串行化重启：内存护栏与手动 /api/robot/restart 并发时，
+	// 避免 Stop/EnsureRunning 交错出两个进程（2026-10-27 内存护栏配套）。
+	restartMu sync.Mutex
+
+	// statRun 采样执行器（测试注入；nil=真实 PowerShell，见 stat.go）。
+	statRun statRunner
+
 	// RunningAny 缓存（tasklist 有开销，面板 3 秒轮询不能每次都查系统进程）
 	lastAnyCheck time.Time
 	lastAnyValue bool
@@ -184,7 +191,10 @@ func (m *Manager) Stop(killOrphans bool) bool {
 }
 
 // Restart 重启机器人（killOrphans 控制是否清理同名残留）。
+// 串行化：护栏/面板/配置应用同时触发时只跑一次，避免双启。
 func (m *Manager) Restart(killOrphans bool) error {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
 	m.Stop(killOrphans)
 	time.Sleep(500 * time.Millisecond)
 	return m.EnsureRunning()

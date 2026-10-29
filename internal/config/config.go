@@ -256,6 +256,29 @@ type Config struct {
 
 	// RobotImageName 进程镜像名（Windows 下用于 tasklist/taskkill）。
 	RobotImageName string
+
+	// ---- 机器人内存护栏（2026-10-27）----
+	// 背景：机器人单进程承载全部账号，commit 约 1.1GB/天泄漏（4 天涨到 4.5GB），
+	// 曾与主机其它大进程一起耗尽虚拟内存（WER 2004）导致中控退出、全队重登。
+	// 护栏按 max(工作集, 提交量) 分级：告警 → 低峰窗口重启 → 紧急重启；
+	// 重启机器人=全体账号重登（约 5-15 分钟产出损失），所以低峰优先。
+	RobotGuard            bool   // 总开关（默认开：故障已复现且 4-5 天必发）
+	RobotGuardDryRun      bool   // 只采样告警、不真重启（首日观察用）
+	RobotGuardIntervalSec int    // 采样间隔（秒，默认 300）
+	RobotGuardWarnMB      int    // 告警阈值（MB）
+	RobotGuardQuietMB     int    // 低峰重启阈值（MB）
+	RobotGuardUrgentMB    int    // 紧急重启阈值（MB，任何时段）
+	RobotGuardQuietStart  string // 低峰窗口开始（本地时间 HH:MM）
+	RobotGuardQuietEnd    string // 低峰窗口结束（HH:MM；start==end=关闭窗口）
+	RobotGuardMaxUptimeH  int    // 运行时长兜底（小时，0=关；仅低峰窗口执行）
+	RobotGuardCooldownMin int    // 重启冷却（分钟，防重启风暴）
+
+	// ---- 中控取证加固（2026-10-28）----
+	// 背景：10-28 14:13 中控静默死亡（无 FATAL / stderr 0 字节 / 无系统事件），
+	// 无法区分"进程卡死"还是"被强制终止"。心跳文件每 5s 原子写
+	// logs/heartbeat.json（pid/uptime/goroutines/online），死亡后看最后心跳与 goroutine 数。
+	HeartbeatEnabled bool // 心跳文件（默认开）
+	PprofEnabled     bool // 按需 pprof（默认关；卡住时人工抓 goroutine dump）
 }
 
 // CtrlAddr 控制通道地址（host:port）。
@@ -403,6 +426,21 @@ func build(base string, opts *cliOpts) *Config {
 		RotationPerHour:    envInt("CTRL_ROTATION_PER_HOUR", 30),
 		RotationMinReserve: envInt("CTRL_ROTATION_MIN_RESERVE", 50),
 		RotationKeepHours:  envInt("CTRL_ROTATION_KEEP_HOURS", 24),
+		// 2026-10-27 机器人内存护栏（默认开）：commit 约 1.1GB/天泄漏，
+		// 超过阈值在低峰窗口（默认 05:00-06:30）重启机器人；紧急阈值任何时段。
+		RobotGuard:            envBool("CTRL_ROBOT_GUARD", true),
+		RobotGuardDryRun:      envBool("CTRL_ROBOT_GUARD_DRYRUN", false),
+		RobotGuardIntervalSec: envInt("CTRL_ROBOT_GUARD_INTERVAL_SEC", 300),
+		RobotGuardWarnMB:      envInt("CTRL_ROBOT_GUARD_WARN_MB", 1800),
+		RobotGuardQuietMB:     envInt("CTRL_ROBOT_GUARD_QUIET_MB", 2200),
+		RobotGuardUrgentMB:    envInt("CTRL_ROBOT_GUARD_URGENT_MB", 3200),
+		RobotGuardQuietStart:  env("CTRL_ROBOT_GUARD_QUIET_START", "05:00"),
+		RobotGuardQuietEnd:    env("CTRL_ROBOT_GUARD_QUIET_END", "06:30"),
+		RobotGuardMaxUptimeH:  envInt("CTRL_ROBOT_GUARD_MAX_UPTIME_H", 96),
+		RobotGuardCooldownMin: envInt("CTRL_ROBOT_GUARD_COOLDOWN_MIN", 180),
+		// 2026-10-28 取证加固：心跳文件（默认开）+ 按需 pprof（默认关）。
+		HeartbeatEnabled: envBool("CTRL_HEARTBEAT", true),
+		PprofEnabled:     envBool("CTRL_PPROF", false),
 		// 服务端在线数直连数据源（默认关；启用需同时给 CTRL_LIVECOUNT_URL）
 		LiveCountEnabled:     envBool("CTRL_LIVECOUNT_ENABLED", false),
 		LiveCountURL:         env("CTRL_LIVECOUNT_URL", ""),

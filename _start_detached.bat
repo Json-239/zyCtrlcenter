@@ -26,6 +26,9 @@ REM   worked without it - see docs P0-1 of 20260929 shenbu analysis).
 set CTRL_SHARE_DAILY=1
 REM 2026-10-12 owner-approved: stagger ghost starts across 18h (hash by account).
 set CTRL_GHOST_STAGGER=1
+REM 2026-10-14 sync: rotation env (was only in warm scripts; full-start must carry it).
+set CTRL_ROTATION=1
+set CTRL_ROTATION_KEEP_HOURS=8
 
 REM Live server online count (livecount). Disabled per owner's decision 2026-09-22:
 REM   GET http://<game-server>:8080/gm/online -> {"online_count":N,"success":true,"serverId":1000}
@@ -36,4 +39,5 @@ set CTRL_LIVECOUNT_ENABLED=0
 set CTRL_LIVECOUNT_URL=http://47.96.8.240:8080
 set CTRL_LIVECOUNT_SERVER_ID=1000
 
-start "zyctrlcenter" /min "F:\ZyBin\zyCtrlcenter\zyctrlcenter.exe" --deploy "F:\ZyBin\xm\2d-xiyou-server\robot\deploy\single_robot_zy" --auto-robot
+REM 2026-10-23: launch via wrapper to capture stderr (silent-death forensics).
+start "zyctrlcenter" /min cmd /c "F:\ZyBin\zyCtrlcenter\_run_ctrl_console.bat"

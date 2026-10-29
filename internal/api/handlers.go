@@ -101,6 +101,10 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s := a.Rescue48Summary(); s != nil {
 		resp["rescue48"] = s
 	}
+	// 机器人内存护栏摘要（2026-10-27）：pid/mem/uptime/阈值/上次重启。
+	if s := a.RobotGuardSummary(); s != nil {
+		resp["robot_guard"] = s
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
